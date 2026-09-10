@@ -131,3 +131,25 @@ DESKTOP_UNCHANGED_OK
 其余要求全部实测通过，明细见上一节。
 
 
+
+---
+
+# 第二轮：底部 Dock ＋ 设置面板（2026-09-11）
+
+## 任务 0 开工回执
+
+**理解的目标**：屏幕底部一条 Nexus 式磨砂 Dock，悬浮自动隐藏（不做 AppBar），鼠标进底部热区滑出、离开收起；自动收录桌面 `.lnk`/`.url`/`.exe` 且可拖入/排序/移除；再加一个磨砂设置面板，改完立即生效并落盘；原有能力一条不许回退。
+
+**顺序**：任务 1 Dock 骨架与热区（纯逻辑先写、`should_reveal` 必须纯函数）→ 任务 2 图标与收录 → 任务 3 设置面板（含旧配置字段不丢）→ 任务 4 托盘接线＋打包＋三物同框截图。
+
+**最大风险**：三条都没验证过的猜想——① `QCursor.pos()` 轮询热区是否够跟手（不装钩子、不提权）；② 置顶悬浮窗口做滑出/滑入动画时会不会闪或残影；③ 全屏判定（`GetForegroundWindow` 矩形 vs 显示器矩形）在这台机器上准不准，判错会导致看视频时 Dock 乱弹（这是「不打扰」优先级高于「好看」的直接体现）。
+
+**让步顺序**：不丢/不改用户文件 > 不打扰（不挡全屏、不抢焦点）> 好看 > 功能全 > 快。
+
+## 任务 0 基线复跑（与任务书数字一致）
+
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -m pytest tests -rs` → `146 passed in 2.76s`
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe main.py --selftest` → `SELFTEST_OK_probe 460 200` / `OK_drop 1` / `OK_basket 5` / `OK_explorer 5`，rc=0
+- `dist\DeskBasket.exe` = 36.6 MB，`--selftest` → `SELFTEST_OK_probe 690 300` / `OK_drop 1` / `OK_basket 5` / `OK_explorer 5`，`ExitCode=0`
+
+三条全部对上，未发现与任务书不符之处，不需要写 BLOCKED。

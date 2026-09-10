@@ -22,12 +22,20 @@ ACCENT_LABELS = {
 }
 
 ICON_SIZE_MIN, ICON_SIZE_MAX = 24, 128
+DOCK_HIDE_DELAY_MIN, DOCK_HIDE_DELAY_MAX = 100, 3000
+DOCK_HIDE_DELAY_DEFAULT = 400
 
 DEFAULTS = {
     "accent_mode": "acrylic",   # acrylic / blur
     "autostart": False,         # 开机自启动（HKCU Run）
     "icon_size": 48,            # 筐内图标边长（像素）
     "baskets": [],              # 筐列表，见 baskets.normalize_baskets
+    # 第二轮：底部 Dock
+    "dock_enabled": True,               # Dock 总开关
+    "dock_icon_size": 48,               # Dock 图标边长
+    "dock_hide_delay_ms": DOCK_HIDE_DELAY_DEFAULT,  # 鼠标离开后多久收起
+    "dock_items": [],                   # Dock 条目（有序，见 dockmodel）
+    "dock_removed": [],                 # 用户手动移除过的条目，永不再自动收录
 }
 
 
@@ -60,23 +68,73 @@ def _coerce_bool(value, default):
     return value if isinstance(value, bool) else default
 
 
-def _coerce_icon_size(value):
+def _coerce_bounded_int(value, default, low, high):
     if isinstance(value, bool) or not isinstance(value, int):
-        return DEFAULTS["icon_size"]
-    if ICON_SIZE_MIN <= value <= ICON_SIZE_MAX:
+        return default
+    if low <= value <= high:
         return value
-    return DEFAULTS["icon_size"]
+    return default
+
+
+def _coerce_icon_size(value):
+    return _coerce_bounded_int(
+        value, DEFAULTS["icon_size"], ICON_SIZE_MIN, ICON_SIZE_MAX
+    )
+
+
+def _coerce_dock_icon_size(value):
+    return _coerce_bounded_int(
+        value, DEFAULTS["dock_icon_size"], ICON_SIZE_MIN, ICON_SIZE_MAX
+    )
+
+
+def _coerce_hide_delay(value):
+    return _coerce_bounded_int(
+        value, DEFAULTS["dock_hide_delay_ms"], DOCK_HIDE_DELAY_MIN, DOCK_HIDE_DELAY_MAX
+    )
+
+
+def normalize_path_list(raw):
+    """把任意输入归一化成去重后的绝对路径列表（保持原顺序）。"""
+    result = []
+    seen = set()
+    if not isinstance(raw, list):
+        return result
+    for entry in raw:
+        path = baskets_mod.normalize_path(entry)
+        if path is None:
+            continue
+        key = baskets_mod.path_key(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
 
 
 def merged_settings(raw):
-    """把任意来源的 dict 合并到缺省值上：缺字段补默认，类型不对回退默认。"""
+    """把任意来源的 dict 合并到缺省值上：缺字段补默认，类型不对回退默认。
+
+    **不认识的字段原样保留**：这样老版本读新版本写的配置不会把字段吃掉，
+    配置在版本间来回读写也不会丢东西。
+    """
     result = dict(DEFAULTS)
     if not isinstance(raw, dict):
         return result
+    for key, value in raw.items():
+        if key not in DEFAULTS:
+            result[key] = value
     result["accent_mode"] = normalize_accent_mode(raw.get("accent_mode"))
     result["autostart"] = _coerce_bool(raw.get("autostart"), DEFAULTS["autostart"])
     result["icon_size"] = _coerce_icon_size(raw.get("icon_size"))
     result["baskets"] = baskets_mod.normalize_baskets(raw.get("baskets"))
+    result["dock_enabled"] = _coerce_bool(
+        raw.get("dock_enabled"), DEFAULTS["dock_enabled"]
+    )
+    result["dock_icon_size"] = _coerce_dock_icon_size(raw.get("dock_icon_size"))
+    result["dock_hide_delay_ms"] = _coerce_hide_delay(raw.get("dock_hide_delay_ms"))
+    result["dock_items"] = normalize_path_list(raw.get("dock_items"))
+    result["dock_removed"] = normalize_path_list(raw.get("dock_removed"))
     return result
 
 

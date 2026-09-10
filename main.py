@@ -22,11 +22,14 @@ import acrylic
 import autostart
 import baskets
 import desktoplayer
+import dock_window
+import dockmodel
 import dropfiles
 import fileicons
 import frosted_window
 import settings
 from basket_window import BasketWindow
+from dock_window import DockWindow
 from explorer_window import ExplorerWindow
 from frosted_window import LAYER_TOP, LAYER_WINDOW, FrostedWindow
 
@@ -858,10 +861,7 @@ def run_app(argv):
 
 
 def run_screenshot(argv):
-    """真机截图取证：显示筐（和浏览器窗口）后抓整屏。"""
-    from basket_window import BasketWindow
-    from explorer_window import ExplorerWindow
-
+    """真机截图取证：显示筐、内置浏览器窗口、滑出的 Dock 后抓整屏。"""
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName(APP_NAME)
     state = DeskBasketApp(app, demo_fill=12)
@@ -903,11 +903,105 @@ def run_autostart_cli(argv):
     return 0
 
 
+def collect_desktop_shortcuts(limit=None):
+    """桌面上可自动收录的快捷方式（只读目录列表）。"""
+    found = [path for path in desktop_items() if dockmodel.is_collectable(path)]
+    return found[:limit] if limit else found
+
+
+def run_dock_selftest(argv):
+    """Dock 自检：热区决策、全屏拦截、滑出/收起位置、条目渲染。退出码 0 通过。"""
+    app = QApplication.instance() or QApplication(argv)
+    app.setApplicationName(APP_NAME)
+
+    cache = fileicons.IconCache(size=48)
+    items = collect_desktop_shortcuts(limit=6)
+    workdir = None
+    if not items:
+        # 桌面没有可收录的快捷方式时用临时文件顶上，保证自检仍然有效
+        workdir = tempfile.mkdtemp(prefix="deskbasket-dock-")
+        for _ in range(3):
+            handle, path = tempfile.mkstemp(dir=workdir, suffix=".lnk")
+            os.close(handle)
+            items.append(path)
+
+    dock = DockWindow(cache, on_changed=None)
+    dock.set_items(items)
+    dock.show()
+    app.processEvents()
+    effective = dock.apply_effects()
+
+    screen = dock._screen_rect()
+    if screen is None:
+        print("DOCK_FAIL 取不到屏幕矩形", flush=True)
+        return 1
+    size = (dock.width(), dock.height())
+    shown_rect = dockmodel.revealed_geometry(screen, size, margin=dock_window.BAR_MARGIN)
+    hidden_rect = dockmodel.hidden_geometry(screen, size)
+
+    # 滑出 / 收起必须真的把窗口挪到两个不同位置
+    dock.set_revealed(True, animate=False)
+    app.processEvents()
+    y_shown = dock.y()
+    dock.set_revealed(False, animate=False)
+    app.processEvents()
+    y_hidden = dock.y()
+    if y_shown != shown_rect[1] or y_hidden != hidden_rect[1]:
+        print(
+            "DOCK_FAIL 位置不符：shown=%s(期望 %s) hidden=%s(期望 %s)"
+            % (y_shown, shown_rect[1], y_hidden, hidden_rect[1]),
+            flush=True,
+        )
+        return 1
+    if y_hidden < screen[3]:
+        print("DOCK_FAIL 收起后仍在屏幕可视区内 y=%d" % y_hidden, flush=True)
+        return 1
+
+    # 全屏程序前不许弹；桌面本身和最大化窗口都不算全屏程序
+    fullscreen_block = dockmodel.foreground_blocks_dock(
+        screen, screen, "Chrome_WidgetWin_1"
+    )
+    desktop_block = dockmodel.foreground_blocks_dock(screen, screen, "Progman")
+    maximized_block = dockmodel.foreground_blocks_dock(
+        screen, screen, "Chrome_WidgetWin_1", maximized=True
+    )
+    if not fullscreen_block or desktop_block or maximized_block:
+        print(
+            "DOCK_FAIL 全屏判定不对：全屏拦截=%s 桌面误拦=%s 最大化误拦=%s"
+            % (fullscreen_block, desktop_block, maximized_block),
+            flush=True,
+        )
+        return 1
+
+    # 热区决策：在热区该弹，全屏时即使鼠标在热区也不弹
+    in_zone = dockmodel.should_reveal(True, False, False, False)
+    over_fullscreen = dockmodel.should_reveal(True, True, False, False)
+    if in_zone != dockmodel.ACTION_SHOW or over_fullscreen != dockmodel.ACTION_NONE:
+        print(
+            "DOCK_FAIL 决策不对：热区=%s 全屏=%s" % (in_zone, over_fullscreen),
+            flush=True,
+        )
+        return 1
+
+    frame = dock.grab()
+    if frame.isNull() or frame.width() <= 0:
+        print("DOCK_FAIL 渲染出空帧", flush=True)
+        return 1
+
+    print(
+        "DOCK_OK reveal=%d hidden=%d fullscreen_block=%s items=%d accent=%s"
+        % (y_shown, y_hidden, fullscreen_block, dock.item_count(), effective),
+        flush=True,
+    )
+    dock.stop_polling()
+    dock.hide()
+    if workdir:
+        shutil.rmtree(workdir, ignore_errors=True)
+    return 0
+
+
 def run_selftest(argv):
     """无显示器自检：建窗、渲染、渲染分批、检查不空。退出码 0 表示通过。"""
-    from basket_window import BasketWindow
-    from explorer_window import ExplorerWindow
-
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName(APP_NAME)
 
@@ -1010,6 +1104,8 @@ def main():
         return run_probe(argv)
     if "--visual" in argv:
         return run_visual_test(argv)
+    if "--dock-selftest" in argv:
+        return run_dock_selftest(argv)
     if "--autostart" in argv:
         return run_autostart_cli(argv)
     if "--screenshot" in argv:
