@@ -31,6 +31,7 @@ import settings
 from basket_window import BasketWindow
 from dock_window import DockWindow
 from explorer_window import ExplorerWindow
+from settings_window import SettingsWindow
 from frosted_window import LAYER_TOP, LAYER_WINDOW, FrostedWindow
 
 APP_NAME = "DeskBasket"
@@ -724,7 +725,7 @@ def wait_until(predicate, timeout_ms=4000, step_ms=20):
 
 
 class DeskBasketApp:
-    """把设置、筐窗口、浏览器窗口、托盘串起来。"""
+    """把设置、筐窗口、浏览器窗口、Dock、托盘串起来。"""
 
     def __init__(self, app, base=None, demo_fill=0):
         self.app = app
@@ -734,6 +735,8 @@ class DeskBasketApp:
         self.icon_cache = build_icon_cache(self.config_dir, self.settings["icon_size"])
         self.basket_windows = []
         self.explorer_windows = []
+        self.dock = None
+        self.settings_window = None
         self.tray = None
         if demo_fill:
             self._fill_demo(demo_fill)
@@ -783,10 +786,109 @@ class DeskBasketApp:
                 icon_size=self.settings["icon_size"],
                 layer=self.settings.get("layer", LAYER_WINDOW),
             )
-            window.show()
-            window.apply_effects()
+            if basket.get("visible", True):
+                window.show()
+                window.apply_effects()
             self.basket_windows.append(window)
         return self.basket_windows
+
+    # ------------------------------------------------------------ Dock
+
+    def build_dock(self):
+        """建 Dock：先把桌面上新出现的快捷方式补进来，再建窗口并开始轮询。"""
+        if self.dock is not None:
+            return self.dock
+        synced = dockmodel.sync_desktop_shortcuts(
+            self.settings["dock_items"],
+            self.settings["dock_removed"],
+            desktop_items(),
+        )
+        if synced != self.settings["dock_items"]:
+            self.settings["dock_items"] = synced
+            self.save()
+        self.dock = DockWindow(
+            self.icon_cache,
+            on_changed=self._on_dock_changed,
+            accent_mode=self.settings["accent_mode"],
+            icon_size=self.settings["dock_icon_size"],
+            hide_delay_ms=self.settings["dock_hide_delay_ms"],
+        )
+        self.dock.set_items(self.settings["dock_items"])
+        self.dock.set_dock_enabled(self.settings["dock_enabled"])
+        self.dock.show()
+        self.dock.apply_effects()
+        self.dock.collapse(animate=False)
+        self.dock.start_polling()
+        return self.dock
+
+    def _on_dock_changed(self, items):
+        """Dock 条目变了：新顺序落盘；被移除的记进 dock_removed，免得被自动加回来。"""
+        items = list(items or [])
+        gone = [
+            path
+            for path in self.settings.get("dock_items", [])
+            if dockmodel.find_index(items, path) < 0
+        ]
+        blocked = list(self.settings.get("dock_removed", []))
+        for path in gone:
+            blocked, result = dockmodel.add_item(blocked, path)
+            if result == "invalid":
+                continue
+        self.settings["dock_items"] = items
+        self.settings["dock_removed"] = blocked
+        self.save()
+
+    # ------------------------------------------------------------ 设置面板
+
+    def open_settings(self):
+        if self.settings_window is None:
+            self.settings_window = SettingsWindow(
+                self.settings,
+                basket_list=self.settings["baskets"],
+                on_changed=self._on_settings_changed,
+                base=self.base,
+            )
+        else:
+            self.settings_window.load_from(self.settings, self.settings["baskets"])
+        self.settings_window.show()
+        self.settings_window.apply_effects()
+        self.settings_window.raise_()
+        self.settings_window.activateWindow()
+        return self.settings_window
+
+    def _on_settings_changed(self, saved):
+        """设置面板改了东西：立刻作用到所有已开的窗口上。"""
+        self.settings = saved
+        for window in self.basket_windows:
+            window.accent_mode = saved["accent_mode"]
+            window.apply_effects()
+            if window.icon_size != saved["icon_size"]:
+                window.icon_size = saved["icon_size"]
+                window.refresh()
+        for window in self.explorer_windows:
+            window.accent_mode = saved["accent_mode"]
+            window.apply_effects()
+        if self.dock is not None:
+            self.dock.set_accent_mode(saved["accent_mode"])
+            if self.dock.icon_size != saved["dock_icon_size"]:
+                self.dock.set_icon_size(saved["dock_icon_size"])
+            self.dock.hide_delay_ms = saved["dock_hide_delay_ms"]
+            self.dock.set_dock_enabled(saved["dock_enabled"])
+        self._apply_basket_visibility(saved)
+
+    def _apply_basket_visibility(self, saved=None):
+        saved = saved or self.settings
+        for window in self.basket_windows:
+            basket = baskets.find_basket(saved["baskets"], window.basket.get("id"))
+            if basket is None:
+                window.hide()
+                continue
+            window.set_basket(basket)
+            if basket.get("visible", True):
+                window.show()
+                window.apply_effects()
+            else:
+                window.hide()
 
     def add_basket(self):
         updated, new_basket = baskets.create_basket(self.settings["baskets"])
@@ -820,6 +922,9 @@ class DeskBasketApp:
         menu.addAction("显示所有筐", self.show_all)
         menu.addAction("新建文件筐", self.add_basket)
         menu.addSeparator()
+        menu.addAction("显示/隐藏 Dock", self.toggle_dock)
+        menu.addAction("设置…", self.open_settings)
+        menu.addSeparator()
         autostart_action = menu.addAction("开机自启动")
         autostart_action.setCheckable(True)
         autostart_action.setChecked(self.settings.get("autostart", False))
@@ -829,6 +934,17 @@ class DeskBasketApp:
         tray.show()
         self.tray = tray
         return tray
+
+    def toggle_dock(self):
+        """托盘里手动开关 Dock（与设置面板里的开关同步）。"""
+        enabled = not self.settings.get("dock_enabled", True)
+        self.settings["dock_enabled"] = enabled
+        self.save()
+        if self.dock is not None:
+            self.dock.set_dock_enabled(enabled)
+        if self.settings_window is not None:
+            self.settings_window.load_from(self.settings, self.settings["baskets"])
+        return enabled
 
     def show_all(self):
         for window in self.basket_windows:
@@ -854,6 +970,7 @@ def run_app(argv):
             demo_fill = int(token.split("=", 1)[1])
     state = DeskBasketApp(app, demo_fill=demo_fill)
     state.build_windows()
+    state.build_dock()
     state.install_tray()
     if state.settings.get("autostart"):
         autostart.sync(True)
@@ -1098,6 +1215,38 @@ def run_selftest(argv):
         print("SELFTEST_FAIL_explorer: 已在根目录但上一级仍可点", flush=True)
         return 1
     explorer.hide()
+
+    # 设置面板：载入旧配置不丢字段，改一项立刻落盘，未知字段要活下来
+    config_dir = os.path.join(workdir, "配置")
+    os.makedirs(config_dir, exist_ok=True)
+    legacy = {
+        "accent_mode": "acrylic",
+        "icon_size": 48,
+        "baskets": [{"id": "b1", "name": "桌面文件筐", "items": real_files}],
+        "unknown_future_key": {"keep": "me"},
+    }
+    settings_window = SettingsWindow(
+        legacy, basket_list=legacy["baskets"], base=config_dir
+    )
+    settings_window.show()
+    app.processEvents()
+    if settings_window.icon_size_spin.value() != 48:
+        print("SELFTEST_FAIL_settings: 旧配置的图标大小没读进来", flush=True)
+        return 1
+    settings_window.set_icon_size(64)
+    saved = settings.load_settings(base=config_dir)
+    if saved["icon_size"] != 64:
+        print("SELFTEST_FAIL_settings: 改动没落盘", flush=True)
+        return 1
+    if saved.get("unknown_future_key") != {"keep": "me"}:
+        print("SELFTEST_FAIL_settings: 未知字段在改动后丢了", flush=True)
+        return 1
+    print(
+        "SELFTEST_OK_settings %d" % settings_window.basket_list_widget.count(),
+        flush=True,
+    )
+    settings_window.hide()
+
     shutil.rmtree(workdir, ignore_errors=True)
     return 0
 

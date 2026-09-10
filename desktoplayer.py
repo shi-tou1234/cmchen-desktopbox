@@ -22,10 +22,18 @@ IS_WINDOWS = sys.platform == "win32"
 
 LAYER_WINDOW = "window"      # 普通无边框非置顶窗口（默认，实测唯一能看见的桌面形态）
 LAYER_TOP = "top"            # 置顶悬浮
+LAYER_DIALOG = "dialog"      # 可聚焦的普通窗口（设置面板这类要输入东西的用）
 LAYER_PROGMAN = "progman"    # 挂 Progman 子窗口（实测：能命中但完全不渲染）
 LAYER_WORKERW = "workerw"    # 挂壁纸 WorkerW（实测：同上）
 LAYER_BOTTOM = "bottom"      # Qt WindowStaysOnBottomHint（实测：Win+D 后被压到壁纸下）
-LAYER_CHOICES = (LAYER_WINDOW, LAYER_TOP, LAYER_PROGMAN, LAYER_WORKERW, LAYER_BOTTOM)
+LAYER_CHOICES = (
+    LAYER_WINDOW,
+    LAYER_TOP,
+    LAYER_DIALOG,
+    LAYER_PROGMAN,
+    LAYER_WORKERW,
+    LAYER_BOTTOM,
+)
 
 GWL_STYLE = -16
 WS_CHILD = 0x40000000

@@ -1,0 +1,36 @@
+{
+  "accent_mode": "acrylic",
+  "autostart": false,
+  "icon_size": 48,
+  "baskets": [
+    {
+      "id": "b1",
+      "name": "桌面文件筐",
+      "x": 90,
+      "y": 110,
+      "w": 420,
+      "h": 300,
+      "items": [
+        "C:\\Users\\24256\\Desktop\\QQ.lnk",
+        "C:\\Users\\24256\\Desktop\\价格.txt",
+        "C:\\Users\\24256\\Desktop\\学习资料"
+      ]
+    },
+    {
+      "id": "b2",
+      "name": "学习",
+      "x": 560,
+      "y": 110,
+      "w": 420,
+      "h": 300,
+      "items": [
+        "C:\\Users\\24256\\Desktop\\军训.pdf"
+      ]
+    }
+  ],
+  "future_feature_flag": {
+    "theme": "dark",
+    "nested": [1, 2, 3]
+  },
+  "unknown_scalar": "保留我"
+}

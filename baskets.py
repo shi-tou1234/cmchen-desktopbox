@@ -91,6 +91,7 @@ def normalize_basket(raw, fallback_id="b1"):
         "y": _coerce_coord(raw.get("y"), 80),
         "w": _coerce_dimension(raw.get("w"), DEFAULT_WIDTH, MIN_WIDTH),
         "h": _coerce_dimension(raw.get("h"), DEFAULT_HEIGHT, MIN_HEIGHT),
+        "visible": raw.get("visible") if isinstance(raw.get("visible"), bool) else True,
         "items": items,
     }
 

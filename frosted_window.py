@@ -16,6 +16,7 @@ import dropfiles
 
 LAYER_WINDOW = desktoplayer.LAYER_WINDOW
 LAYER_TOP = desktoplayer.LAYER_TOP
+LAYER_DIALOG = desktoplayer.LAYER_DIALOG
 LAYER_PROGMAN = desktoplayer.LAYER_PROGMAN
 LAYER_WORKERW = desktoplayer.LAYER_WORKERW
 LAYER_BOTTOM = desktoplayer.LAYER_BOTTOM
@@ -33,7 +34,11 @@ def desktop_layer_flags(layer=LAYER_WINDOW):
     - SetParent 到 Progman/WorkerW：DWM 从不合成，同样看不见。
     所以默认用"普通无边框非置顶窗口"——看得见、磨砂生效、不抢焦点、不挡操作；
     想一直浮在最上面就把 layer 设成 top。
+    - dialog：给设置面板这类需要键盘输入和焦点的窗口用，不带
+      WindowDoesNotAcceptFocus、也不带 Tool（会进任务栏，便于切回来）。
     """
+    if layer == LAYER_DIALOG:
+        return Qt.FramelessWindowHint | Qt.Window
     flags = Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus
     if layer == LAYER_TOP:
         return flags | Qt.WindowStaysOnTopHint
@@ -67,7 +72,9 @@ class FrostedWindow(QWidget):
         self.setWindowFlags(desktop_layer_flags(layer))
         if translucent:
             self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        if layer != LAYER_DIALOG:
+            # 桌面挂件类窗口不该因为显示而抢走焦点；设置面板要能打字，所以豁免
+            self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         if accept_drops:
             self.setAcceptDrops(True)
 

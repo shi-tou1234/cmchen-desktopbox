@@ -171,3 +171,16 @@ DESKTOP_UNCHANGED_OK
 1. **混用坐标系**：`QCursor.pos()` 与 `QWidget.move()` 用 Qt 逻辑像素，`GetWindowRect` 用物理像素。本机缩放 150%（逻辑 1707×1067 / 物理 2560×1600），混用会让底部热区判定永远不命中。已统一到 Qt 逻辑坐标，前台窗口矩形按 `devicePixelRatio` 折算后再比。
 2. **最大化窗口被误判成全屏**：Windows 最大化窗口的 `GetWindowRect` 含 DWM 阴影边框，实测逻辑矩形 `(-5,-5,1712,1072)` 比 1707×1067 的屏幕还大，纯矩形判定必然判成全屏——结果是**任何最大化窗口在前时 Dock 都弹不出来**（正好是最常见的使用场景）。改用 `IsZoomed` 区分：最大化一律不拦，只有真正的全屏（非最大化且铺满整屏）才拦。已补 4 条回归测试。
 3. **排序永远不落盘**：`QStandardItemModel` 没有实现 `moveRows`（`moveRow` 恒返回 False），`QListView` 的 InternalMove 是用「插入副本＋删除原件」实现的，所以 `rowsMoved` 信号**永远不会发**——原来靠它同步顺序，等于排序功能是死的。改成在拖放结束后（模型已是最终状态）同步一次；顺带避免了「信号发出时模型处于中间状态、会存下错误顺序」的隐患。
+
+## 任务 3 收口：设置面板
+
+**交付**：`settings_window.py`（磨砂设置窗口，dialog 层级可聚焦）、`tests/test_settings_window.py`(29)、`tests/data/settings_v1.json`（复刻第一份配置 schema ＋两个"未来字段"）、`desktoplayer/frosted_window` 新增 `LAYER_DIALOG`、`baskets.py` 新增 `visible` 字段。
+
+**验收实测**：
+- `QT_QPA_PLATFORM=offscreen main.py --selftest` → `SELFTEST_OK_probe / OK_drop 1 / OK_basket 5 / OK_explorer 5 / SELFTEST_OK_settings 1`，rc=0。
+- `pytest tests -rs` → 247 passed，skipped=0（任务书要求 ≥186）。
+- **拿真实的 `%APPDATA%\DeskBasket\settings.json` 核对**（第一份写出来的 schema：`accent_mode` / `autostart` / `baskets` / `icon_size`）：读入后丢掉的字段 `（无）`，自动补上 dock 三项默认值，存取往返 `back == merged` 为 `True`。
+
+**任务 3 反向验证**：把 `merged_settings` 的「保留未知字段」改成丢弃 → 4 条测试变红（`test_unknown_scalar_field_is_preserved`、`test_unknown_nested_field_is_preserved_as_is`、`test_unknown_fields_survive_save_and_reload`、`test_window_keeps_unknown_fields_after_a_change`），且 `--selftest` 打印 `SELFTEST_FAIL_settings: 未知字段在改动后丢了`；还原后全绿。
+
+**情报（术）**：设置面板要能打字，而现有默认层级带 `WindowDoesNotAcceptFocus` + `WA_ShowWithoutActivating`（那是给桌面挂件用的），所以新增 `LAYER_DIALOG`＝`FramelessWindowHint | Window`，不带 Tool、不带 NoFocus，并跳过 `WA_ShowWithoutActivating`。这属于"给合适的东西用合适的层级"，不是放宽原有约束。
