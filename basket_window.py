@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 import baskets
+import icongrid
 from frosted_window import LAYER_WINDOW, FrostedWindow
 
 PATH_ROLE = Qt.UserRole + 1
@@ -143,8 +144,11 @@ class BasketWindow(FrostedWindow):
         layout.addWidget(header)
 
         self.view = BasketList(self)
-        self.view.setIconSize(QSize(self.icon_size, self.icon_size))
-        self.view.setGridSize(QSize(self.icon_size + 40, self.icon_size + 34))
+        self.grid_delegate = icongrid.IconGridDelegate(
+            icon_size=self.icon_size, lines=icongrid.TEXT_LINES, parent=self.view
+        )
+        self.view.setItemDelegate(self.grid_delegate)
+        icongrid.apply_grid(self.view, self.icon_size, icongrid.TEXT_LINES)
         self.view.setSpacing(4)
         self.view.doubleClicked.connect(self._on_double_clicked)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -176,8 +180,7 @@ class BasketWindow(FrostedWindow):
             )
         else:
             self.count_label.setText("%d 项" % len(items))
-        self.view.setIconSize(QSize(self.icon_size, self.icon_size))
-        self.view.setGridSize(QSize(self.icon_size + 40, self.icon_size + 34))
+        icongrid.apply_grid(self.view, self.icon_size, icongrid.TEXT_LINES)
 
     def _make_item(self, path, missing):
         name = os.path.basename(path.rstrip("\\/")) or path

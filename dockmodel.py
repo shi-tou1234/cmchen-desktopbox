@@ -150,13 +150,18 @@ def monitor_geometry(screens, preferred="primary"):
     return screens[0][0]
 
 
-def revealed_geometry(screen, dock_size, edge=EDGE_BOTTOM, margin=0):
-    """滑出后的位置：水平居中、贴着指定边。返回 (x, y, w, h)。"""
+def revealed_geometry(screen, dock_size, edge=EDGE_BOTTOM, margin=0, anchor=None):
+    """滑出后的位置：水平居中、贴着指定边。返回 (x, y, w, h)。
+
+    anchor 是"底边该贴在哪"的可选上沿（Qt 逻辑像素）。默认贴屏幕底边；
+    底部任务栏正显示时传任务栏上沿，Dock 就会让开它，不会两条叠在一起。
+    """
     left, top, right, bottom = screen
     width, height = dock_size
     x = left + max(0, (right - left - width) // 2)
     if edge == EDGE_BOTTOM:
-        return (x, bottom - height - margin, width, height)
+        base = bottom if anchor is None else anchor
+        return (x, base - height - margin, width, height)
     return (x, top + margin, width, height)
 
 

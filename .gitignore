@@ -6,3 +6,7 @@ dist/
 .pytest_cache/
 .mimosa/
 docs/*.log
+docs/_*.png
+docs/tint_*.png
+docs/m_*.png
+docs/sys*_*.png

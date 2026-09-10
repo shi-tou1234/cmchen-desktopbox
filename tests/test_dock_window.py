@@ -44,6 +44,20 @@ def test_dock_renders_all_items(qapp, tmp_path):
     dock.hide()
 
 
+def test_dock_list_is_a_child_of_the_dock_window(qapp, tmp_path):
+    """回归测试：列表控件的 parent 必须是 Dock 窗口本身。
+
+    踩过一次：给 DockList 加参数时把位置参数挤掉了，parent 变成 None，
+    列表就成了一个**隐藏的顶层窗口**——图标渲染得出来（直接抓视口能看到），
+    但永远不在 Dock 窗口里，屏幕上只有一条空壳承托条。"""
+    dock = make_dock(qapp, make_links(tmp_path))
+    view = dock.view
+    assert view.parent() is dock, "列表必须是 Dock 的子树，否则不会出现在窗口里"
+    assert not view.isWindow(), "列表不该是顶层窗口"
+    assert view.isVisible(), "Dock 显示后列表也该是可见的"
+    dock.hide()
+
+
 def test_dock_marks_missing_item(qapp, tmp_path):
     paths = make_links(tmp_path, ("QQ.lnk",))
     dock = make_dock(qapp, paths + [str(tmp_path / "没了.lnk")])

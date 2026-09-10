@@ -9,14 +9,31 @@
 决策逻辑全在 dockmodel.py 的纯函数里，本模块只负责"把决定落到窗口上"。
 """
 
+import math
 import sys
 
-from PySide6.QtCore import QPoint, QPropertyAnimation, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QDesktopServices, QStandardItem, QStandardItemModel
-from PySide6.QtWidgets import QListView, QMenu
+from PySide6.QtCore import QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QStandardItem,
+    QStandardItemModel,
+)
+from PySide6.QtWidgets import (
+    QListView,
+    QMenu,
+    QStyle,
+    QStyledItemDelegate,
+)
 
 import dockmodel
 import dropfiles
+import fileicons
+import icongrid
 from frosted_window import LAYER_TOP, FrostedWindow
 
 PATH_ROLE = Qt.UserRole + 1
@@ -27,10 +44,24 @@ BAR_PADDING = 10
 BAR_MARGIN = 4
 MIN_BAR_WIDTH = 220
 MAX_BAR_WIDTH_RATIO = 0.9
-# 领导要求：Dock 不要有背景，要透明的——所以不铺面板底色、也不上后排模糊，
-# 只让图标浮在桌面上（悬停/选中时每一项自己有一层淡淡的圆角高亮）。
-DOCK_ACCENT_MODE = "off"
-DOCK_DRAW_PANEL = False
+
+# Dock 参照 Nexus 官方观感：一条半透明承托条（shelf）＋ 悬停放大 ＋ 名称只在悬停时显示。
+# 领导先前要求"Dock 不要有背景"，但随后明确要"照 Nexus 官方模仿"——Nexus 本体就有
+# 承托条，所以这里做成很淡的渐变玻璃（能透出桌面，不是实心条），两者兼顾。
+# 必须给窗口挂一个 DWM 材质，否则这台机器上"半透明无材质"的窗口根本不上屏
+# （实测：同一窗口不透明时屏幕亮度 50.3 可见，去掉不透明后 201.4 完全看不到）。
+DOCK_ACCENT_MODE = "acrylic"
+MAX_SCALE = 1.45             # 悬停时图标最大放大倍数（越大上方余量越多，条越厚）
+INFLUENCE_RATIO = 2.3        # 放大影响半径 = 图标尺寸 × 该系数
+ICON_GAP = 6                 # 图标之间的最小间隙
+HEADROOM_EXTRA = 4           # 余量再留一点，给悬停名称用
+LABEL_STRIP = 4              # 图标底下留一点边，避免贴到承托条下沿
+
+SHELF_TOP = QColor(255, 255, 255, 30)
+SHELF_BOTTOM = QColor(8, 10, 16, 148)
+SHELF_RIM = QColor(255, 255, 255, 64)
+LABEL_TEXT = QColor(245, 246, 250)
+LABEL_BG = QColor(12, 14, 20, 216)
 
 LIST_STYLE = """
 QListView { background: transparent; border: none; outline: none; }
@@ -38,6 +69,47 @@ QListView::item { color: #EEEFF2; border-radius: 10px; padding: 3px; }
 QListView::item:hover { background: rgba(255,255,255,0.16); }
 QListView::item:selected { background: rgba(255,255,255,0.22); }
 """
+
+
+def taskbar_top_logical(screen_rect):
+    """底部任务栏当前的上沿（Qt 逻辑像素）；任务栏不在底部或已隐藏时返回 None。
+
+    任务栏是自动隐藏的，隐藏时它的矩形会被移到屏幕外（bottom ≥ 屏幕底边），
+    所以这里能顺便区分"正在显示"和"已隐藏"：只有真的显示出来才需要给 Dock 让位。
+    """
+    if not WIN32 or not screen_rect:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.FindWindowW.restype = ctypes.c_void_p
+        hwnd = int(user32.FindWindowW("Shell_TrayWnd", None) or 0)
+        if not hwnd:
+            return None
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)):
+            return None
+        from PySide6.QtGui import QGuiApplication
+
+        screen = QGuiApplication.primaryScreen()
+        ratio = screen.devicePixelRatio() if screen is not None else 1.0
+        if not ratio:
+            ratio = 1.0
+        top = int(rect.top / ratio)
+        bottom = int(rect.bottom / ratio)
+        height = bottom - top
+        if not 20 <= height <= 120:      # 高度不像任务栏，别认
+            return None
+        if bottom < screen_rect[3] - 4:  # 不在屏幕底部（其它边或已隐藏）
+            return None
+        halfway = screen_rect[1] + (screen_rect[3] - screen_rect[1]) * 0.5
+        if top <= halfway:
+            return None
+        return top
+    except (AttributeError, OSError, ValueError):
+        return None
 
 
 def foreground_info():
@@ -80,10 +152,11 @@ def foreground_info():
 class DockList(QListView):
     """Dock 的图标条：内部拖拽排序，外部拖文件则交给 Dock 追加。"""
 
-    def __init__(self, on_external_drop, on_reordered, parent=None):
+    def __init__(self, on_external_drop, on_reordered, dock, parent=None):
         super().__init__(parent)
         self.on_external_drop = on_external_drop
         self.on_reordered = on_reordered
+        self.dock = dock
         self.setViewMode(QListView.IconMode)
         self.setFlow(QListView.LeftToRight)
         self.setWrapping(False)
@@ -122,6 +195,96 @@ class DockList(QListView):
         # 只会发 rowsInserted/rowsRemoved，而且发信号时模型处于中间状态。
         self.on_reordered()
 
+    # ---- 悬停跟踪：驱动 Nexus 式放大与悬停名称
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        self._push_hover(event.position().toPoint())
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802
+        self.dock.clear_hover()
+        super().leaveEvent(event)
+
+    def _push_hover(self, point):
+        index = self.indexAt(point)
+        self.dock.set_hover(point.x(), index.row() if index.isValid() else None)
+
+
+class DockDelegate(QStyledItemDelegate):
+    """Nexus 式绘制：按鼠标距离放大图标，名称只在悬停的那一项上方出现。
+
+    放大倍数用余弦衰减：鼠标正下方最大，超过影响半径回到 1.0。
+    图标底边对齐（向上长高），所以放大时看起来是从承托条上"浮起来"。
+    """
+
+    def __init__(self, dock):
+        super().__init__(dock)
+        self.dock = dock
+
+    def sizeHint(self, option, index):  # noqa: N802
+        return self.dock.cell_size()
+
+    def _scale_for(self, center_x):
+        hover = self.dock.hover_x
+        if hover is None:
+            return 1.0
+        influence = self.dock.icon_size * INFLUENCE_RATIO
+        distance = abs(center_x - hover)
+        if distance >= influence:
+            return 1.0
+        # 余弦衰减：0 距离→1，影响半径处→0
+        weight = 0.5 * (1.0 + math.cos(math.pi * distance / influence))
+        return 1.0 + (MAX_SCALE - 1.0) * weight
+
+    def paint(self, painter, option, index):  # noqa: N802
+        hovered = option.state & QStyle.State_MouseOver
+        row_hover = self.dock.hover_row
+        is_current = row_hover is not None and index.row() == row_hover
+        center_x = option.rect.center().x()
+        scale = self._scale_for(center_x)
+        size = int(round(self.dock.icon_size * scale))
+
+        icon = index.data(Qt.DecorationRole)
+        base_bottom = option.rect.bottom() - self.dock.shelf_baseline()
+        icon_top = int(base_bottom - size)
+        target = QRect(int(center_x - size / 2), icon_top, size, size)
+        painter.save()
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        if icon is not None and not icon.isNull():
+            icon.paint(painter, target, Qt.AlignCenter)
+        else:
+            fallback = fileicons.IconCache(size=self.dock.icon_size)
+            icon = fallback.icon_for("", False, exists=False)
+            icon.paint(painter, target, Qt.AlignCenter)
+        painter.restore()
+
+        # 名称只在悬停项上方显示（Nexus 官方就是这个行为，平时不占地方）。
+        # 画在**图标**上方而不是"单元"上方：单元顶边就是窗口顶边，再往上会被裁掉。
+        if (is_current or hovered) and icon_top > 0:
+            name = index.data(Qt.DisplayRole) or ""
+            if name:
+                self._paint_label(painter, center_x, icon_top, name)
+
+    def _paint_label(self, painter, center_x, icon_top, text):
+        metrics = painter.fontMetrics()
+        height = metrics.height() + 8
+        width = min(metrics.horizontalAdvance(text) + 20, 190)
+        left = max(4, min(int(center_x - width // 2), self.dock.width() - int(width) - 4))
+        top = max(1, int(icon_top - height - 4))
+        label_rect = QRect(int(left), top, int(width), int(height))
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(LABEL_BG)
+        painter.drawRoundedRect(label_rect, 6, 6)
+        painter.setPen(LABEL_TEXT)
+        painter.drawText(
+            label_rect,
+            Qt.AlignCenter,
+            metrics.elidedText(text, Qt.ElideMiddle, int(width) - 14),
+        )
+        painter.restore()
+
 
 class DockWindow(FrostedWindow):
     """底部磨砂 Dock。items 由外部（settings）提供，变化通过 on_changed 落盘。"""
@@ -141,7 +304,7 @@ class DockWindow(FrostedWindow):
             parent=parent,
             accent_mode=accent_mode,
             layer=LAYER_TOP,
-            draw_panel=DOCK_DRAW_PANEL,
+            draw_panel=False,  # 承托条由本类自己画（渐变＋上沿高光）
         )
         self.icon_cache = icon_cache
         self.on_changed = on_changed
@@ -152,6 +315,8 @@ class DockWindow(FrostedWindow):
         self.items = []
         self.locked = False
         self.revealed = False
+        self.hover_x = None  # 鼠标在列表视口里的 x，委托据此算放大倍数
+        self.hover_row = None
         self._left_at = None
         self._animation = None
         self._last_revealed_rect = None
@@ -160,16 +325,46 @@ class DockWindow(FrostedWindow):
 
     # ------------------------------------------------------------------ UI
 
-    def _build_ui(self):
-        self.view = DockList(self.add_paths, self._sync_order_from_model, self)
+    def shelf_baseline(self):
+        """图标底边距窗口底边的距离：留一点内边距，别贴着承托条下沿。"""
+        return LABEL_STRIP
+
+    def shelf_height(self):
+        """承托条本身的高度：贴着图标与名称，保持紧凑（Nexus 的条也很窄）。"""
+        return (
+            self.icon_size
+            + icongrid.text_line_height(self.view) * icongrid.DOCK_TEXT_LINES
+            + BAR_PADDING * 2
+        )
+
+    def headroom(self):
+        """承托条上方的透明余量：放大的图标会长到这里来，超出承托条上沿。"""
+        return int(self.icon_size * (MAX_SCALE - 1.0)) + HEADROOM_EXTRA
+
+    def cell_size(self):
+        """网格单元 = 整窗高度（含余量），图标底对齐，放大时在单元内向上长，不会被裁。"""
+        width = int(self.icon_size * MAX_SCALE) + ICON_GAP
+        return QSize(width, self.headroom() + self.shelf_height())
+
+    def _apply_grid(self):
         self.view.setIconSize(QSize(self.icon_size, self.icon_size))
-        self.view.setGridSize(QSize(self.icon_size + 22, self.icon_size + 32))
+        self.view.setGridSize(self.cell_size())
+        self.view.setSpacing(0)
+
+    def _build_ui(self):
+        self.view = DockList(
+            self.add_paths, self._sync_order_from_model, self, self
+        )
+        self.view.setItemDelegate(DockDelegate(self))
+        self.view.setMouseTracking(True)
+        self.view.viewport().setMouseTracking(True)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._on_context_menu)
         self.view.clicked.connect(self._on_clicked)
         self.model = QStandardItemModel(self.view)
         self.view.setModel(self.model)
-        self.resize(MIN_BAR_WIDTH, self.icon_size + 34)
+        self._apply_grid()
+        self.resize(MIN_BAR_WIDTH, self.cell_size().height() + BAR_PADDING * 2)
         self.set_items([])
 
     def set_accent_mode(self, mode):
@@ -178,10 +373,50 @@ class DockWindow(FrostedWindow):
 
     def set_icon_size(self, size):
         self.icon_size = int(size)
-        self.view.setIconSize(QSize(self.icon_size, self.icon_size))
-        self.view.setGridSize(QSize(self.icon_size + 22, self.icon_size + 32))
+        self._apply_grid()
         self._relayout()
         self.refresh()
+
+    def set_hover(self, x, row=None):
+        """由列表在鼠标移动时调用：驱动放大效果与悬停名称。"""
+        if x == self.hover_x and row == self.hover_row:
+            return
+        self.hover_x = x
+        self.hover_row = row
+        self.view.viewport().update()
+
+    def clear_hover(self):
+        if self.hover_x is None and self.hover_row is None:
+            return
+        self.hover_x = None
+        self.hover_row = None
+        self.view.viewport().update()
+
+    # ------------------------------------------------------------------ 外观
+
+    def paintEvent(self, event):  # noqa: N802
+        """画 Nexus 式承托条：上浅下深的渐变玻璃 ＋ 上沿一道细高光。"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        # 只在下半部分画承托条；上半部分是透明余量，给放大的图标让路
+        rect = QRect(
+            0, self.headroom(), self.width() - 1, self.shelf_height() - 1
+        )
+        path = QPainterPath()
+        radius = min(18, rect.height() // 2)
+        path.addRoundedRect(rect, radius, radius)
+        gradient = QLinearGradient(0, rect.top(), 0, rect.bottom())
+        gradient.setColorAt(0.0, SHELF_TOP)
+        gradient.setColorAt(1.0, SHELF_BOTTOM)
+        painter.fillPath(path, gradient)
+        pen = QPen(SHELF_RIM)
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(
+            rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius
+        )
+        painter.end()
 
     # ------------------------------------------------------------------ 数据
 
@@ -257,14 +492,16 @@ class DockWindow(FrostedWindow):
         """按条目数把 Dock 宽度收成"刚好装下"，并夹在屏幕可用范围内。"""
         screen = self._screen_rect()
         screen_width = (screen[2] - screen[0]) if screen else 1920
-        cell = self.icon_size + 22
-        wanted = BAR_PADDING * 2 + max(1, len(self.items)) * cell
+        cell = self.cell_size()
+        wanted = BAR_PADDING * 2 + max(1, len(self.items)) * cell.width()
         limit = int(screen_width * MAX_BAR_WIDTH_RATIO)
         width = max(MIN_BAR_WIDTH, min(wanted, limit))
-        height = self.icon_size + 34  # 图标 + 下面一行文字的余量，别把标签裁掉
+        height = cell.height()
         self.resize(width, height)
-        # 没有布局管理器，得显式把列表铺进窗口，否则它会用默认小尺寸
-        self.view.setGeometry(BAR_PADDING, 0, max(1, width - BAR_PADDING * 2), height)
+        # 列表铺满整窗（含上方余量），图标在委托里底对齐，放大才有地方长
+        self.view.setGeometry(
+            BAR_PADDING, 0, max(1, width - BAR_PADDING * 2), height
+        )
         self._apply_geometry(self._geometry_for(self.revealed), animate=False)
 
     # ------------------------------------------------------------------ 几何
@@ -321,8 +558,12 @@ class DockWindow(FrostedWindow):
         if screen is None:
             return None
         size = (self.width(), self.height())
-        return dockmodel.geometry_for(
-            screen, size, revealed, edge=self.edge, margin=BAR_MARGIN
+        if not revealed:
+            return dockmodel.hidden_geometry(screen, size, edge=self.edge)
+        # 任务栏正显示时让开它，别在屏幕底部叠成两条
+        anchor = taskbar_top_logical(screen)
+        return dockmodel.revealed_geometry(
+            screen, size, edge=self.edge, margin=BAR_MARGIN, anchor=anchor
         )
 
     def _apply_geometry(self, rect, animate=True):

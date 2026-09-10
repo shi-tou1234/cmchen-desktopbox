@@ -1134,8 +1134,10 @@ def run_dock_selftest(argv):
         print("DOCK_FAIL 取不到屏幕矩形", flush=True)
         return 1
     size = (dock.width(), dock.height())
-    shown_rect = dockmodel.revealed_geometry(screen, size, margin=dock_window.BAR_MARGIN)
-    hidden_rect = dockmodel.hidden_geometry(screen, size)
+    # 期望值直接取窗口自己的目标矩形（它会把"给任务栏让位"也算进去），
+    # 再验证窗口真的移动到了那里。
+    shown_rect = dock._geometry_for(True)
+    hidden_rect = dock._geometry_for(False)
 
     # 滑出 / 收起必须真的把窗口挪到两个不同位置
     dock.set_revealed(True, animate=False)

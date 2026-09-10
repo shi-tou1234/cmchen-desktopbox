@@ -251,3 +251,43 @@ DESKTOP_UNCHANGED_OK
 - `main.py --visual` → `VISUAL_ACCENT system` / `RATIO 0.000` / `BLURRED`；`--accent=off` → `RATIO 0.687` ≈ 透光率 0.69。
 - `--screenshot` → `SCREENSHOT_OK 2560 1600`，筐／内置浏览器／透明 Dock 三物同框。
 - 桌面零改动 `DESKTOP_UNCHANGED_OK`；自启注册表净效果为零。
+
+## 外观返工第二轮：照腾讯桌面整理 + Nexus 官方模仿（领导指定）
+
+领导要求「类似腾讯桌面整理」「照 Nexus 官方模仿」，并让我用浏览器看真实参考图。照做后发现并修掉两个真问题：
+
+### 1. Dock 改为 Nexus 官方形态
+
+- **玻璃承托条**：底部一条半透明圆角条（上浅下深的渐变 ＋ 上沿一道高光），图标坐在上面。
+- **悬停放大**：鼠标下的图标放大到 1.45×，左右邻居按余弦衰减依次变小（`DockDelegate` 自绘，图标底对齐向上长）。
+- **名称只在悬停时显示**：以深色小药丸浮在被悬停图标正上方（Nexus 官方行为），平时不占地方。修过一个 bug：名称原本按"单元顶边往上"算 y，而单元顶边就是窗口顶边，算出负数被裁掉；改成按图标顶边往上算并夹在窗口内。
+- **窗口比承托条高**：多出来的透明余量给放大后的图标与名称用，所以承托条本身保持紧凑（83px）。
+- **任务栏让位**：检测 `Shell_TrayWnd` 的位置，任务栏正显示时 Dock 抬到它上方（实测 1018 → Dock 底边贴 1018），不再和任务栏叠成一团；任务栏隐藏时（自动隐藏）Dock 仍贴屏幕底边。
+
+### 2. 图标名称裁字彻底修掉（两个窗口都有）
+
+默认 `QStyledItemDelegate` 在图标模式下会把换行的第二行裁掉半截。把单元高度从 88px 加到 100px（两行只需 28px）**依然被裁**。最后自己写 `icongrid.IconGridDelegate`：图标与文字位置全部自算，按字符宽度**均分两行**（贪心会把 `qq音乐.lnk` 切成 `["qq音乐.ln","k"]`，第二行只剩一个字母）。文件筐与内置浏览器共用这套排版。修完真机截图里 49 个条目的名称全部完整可读。
+
+### 3. 又一个"测试全绿但功能是坏的"（两个）
+
+- **`DockList` 的 parent 成了 None**：给它加 `dock` 参数时把位置参数挤掉了，列表变成一个**隐藏的顶层窗口**——图标能渲染（直接抓视口看得到），但永远不在 Dock 窗口里，屏幕上只有一条空壳承托条。已补回归测试 `test_dock_list_is_a_child_of_the_dock_window`，断言 `view.parent() is dock` 且不是顶层窗口。
+- **`index.data(ForegroundRole)` 返回 QBrush**，直接 `setPen(brush)` 触发 PySide6 重载解析告警并导致文字完全不画。已改为取出 `QColor` 再画。
+
+### 4. Dock 不能纯透明——实测结论
+
+| 配置 | 屏幕上该区域亮度 | 结论 |
+|---|---|---|
+| 不透明（去掉 `WA_TranslucentBackground`） | 50.3 | 能上屏 |
+| 半透明，不挂任何 DWM 材质 | 201.4 | **完全不上屏**（等于背景） |
+| 半透明 ＋ 仅扩展 DWM 边框 | 206.2 | 仍不上屏 |
+| 半透明 ＋ 老 API `BLURBEHIND` | 60.8 | 能上屏（内容被压成暗块） |
+| 半透明 ＋ Win11 系统材质 | 101.1 | 能上屏且图标清晰 |
+
+所以 Dock 挂系统材质（就是它现在这条玻璃承托条），不是纯透明。**"半透明窗口不需要材质"这个直觉在这台机器上是错的。**
+
+## 本轮验收复跑
+
+- `pytest tests -rs` → **270 passed**（新增 `tests/test_icongrid.py` 14 条 ＋ Dock 子控件回归 1 条），skipped=0。
+- 源码与 exe 两遍 `--selftest` 全绿（五项）`ExitCode=0`；`--dock-selftest` → `DOCK_OK reveal=906 hidden=1067 fullscreen_block=True accent=system`。
+- `dist\DeskBasket.exe` **36.6 MB**；`--screenshot` → `SCREENSHOT_OK 2560 1600`，筐／浏览器／Dock 三物同框且名称完整。
+- 桌面 `CHANGED 0 / DESKTOP_UNCHANGED_OK`；未改项目目录之外的任何文件。

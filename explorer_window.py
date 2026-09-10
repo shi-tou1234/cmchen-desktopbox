@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 import filebrowse
+import icongrid
 from frosted_window import LAYER_WINDOW, FrostedWindow
 
 PATH_ROLE = Qt.UserRole + 1
@@ -144,8 +145,11 @@ class ExplorerWindow(FrostedWindow):
         self.view.setDragDropMode(QListView.NoDragDrop)
         self.view.setFrameShape(QListView.NoFrame)
         self.view.setStyleSheet(LIST_STYLE)
-        self.view.setIconSize(QSize(self.icon_size, self.icon_size))
-        self.view.setGridSize(QSize(self.icon_size + 40, self.icon_size + 34))
+        self.grid_delegate = icongrid.IconGridDelegate(
+            icon_size=self.icon_size, lines=icongrid.TEXT_LINES, parent=self.view
+        )
+        self.view.setItemDelegate(self.grid_delegate)
+        icongrid.apply_grid(self.view, self.icon_size, icongrid.TEXT_LINES)
         self.view.doubleClicked.connect(self._on_double_clicked)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._on_context_menu)
