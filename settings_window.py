@@ -168,6 +168,12 @@ class SettingsWindow(FrostedWindow):
         return wrapper
 
     @staticmethod
+    def _hint(parent, text):
+        label = QLabel(text, parent)
+        label.setStyleSheet(HINT_STYLE)
+        return label
+
+    @staticmethod
     def _label(parent, text):
         label = QLabel(text, parent)
         label.setStyleSheet(LABEL_STYLE)
@@ -205,6 +211,11 @@ class SettingsWindow(FrostedWindow):
         self.dock_enabled_check.toggled.connect(self.set_dock_enabled)
         group._grid.addWidget(self.dock_enabled_check, 0, 0, 1, 2)
 
+        self.dock_always_check = QCheckBox("常驻显示（鼠标移开也不收起）", group)
+        self.dock_always_check.setStyleSheet(CHECK_STYLE)
+        self.dock_always_check.toggled.connect(self.set_dock_always_visible)
+        group._grid.addWidget(self.dock_always_check, 1, 0, 1, 2)
+
         self.dock_icon_spin = QSpinBox(group)
         self.dock_icon_spin.setStyleSheet(SPIN_STYLE)
         self.dock_icon_spin.setRange(
@@ -212,8 +223,8 @@ class SettingsWindow(FrostedWindow):
         )
         self.dock_icon_spin.setSuffix(" px")
         self.dock_icon_spin.valueChanged.connect(self.set_dock_icon_size)
-        group._grid.addWidget(self._label(group, "Dock 图标大小"), 1, 0)
-        group._grid.addWidget(self.dock_icon_spin, 1, 1)
+        group._grid.addWidget(self._label(group, "Dock 图标大小"), 2, 0)
+        group._grid.addWidget(self.dock_icon_spin, 2, 1)
 
         self.dock_delay_spin = QSpinBox(group)
         self.dock_delay_spin.setStyleSheet(SPIN_STYLE)
@@ -223,12 +234,15 @@ class SettingsWindow(FrostedWindow):
         self.dock_delay_spin.setSingleStep(50)
         self.dock_delay_spin.setSuffix(" ms")
         self.dock_delay_spin.valueChanged.connect(self.set_dock_hide_delay)
-        group._grid.addWidget(self._label(group, "鼠标离开后收起延迟"), 2, 0)
-        group._grid.addWidget(self.dock_delay_spin, 2, 1)
+        group._grid.addWidget(self._label(group, "鼠标离开后收起延迟"), 3, 0)
+        group._grid.addWidget(self.dock_delay_spin, 3, 1)
+        group._grid.addWidget(
+            self._hint(group, "仅在关掉「常驻显示」后生效"), 4, 1
+        )
 
         self.dock_count_label = QLabel("", group)
         self.dock_count_label.setStyleSheet(HINT_STYLE)
-        group._grid.addWidget(self.dock_count_label, 3, 0, 1, 2)
+        group._grid.addWidget(self.dock_count_label, 5, 0, 1, 2)
         return group
 
     def _build_basket_group(self, parent):
@@ -297,6 +311,9 @@ class SettingsWindow(FrostedWindow):
             self.accent_combo.setCurrentIndex(index if index >= 0 else 0)
             self.icon_size_spin.setValue(self.settings["icon_size"])
             self.dock_enabled_check.setChecked(self.settings["dock_enabled"])
+            self.dock_always_check.setChecked(
+                bool(self.settings.get("dock_always_visible", True))
+            )
             self.dock_icon_spin.setValue(self.settings["dock_icon_size"])
             self.dock_delay_spin.setValue(self.settings["dock_hide_delay_ms"])
             self.autostart_check.setChecked(bool(self.settings["autostart"]))
@@ -364,6 +381,11 @@ class SettingsWindow(FrostedWindow):
         saved = self._apply(dock_enabled=bool(enabled))
         if saved is not None:
             self._flash("Dock 已%s" % ("打开" if enabled else "关闭"))
+
+    def set_dock_always_visible(self, enabled):
+        saved = self._apply(dock_always_visible=bool(enabled))
+        if saved is not None:
+            self._flash("Dock 已设为%s" % ("常驻显示" if enabled else "鼠标离开后收起"))
 
     def set_dock_icon_size(self, size):
         saved = self._apply(dock_icon_size=int(size))

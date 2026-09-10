@@ -1,0 +1,318 @@
+/* 共用样式：页面背景一律透明，把"透"交给窗口的系统材质；
+   面板只加极轻的一点点压暗和一道细高光，模仿玻璃边缘。 */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  color: #f2f2f6;
+  font: 13px/1.5 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  user-select: none;
+  cursor: default;
+  /* 完全透明模式下背景可能很亮，给文字加一层淡阴影保证可读 */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.drag-region { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
+
+/* ---------------- 面板 ---------------- */
+
+.panel {
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(14, 15, 20, 0.06);   /* 几乎不铺底色：领导要求完全透明 */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel-head {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px 0 14px;
+  flex: 0 0 auto;
+}
+
+.panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel-count { font-size: 12px; color: #b6b8c2; flex: 1 1 auto; }
+
+.head-btn {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.10);
+  color: #e8e9ee;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.head-btn:hover { background: rgba(255, 255, 255, 0.22); }
+.head-btn.danger:hover { background: rgba(255, 92, 92, 0.7); color: #fff; }
+
+/* ---------------- 图标网格 ---------------- */
+
+.grid {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 8px 10px;
+  display: grid;
+  grid-auto-rows: min-content;
+  justify-content: start;
+  align-content: start;
+}
+
+.grid::-webkit-scrollbar { width: 8px; }
+.grid::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+
+.cell {
+  width: 88px;
+  padding: 6px 2px 8px;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+}
+.cell:hover { background: rgba(255, 255, 255, 0.14); }
+.cell.selected { background: rgba(255, 255, 255, 0.22); }
+
+.cell img {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.cell .name {
+  font-size: 12px;
+  line-height: 14px;
+  max-height: 28px;                 /* 两行 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;            /* CSS 直接截断到两行，不会出现半截字 */
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+}
+
+.cell.missing { opacity: 0.55; }
+.cell.missing .name { text-decoration: line-through; }
+
+/* ---------------- Dock ---------------- */
+
+.dock {
+  position: absolute;
+  inset: 0;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.20);
+  background: rgba(14, 15, 20, 0.05);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  padding: 8px 6px;
+  overflow: visible;
+}
+
+.dock-item {
+  position: relative;
+  width: 56px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  border-radius: 10px;
+  transition: transform 0.12s ease-out;
+  transform-origin: bottom center;
+}
+.dock-item:hover { background: rgba(255, 255, 255, 0.10); }
+
+.dock-item img {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
+}
+
+.dock-item .cap {
+  font-size: 11px;
+  line-height: 13px;
+  max-width: 54px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+/* 悬停放大：Nexus 的做法，名称只在该项出现 */
+.dock:hover .dock-item { transform: scale(1.0); }
+.dock-item:hover { transform: scale(1.28) translateY(-6px); }
+.dock-item:hover .cap { opacity: 1; }
+
+/* 名称气泡：悬停时浮在图标上方 */
+.dock-item .tip {
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border-radius: 7px;
+  background: rgba(12, 14, 20, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  font-size: 12px;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+.dock-item:hover .tip { opacity: 1; }
+
+/* ---------------- 浏览器窗口 ---------------- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 6px;
+  flex: 0 0 auto;
+}
+
+.btn {
+  border: 0;
+  border-radius: 7px;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #e8e9ee;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover { background: rgba(255, 255, 255, 0.22); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+
+.crumbs {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.crumb {
+  border: 0;
+  background: transparent;
+  color: #a9c8ff;
+  font-size: 12px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.crumb:hover { text-decoration: underline; color: #d6e4ff; }
+.crumb-sep { color: rgba(240, 240, 245, 0.45); font-size: 12px; }
+
+.status {
+  padding: 0 12px 6px;
+  font-size: 12px;
+  color: #b6b8c2;
+  flex: 0 0 auto;
+}
+.status.error { color: #ffbe78; }
+
+/* ---------------- 设置面板 ---------------- */
+
+.settings { padding: 14px 16px; overflow-y: auto; height: 100%; }
+.settings h2 { font-size: 15px; margin: 0 0 12px; }
+.group { margin-bottom: 16px; }
+.group > h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: #a9c8ff;
+  margin: 0 0 8px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+}
+.row > label { font-size: 12px; }
+.row .hint { font-size: 11px; color: #9a9ba4; }
+
+select, input[type="number"] {
+  background: rgba(255, 255, 255, 0.12);
+  color: #edeef2;
+  border: 0;
+  border-radius: 7px;
+  padding: 4px 8px;
+  font-size: 12px;
+  min-width: 120px;
+}
+select option { background: #22232b; }
+
+input[type="checkbox"] { width: 15px; height: 15px; accent-color: #5b8def; }
+
+.basket-list {
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.07);
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.basket-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.basket-row:hover { background: rgba(255, 255, 255, 0.10); }
+.basket-row.selected { background: rgba(255, 255, 255, 0.20); }
+
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
+}
+.footer .status-text { flex: 1 1 auto; font-size: 11px; color: #9a9ba4; }
+
+/* 拖入提示：拖到窗口上时给一圈高亮 */
+body.dragover .panel,
+body.dragover .dock {
+  border-color: rgba(140, 190, 255, 0.85);
+  background: rgba(40, 70, 120, 0.22);
+}

@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>DeskBasket 设置</title>
+<link rel="stylesheet" href="common.css">
+<style>
+  .panel { border-radius: 14px; }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <div class="panel-head drag-region">
+      <span class="panel-title">DeskBasket 设置</span>
+      <span class="panel-count"></span>
+      <button class="head-btn danger no-drag" id="btn-close">✕</button>
+    </div>
+
+    <div class="settings no-drag">
+      <div class="group">
+        <h3>外观</h3>
+        <div class="row">
+          <label for="accent">磨砂模式</label>
+          <select id="accent"></select>
+        </div>
+        <div class="row">
+          <label for="iconSize">筐内图标大小</label>
+          <input type="number" id="iconSize" min="24" max="128" step="8">
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>底部 Dock</h3>
+        <div class="row">
+          <label for="dockEnabled">显示 Dock（固定于桌面底部）</label>
+          <input type="checkbox" id="dockEnabled">
+        </div>
+        <div class="row">
+          <label for="dockAlways">常驻显示（鼠标移开也不收起）</label>
+          <input type="checkbox" id="dockAlways">
+        </div>
+        <div class="row">
+          <label for="dockIconSize">Dock 图标大小</label>
+          <input type="number" id="dockIconSize" min="24" max="128" step="8">
+        </div>
+        <div class="row">
+          <label for="dockDelay">鼠标离开后收起延迟</label>
+          <input type="number" id="dockDelay" min="100" max="3000" step="50">
+        </div>
+        <div class="row">
+          <span class="hint" id="dockCount"></span>
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>文件筐</h3>
+        <div class="basket-list" id="basketList"></div>
+        <div class="row" style="justify-content:flex-start;gap:6px;flex-wrap:wrap">
+          <button class="btn" id="btnRename">改名</button>
+          <button class="btn" id="btnVisible">显示 / 隐藏</button>
+          <button class="btn" id="btnPrune">清理失效项</button>
+          <button class="btn" id="btnNew">新建筐</button>
+          <button class="btn" id="btnDelete">删除</button>
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>系统</h3>
+        <div class="row">
+          <label for="autostart">开机自启动</label>
+          <input type="checkbox" id="autostart">
+        </div>
+        <div class="row">
+          <span class="hint" id="autostartInfo"></span>
+        </div>
+      </div>
+
+      <div class="footer">
+        <button class="btn" id="btnReset">恢复默认</button>
+        <span class="status-text" id="hint"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const api = window.deskbasket;
+    const ACCENT_LABELS = {
+      acrylic: '磨砂玻璃（Win11 系统材质，推荐）',
+      blur: '轻量模糊',
+      off: '完全透明（不磨砂）'
+    };
+
+    let settings = null;
+    let selectedBasketId = null;
+    let loading = true;
+
+    const el = (id) => document.getElementById(id);
+
+    function flash(text) {
+      el('hint').textContent = text;
+    }
+
+    function renderBaskets() {
+      const host = el('basketList');
+      host.innerHTML = '';
+      for (const basket of settings.baskets) {
+        const row = document.createElement('div');
+        row.className = 'basket-row' + (basket.id === selectedBasketId ? ' selected' : '');
+        const missing = '';  // 失效项数量由清理按钮负责展示
+        const label = document.createElement('span');
+        label.textContent =
+          basket.name + '（' + basket.items.length + ' 项）' + (basket.visible === false ? ' · 已隐藏' : '') + missing;
+        row.append(label);
+        row.addEventListener('click', () => {
+          selectedBasketId = basket.id;
+          renderBaskets();
+        });
+        host.append(row);
+      }
+      if (!settings.baskets.length) {
+        host.textContent = '还没有筐，点「新建筐」建一个';
+      }
+      if (!selectedBasketId && settings.baskets.length) {
+        selectedBasketId = settings.baskets[0].id;
+      }
+    }
+
+    function render() {
+      loading = true;
+      el('accent').innerHTML = '';
+      for (const [key, label] of Object.entries(ACCENT_LABELS)) {
+        const option = document.createElement('option');
+        option.value = key;
+        option.textContent = label;
+        el('accent').append(option);
+      }
+      el('accent').value = settings.accent_mode;
+      el('iconSize').value = settings.icon_size;
+      el('dockEnabled').checked = settings.dock_enabled;
+      el('dockAlways').checked = settings.dock_always_visible;
+      el('dockIconSize').value = settings.dock_icon_size;
+      el('dockDelay').value = settings.dock_hide_delay_ms;
+      el('dockCount').textContent =
+        'Dock 现有 ' + settings.dock_items.length + ' 项；自动收录桌面的 .lnk / .url / .exe，也可直接拖进去';
+      renderBaskets();
+      loading = false;
+    }
+
+    async function push(patch, message) {
+      if (loading) return;
+      settings = await api.updateSettings(patch);
+      render();
+      if (message) flash(message);
+    }
+
+    el('accent').addEventListener('change', (event) => {
+      push({ accent_mode: event.target.value }, '磨砂模式已切换');
+    });
+    el('iconSize').addEventListener('change', (event) => {
+      push({ icon_size: Number(event.target.value) }, '筐内图标大小已更新');
+    });
+    el('dockEnabled').addEventListener('change', (event) => {
+      push({ dock_enabled: event.target.checked }, event.target.checked ? 'Dock 已显示' : 'Dock 已隐藏');
+    });
+    el('dockAlways').addEventListener('change', (event) => {
+      push({ dock_always_visible: event.target.checked }, event.target.checked ? 'Dock 常驻显示' : 'Dock 鼠标离开后收起');
+    });
+    el('dockIconSize').addEventListener('change', (event) => {
+      push({ dock_icon_size: Number(event.target.value) }, 'Dock 图标大小已更新');
+    });
+    el('dockDelay').addEventListener('change', (event) => {
+      push({ dock_hide_delay_ms: Number(event.target.value) }, '收起延迟已更新');
+    });
+
+    el('btnRename').addEventListener('click', async () => {
+      const basket = settings.baskets.find((item) => item.id === selectedBasketId);
+      if (!basket) return;
+      const name = window.prompt('筐的名字：', basket.name);
+      if (name === null) return;
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      const merged = { ...basket, name: trimmed.slice(0, 24) };
+      settings = await api.updateBasket(merged);
+      await refresh();
+      flash('已改名');
+    });
+
+    el('btnVisible').addEventListener('click', async () => {
+      const basket = settings.baskets.find((item) => item.id === selectedBasketId);
+      if (!basket) return;
+      const merged = { ...basket, visible: basket.visible === false };
+      await api.updateBasket(merged);
+      await refresh();
+      flash(merged.visible ? '这个筐已显示' : '这个筐已隐藏');
+    });
+
+    el('btnPrune').addEventListener('click', async () => {
+      const result = await api.pruneMissing(selectedBasketId);
+      await refresh();
+      flash('已清理 ' + ((result && result.removed) || 0) + ' 个失效项（只清登记，磁盘文件未动）');
+    });
+
+    el('btnNew').addEventListener('click', async () => {
+      const created = await api.createBasket();
+      selectedBasketId = created && created.id;
+      await refresh();
+      flash('已新建一个筐');
+    });
+
+    el('btnDelete').addEventListener('click', async () => {
+      const basket = settings.baskets.find((item) => item.id === selectedBasketId);
+      if (!basket) return;
+      await api.deleteBasket(basket.id);
+      selectedBasketId = null;
+      await refresh();
+      flash('已删除这个筐的登记，筐里的文件一个都没动');
+    });
+
+    el('btnReset').addEventListener('click', async () => {
+      settings = await api.updateSettings({
+        accent_mode: 'acrylic',
+        icon_size: 48,
+        dock_enabled: true,
+        dock_always_visible: true,
+        dock_icon_size: 48,
+        dock_hide_delay_ms: 400
+      });
+      render();
+      flash('已恢复默认设置');
+    });
+
+    el('autostart').addEventListener('change', async (event) => {
+      if (loading) return;
+      await api.setAutostart(event.target.checked);
+      await refreshAutostart();
+      flash(event.target.checked ? '开机自启已打开' : '开机自启已关闭');
+    });
+
+    async function refreshAutostart() {
+      const info = await api.getAutostart();
+      el('autostart').checked = info.enabled;
+      el('autostartInfo').textContent = info.supported
+        ? '当前注册表内容：' + (info.command || '（未启用）')
+        : '当前平台不支持（仅 Windows）';
+    }
+
+    async function refresh() {
+      const state = await api.getState();
+      settings = state.settings;
+      render();
+    }
+
+    el('btn-close').addEventListener('click', () => api.closeWindow());
+    api.onStateChanged((payload) => {
+      settings = payload.settings;
+      render();
+    });
+
+    (async () => {
+      await refresh();
+      await refreshAutostart();
+    })();
+  </script>
+</body>
+</html>

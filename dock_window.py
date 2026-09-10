@@ -51,14 +51,14 @@ MAX_BAR_WIDTH_RATIO = 0.9
 # 必须给窗口挂一个 DWM 材质，否则这台机器上"半透明无材质"的窗口根本不上屏
 # （实测：同一窗口不透明时屏幕亮度 50.3 可见，去掉不透明后 201.4 完全看不到）。
 DOCK_ACCENT_MODE = "acrylic"
-MAX_SCALE = 1.45             # 悬停时图标最大放大倍数（越大上方余量越多，条越厚）
+MAX_SCALE = 1.25             # 悬停放大倍数（常驻 Dock 要薄，倍数不能大）
 INFLUENCE_RATIO = 2.3        # 放大影响半径 = 图标尺寸 × 该系数
 ICON_GAP = 6                 # 图标之间的最小间隙
 HEADROOM_EXTRA = 4           # 余量再留一点，给悬停名称用
 LABEL_STRIP = 4              # 图标底下留一点边，避免贴到承托条下沿
 
-SHELF_TOP = QColor(255, 255, 255, 30)
-SHELF_BOTTOM = QColor(8, 10, 16, 148)
+SHELF_TOP = QColor(255, 255, 255, 22)
+SHELF_BOTTOM = QColor(8, 10, 16, 96)
 SHELF_RIM = QColor(255, 255, 255, 64)
 LABEL_TEXT = QColor(245, 246, 250)
 LABEL_BG = QColor(12, 14, 20, 216)
@@ -293,6 +293,7 @@ class DockWindow(FrostedWindow):
         self,
         icon_cache,
         on_changed=None,
+        always_visible=True,
         accent_mode=DOCK_ACCENT_MODE,
         icon_size=48,
         hide_delay_ms=dockmodel.HIDE_DELAY_MS,
@@ -312,6 +313,8 @@ class DockWindow(FrostedWindow):
         self.hide_delay_ms = int(hide_delay_ms)
         self.edge = edge
         self.monitor_preference = monitor_preference
+        # 领导要求：Dock 常驻，不收起来。只有前台是全屏程序时才让位。
+        self.always_visible = bool(always_visible)
         self.items = []
         self.locked = False
         self.revealed = False
@@ -632,6 +635,20 @@ class DockWindow(FrostedWindow):
         fullscreen = dockmodel.foreground_blocks_dock(
             foreground_rect, screen, class_name, zoomed
         )
+
+        if self.always_visible:
+            # 常驻模式：鼠标进出不再控制显隐，只有全屏程序盖住时才暂时让位。
+            if self.locked:
+                return dockmodel.ACTION_NONE
+            if fullscreen:
+                if self.revealed:
+                    self.collapse()
+                    return dockmodel.ACTION_HIDE
+                return dockmodel.ACTION_NONE
+            if not self.revealed:
+                self.reveal()
+                return dockmodel.ACTION_SHOW
+            return dockmodel.ACTION_NONE
 
         in_hot_zone = dockmodel.is_hot_zone(cursor, screen, self.edge)
         action = dockmodel.should_reveal(

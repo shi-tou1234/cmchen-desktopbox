@@ -255,6 +255,82 @@ def apply_system_acrylic(hwnd, dark=False):
     return apply_system_backdrop(hwnd, DWMSBT_TRANSIENTWINDOW)
 
 
+# token 监测项目（Electron）在这台机器上验证可用的参数：很淡的深灰，不是黑块那种实心
+TOKEN_ACCENT_ARGB = 0x3A232323
+
+class DWM_BLURBEHIND(ctypes.Structure):
+    _fields_ = [
+        ("dwFlags", ctypes.c_uint),
+        ("fEnable", ctypes.c_int),
+        ("hRgnBlur", ctypes.c_void_p),
+        ("fTransitionOnMaximized", ctypes.c_int),
+    ]
+
+
+DWM_BB_ENABLE = 0x1
+DWM_BB_BLURREGION = 0x2
+DWM_BB_TRANSITIONONMAXIMIZED = 0x4
+
+
+def apply_accent_blur(hwnd, argb=TOKEN_ACCENT_ARGB):
+    """"玻璃整片"配方：DwmEnableBlurBehindWindow ＋ 扩展边框 ＋ Accent 磨砂。
+
+    这是参考 D:\\项目\\token监测（Electron）在**这台机器上实测可用**的做法照搬过来的，
+    关键是三件事缺一不可，而且窗口必须**不是分层窗口**：
+
+    1. DwmEnableBlurBehindWindow  —— 我先前漏掉的正是这一步；
+    2. DwmExtendFrameIntoClientArea(-1) —— 把边框扩到整个客户区，客户区交给 DWM 合成；
+    3. SetWindowCompositionAttribute(ACRYLICBLURBEHIND, GradientColor=0x3A232323)。
+
+    之前把 Accent 直接加在分区（layered）透明窗口上，结果是一块不透明的黑片——
+    与非分层窗口配合才是这套配方成立的前提。
+    """
+    if not _valid(hwnd):
+        return False
+    user32 = _user32()
+    dwmapi = _dwmapi()
+    if dwmapi is None:
+        return False
+    try:
+        gdi32 = ctypes.windll.gdi32
+    except (AttributeError, OSError):
+        return False
+
+    region = gdi32.CreateRectRgn(0, 0, -1, -1)
+    if not region:
+        return False
+    try:
+        blur = DWM_BLURBEHIND()
+        blur.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION | DWM_BB_TRANSITIONONMAXIMIZED
+        blur.fEnable = 1
+        blur.hRgnBlur = ctypes.c_void_p(region)
+        blur.fTransitionOnMaximized = 1
+        if dwmapi.DwmEnableBlurBehindWindow(ctypes.c_void_p(hwnd), ctypes.byref(blur)) < 0:
+            return False
+        if not extend_frame_into_client(hwnd):
+            return False
+        if user32 is None:
+            return False
+        policy = ACCENT_POLICY()
+        policy.AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND
+        policy.AccentFlags = 0
+        policy.GradientColor = argb
+        policy.AnimationId = 0
+        data = WINDOWCOMPOSITIONATTRIBDATA()
+        data.Attribute = WCA_ACCENT_POLICY
+        data.Data = ctypes.cast(ctypes.pointer(policy), ctypes.c_void_p)
+        data.SizeOfData = ctypes.sizeof(policy)
+        user32.SetWindowCompositionAttribute(ctypes.c_void_p(hwnd), ctypes.byref(data))
+        return True
+    except (AttributeError, OSError, ValueError):
+        return False
+    finally:
+        try:
+            gdi32.DeleteObject(ctypes.c_void_p(region))
+        except (AttributeError, OSError):
+            pass
+
+
 def describe_platform():
     """一行平台说明，自检时打印，便于判断磨砂为何不生效。"""
     return "win32" if IS_WINDOWS else sys.platform

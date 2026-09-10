@@ -809,6 +809,7 @@ class DeskBasketApp:
         self.dock = DockWindow(
             self.icon_cache,
             on_changed=self._on_dock_changed,
+            always_visible=self.settings.get("dock_always_visible", True),
             icon_size=self.settings["dock_icon_size"],
             hide_delay_ms=self.settings["dock_hide_delay_ms"],
         )
@@ -872,6 +873,7 @@ class DeskBasketApp:
             if self.dock.icon_size != saved["dock_icon_size"]:
                 self.dock.set_icon_size(saved["dock_icon_size"])
             self.dock.hide_delay_ms = saved["dock_hide_delay_ms"]
+            self.dock.always_visible = saved.get("dock_always_visible", True)
             self.dock.set_dock_enabled(saved["dock_enabled"])
         self._apply_basket_visibility(saved)
 

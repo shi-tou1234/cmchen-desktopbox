@@ -22,9 +22,10 @@ LAYER_WORKERW = desktoplayer.LAYER_WORKERW
 LAYER_BOTTOM = desktoplayer.LAYER_BOTTOM
 
 CORNER_RADIUS = 14
-# 面板自身的淡底色：磨砂负责"透"，这层负责压暗一点让图标看得清。
-# alpha 越小越"透"、越像玻璃，但白字在亮壁纸上会越难读——0x50 是实机挑出来的平衡点。
-PANEL_TINT = QColor(16, 16, 22, 0x50)
+# 面板自身的淡底色：磨砂负责"透"，这层只做极轻的压暗。
+# 实测：底色 alpha 0 → 面板亮度 84，0x50 → 63.7，0x90 → 47（背景 240）。
+# 领导要求"背后要透明"，所以压到 0x18：保留一点点可读性，但桌面明显透得出来。
+PANEL_TINT = QColor(16, 16, 22, 0x18)
 # 玻璃边缘那一圈细高光。真实玻璃有反光边，纯色块没有；加上它质感差别很大。
 PANEL_RIM = QColor(255, 255, 255, 0x30)
 

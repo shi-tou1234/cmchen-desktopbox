@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>DeskBasket 浏览</title>
+<link rel="stylesheet" href="common.css">
+<script src="menu.js"></script>
+<style>
+  .grid { grid-template-columns: repeat(auto-fill, 88px); }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <div class="toolbar drag-region">
+      <button class="btn no-drag" id="btn-back" title="返回">←</button>
+      <button class="btn no-drag" id="btn-up" title="上一级">↑</button>
+      <div class="crumbs no-drag" id="crumbs"></div>
+      <button class="btn no-drag" id="btn-system">在系统中打开</button>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="grid no-drag" id="grid"></div>
+  </div>
+
+  <script>
+    const api = window.deskbasket;
+    const startPath = new URLSearchParams(location.search).get('path') || '';
+    const gridEl = document.getElementById('grid');
+    const crumbEl = document.getElementById('crumbs');
+    const statusEl = document.getElementById('status');
+    const backBtn = document.getElementById('btn-back');
+    const upBtn = document.getElementById('btn-up');
+
+    let currentPath = startPath;
+    const history = [];
+    let iconSize = 48;
+    let listToken = 0;
+
+    function baseName(target) {
+      return String(target).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || target;
+    }
+
+    // 与主进程 filebrowse 等价的纯前端版本，用于面包屑与上级
+    function parseRoot(target) {
+      const match = /^[a-zA-Z]:[\\/]/.exec(target);
+      if (match) return match[0];
+      if (target.startsWith('\\\\')) {
+        const parts = target.slice(2).split(/[\\/]/);
+        return '\\\\' + parts.slice(0, 2).join('\\');
+      }
+      return '/';
+    }
+
+    function parentOf(target) {
+      const root = parseRoot(target);
+      const rest = target.slice(root.length).replace(/[\\/]+$/, '');
+      if (!rest) return null;
+      const pieces = rest.split(/[\\/]/);
+      pieces.pop();
+      if (!pieces.length) return root;
+      return root.replace(/[\\/]+$/, '') + '\\' + pieces.join('\\');
+    }
+
+    function crumbParts(target) {
+      const root = parseRoot(target);
+      const parts = [{ label: root.replace(/[\\/]+$/, '') || root, path: root }];
+      const rest = target.slice(root.length).replace(/[\\/]+$/, '');
+      if (!rest) return parts;
+      let acc = root.replace(/[\\/]+$/, '');
+      for (const piece of rest.split(/[\\/]/)) {
+        if (!piece) continue;
+        acc = acc + '\\' + piece;
+        parts.push({ label: piece, path: acc });
+      }
+      return parts;
+    }
+
+    function renderCrumbs() {
+      crumbEl.innerHTML = '';
+      const parts = crumbParts(currentPath);
+      parts.forEach((part, index) => {
+        if (index) {
+          const sep = document.createElement('span');
+          sep.className = 'crumb-sep';
+          sep.textContent = '/';
+          crumbEl.append(sep);
+        }
+        const btn = document.createElement('button');
+        btn.className = 'crumb';
+        btn.textContent = part.label;
+        btn.addEventListener('click', () => navigate(part.path));
+        crumbEl.append(btn);
+      });
+      upBtn.disabled = parentOf(currentPath) === null;
+      backBtn.disabled = history.length === 0;
+    }
+
+    function makeCell(entry) {
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.title = entry.path;
+      cell.style.width = Math.max(72, iconSize + 40) + 'px';
+
+      const img = document.createElement('img');
+      img.alt = '';
+      img.style.width = iconSize + 'px';
+      img.style.height = iconSize + 'px';
+      api.getIcon(entry.path, iconSize).then((dataUrl) => {
+        if (dataUrl) img.src = dataUrl;
+      });
+
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = entry.name;
+
+      cell.append(img, name);
+      cell.addEventListener('dblclick', () => {
+        if (entry.isDir) navigate(entry.path);
+        else api.openPath(entry.path);
+      });
+      cell.addEventListener('contextmenu', async (event) => {
+        event.preventDefault();
+        const picked = await window.showContextMenu(
+          [
+            entry.isDir ? { key: 'enter', label: '打开这个文件夹' } : null,
+            { key: 'open', label: '打开' },
+            { key: 'reveal', label: '用系统资源管理器打开所在位置' }
+          ].filter(Boolean),
+          event
+        );
+        if (picked === 'enter') navigate(entry.path);
+        else if (picked === 'open') api.openPath(entry.path);
+        else if (picked === 'reveal') api.revealPath(entry.path);
+      });
+      return cell;
+    }
+
+    // 分批渲染：大目录不卡界面，与 Python 版的 CHUNK_SIZE 同思路
+    async function renderInBatches(entries, token) {
+      const CHUNK = 200;
+      for (let index = 0; index < entries.length; index += CHUNK) {
+        if (token !== listToken) return;   // 切目录后丢弃过期批次
+        for (const entry of entries.slice(index, index + CHUNK)) {
+          gridEl.append(makeCell(entry));
+        }
+        statusEl.textContent = '已列出 ' + Math.min(index + CHUNK, entries.length) + ' / ' + entries.length + ' 项…';
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      statusEl.textContent = '共 ' + entries.length + ' 项';
+    }
+
+    async function navigate(target, pushHistory = true) {
+      const result = await api.listDir(target);
+      if (result.error) {
+        statusEl.className = 'status error';
+        statusEl.textContent = result.error + '：' + target;
+        return false;
+      }
+      if (pushHistory && currentPath && currentPath !== target) history.push(currentPath);
+      currentPath = target;
+      statusEl.className = 'status';
+      gridEl.innerHTML = '';
+      renderCrumbs();
+      listToken += 1;
+      renderInBatches(result.entries, listToken);
+      return true;
+    }
+
+    document.getElementById('btn-up').addEventListener('click', () => {
+      const parent = parentOf(currentPath);
+      if (parent) navigate(parent);
+    });
+    document.getElementById('btn-back').addEventListener('click', () => {
+      const target = history.pop();
+      if (target) navigate(target, false);
+    });
+    document.getElementById('btn-system').addEventListener('click', () => api.revealPath(currentPath));
+
+    api.onStateChanged(async () => {
+      const state = await api.getState();
+      iconSize = state.settings.icon_size || 48;
+      navigate(currentPath, false);
+    });
+
+    (async () => {
+      const state = await api.getState();
+      iconSize = state.settings.icon_size || 48;
+      navigate(currentPath, false);
+    })();
+  </script>
+</body>
+</html>

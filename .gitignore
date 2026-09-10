@@ -2,9 +2,9 @@
 __pycache__/
 *.pyc
 build/
-dist/
 .pytest_cache/
 .mimosa/
+node_modules/
 docs/*.log
 docs/_*.png
 docs/tint_*.png

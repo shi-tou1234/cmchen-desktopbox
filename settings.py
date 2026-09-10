@@ -32,6 +32,7 @@ DEFAULTS = {
     "baskets": [],              # 筐列表，见 baskets.normalize_baskets
     # 第二轮：底部 Dock
     "dock_enabled": True,               # Dock 总开关
+    "dock_always_visible": True,        # 常驻显示：鼠标移开也不收起（领导要求）
     "dock_icon_size": 48,               # Dock 图标边长
     "dock_hide_delay_ms": DOCK_HIDE_DELAY_DEFAULT,  # 鼠标离开后多久收起
     "dock_items": [],                   # Dock 条目（有序，见 dockmodel）
@@ -130,6 +131,9 @@ def merged_settings(raw):
     result["baskets"] = baskets_mod.normalize_baskets(raw.get("baskets"))
     result["dock_enabled"] = _coerce_bool(
         raw.get("dock_enabled"), DEFAULTS["dock_enabled"]
+    )
+    result["dock_always_visible"] = _coerce_bool(
+        raw.get("dock_always_visible"), DEFAULTS["dock_always_visible"]
     )
     result["dock_icon_size"] = _coerce_dock_icon_size(raw.get("dock_icon_size"))
     result["dock_hide_delay_ms"] = _coerce_hide_delay(raw.get("dock_hide_delay_ms"))

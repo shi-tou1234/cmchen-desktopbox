@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>玻璃探针</title>
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  .panel {
+    position: absolute; inset: 8px;
+    border-radius: 14px;
+    border: 1px solid rgba(255,255,255,0.28);
+    /* 页面自己几乎不铺底色，把"透"交给系统材质 */
+    background: rgba(16, 16, 22, 0.10);
+    color: #f2f2f6;
+    font: 13px/1.5 "Microsoft YaHei", system-ui, sans-serif;
+    padding: 12px 14px;
+    box-sizing: border-box;
+  }
+  .panel b { font-size: 15px; }
+  .icons { display: flex; gap: 10px; margin-top: 10px; }
+  .icons img { width: 40px; height: 40px; }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <b id="title">玻璃探针</b>
+    <div id="sub" style="opacity:.8;margin-top:4px"></div>
+    <div class="icons">
+      <img id="i1" alt=""><img id="i2" alt=""><img id="i3" alt="">
+    </div>
+  </div>
+  <script>
+    const config = new URLSearchParams(location.search);
+    document.getElementById('title').textContent = config.get('label') || '玻璃探针';
+    document.getElementById('sub').textContent = config.get('desc') || '';
+    // 用系统里几个真实文件的图标，确认图标能正常上屏
+    const sample = (config.get('icons') || '').split('|').filter(Boolean);
+    ['i1','i2','i3'].forEach((id, index) => {
+      if (sample[index]) document.getElementById(id).src = 'file:///' + sample[index].replace(/\\/g, '/');
+    });
+  </script>
+</body>
+</html>
