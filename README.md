@@ -252,6 +252,51 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 会依次生成图标、用 PyInstaller 打成单文件 exe、对源码和 exe 各跑一遍自检、再跑单元测试，最后打印产物大小。产物在 `dist\DeskBasket.exe`。
 
+## 版本与回退
+
+仓库历史上**没有改写过**（没有 force-push、没有 rebase 掉已有提交），每个提交都是一次可用的完整状态，所以任何一步都能回去。
+
+| 标签 | 提交 | 内容 |
+|---|---|---|
+| `v1.0.0` | `55593cf` | 第一轮交付：磨砂文件筐、拖入收纳、双击打开、内置文件浏览器、开机自启、托盘、单文件 exe。146 条测试 |
+| `v2.0.0` | `f63cb11` | 第二轮交付：底部 Dock（透明、悬浮自动隐藏）、设置面板、Win11 系统磨砂材质、单实例保护。255 条测试 |
+
+### 回退到某个版本
+
+看某个版本的文件（不动当前工作区）：
+
+```bash
+git show v1.0.0:main.py            # 只看某个文件
+git diff v1.0.0 HEAD --stat        # 看两版差了什么
+```
+
+**临时回到旧版本试一下**（推荐：不会丢掉后面的提交，随时能回来）：
+
+```bash
+git switch --detach v1.0.0         # 回到第一轮的代码状态
+# 试完回来：
+git switch main
+```
+
+**真要把主分支退回到旧版本**（后面的提交仍留在 git 里，靠 reflog / 标签还能找回来，但主分支指针会后退）：
+
+```bash
+git switch main
+git reset --hard v1.0.0            # 主分支退回第一轮
+git push --force-with-lease origin main   # 远端也退回去（需要你授权执行）
+```
+
+只想**撤销某一次具体的改动**、其余保留：
+
+```bash
+git log --oneline                  # 先找到那个提交号
+git revert <提交号>                # 生成一个反向提交，历史保持完整
+```
+
+想彻底单独看第二轮某个阶段的代码，用这一串提交（从早到晚）：`89a4e01` Dock 骨架 → `38eb630` Dock 图标与排序 → `95df113` 设置面板 → `b3a36fc` 打包取证 → `e141a6d` bug 检查 → `8d23353` 磨砂材质返工 → `4e4b5f5` 单实例保护。
+
+> 本地开发目录是 `D:\项目\桌面整理`，远端是 <https://github.com/shi-tou1234/cmchen-desktopbox>。`git push` 到这个仓库偶发 502，重试即可（`git ls-remote` 能通就说明凭据没问题）。
+
 ## 许可
 
 [MIT](LICENSE) © 2026 cmchen
