@@ -70,3 +70,36 @@
 3. 时间戳 22:56:49 落在我未运行任何写盘命令的时段。
 
 结论：49 条中 48 条（含名字、修改时间、大小）完全一致，桌面没有被本程序改动。这条差异已如实记录，不做粉饰。
+
+## 磨砂判据的自我纠错（重要，别被旧数字误导）
+
+第一版判据（条纹背板内外**方差**比，取样区写死逻辑坐标）在本机报过 `RATIO 0.338 BLURRED`，后来又报 `RATIO 1.079 / 0.703 NOT_BLURRED`。查下来**两次都是判据本身的问题，不是磨砂失效**：
+
+1. 屏幕是 2560×1600、缩放 150%。窗口逻辑位置 (370,400,460,200) 实际落在物理像素 `(555,600)-(1245,900)`，而取样区写死成 (500,470) → 偏到面板**外面**，量到的是没被遮住的清晰条纹。
+2. 取样区落在面板中央的文字上。白字高频远高于条纹，指标被带反（曾出现"面板内比面板外还锐利"的荒谬结果）。
+3. 方差这个指标本身对屏幕缩放敏感（150% 下条纹物理变宽、模糊相对变弱），而且分不清"模糊"和"只压暗"。
+
+现在改为：取样区按 `GetWindowRect` 的**物理**矩形算（DPI 无关），取证模式探针不画文字，指标换成**高频能量比**（相邻像素亮度差）。实测：
+
+- `main.py --visual` → `SHARPNESS_HIDDEN 11.67 SHOWN 0.00 RATIO 0.000` / `BLUR_VERDICT BLURRED`
+- `main.py --visual --accent=off`（反向验证）→ `SHARPNESS_HIDDEN 11.67 SHOWN 7.27 RATIO 0.623` / `BLUR_VERDICT NOT_BLURRED`
+
+0.623 几乎正好等于面板底色透光率 0.62（`TINT_TRANSMITTANCE 0.62`），精确印证"只压暗＝等比衰减、真模糊＝削平高频"。判据既不恒真也不恒假。
+
+## 最终验收（2026-09-10 收尾复跑）
+
+- `pytest tests -rs` → `146 passed`，skipped=0（任务书基线 18 / 26 / 34）。
+- `QT_QPA_PLATFORM=offscreen main.py --selftest` → `SELFTEST_OK_probe 460 200` / `OK_drop 1` / `OK_basket 5` / `OK_explorer 5`，rc=0。
+- `dist\DeskBasket.exe --selftest` → 同上四项，`ExitCode=0`。
+- `dist\DeskBasket.exe` = 36.6 MB（上限 45MB）。
+- 自启：开 → 注册表可查到 `DeskBasket REG_SZ ...pythonw.exe ...main.py`；关 → `错误: 系统找不到指定的注册表项或值`。
+- 轻量：窗口全开静置 10 秒工作集 11.2 MB、峰值 11.2 MB（与 `tasklist` 交叉核对一致）。
+- 防作弊审计：`tests/` 与 `build.ps1` 内无 skip/xfail/todo/`|| true`。
+- 依赖审计：import 只有 PySide6（+ 测试用 pytest）与标准库，无额外第三方依赖。
+- 桌面比对：`BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1`，唯一变化 `价格.txt` 为程序外内容编辑（依据见上一节）。
+
+**已知不达标项（如实记录，未达成就是未达成）**：
+- 任务书任务 1 的「贴桌面层」语义未达成，四条路实测失败，处置与证据见 `BLOCKED.md`。
+- 硬指标二「条目数与时间戳一致」严格讲未 100% 达成：49 条中 48 条完全一致，1 条时间戳变化，已证明与程序无关但无法证明是谁改的。
+- 任务书要求「每做完一个任务 commit 一次」，实际是集中提交了 5 次（含修正提交），未做到逐任务提交。
+- 推送前 Mimosa 完整安全审计未跑完（`python_ast_unavailable`），**不能宣称项目已通过安全审计**。
