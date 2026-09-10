@@ -24,6 +24,7 @@ import baskets
 import desktoplayer
 import dropfiles
 import fileicons
+import frosted_window
 import settings
 from basket_window import BasketWindow
 from explorer_window import ExplorerWindow
@@ -50,6 +51,7 @@ class ProbeWindow(FrostedWindow):
         marker=False,
         always_on_top=False,
         translucent=True,
+        show_label=True,
     ):
         super().__init__(
             accent_mode=accent_mode,
@@ -61,11 +63,13 @@ class ProbeWindow(FrostedWindow):
         self.resize(460, 200)
         self.marker = marker
         self.dropped = []
-        label = QLabel("DeskBasket 探针\n把文件拖到这里试试", self)
-        label.setAlignment(Qt.AlignCenter)
-        label.setStyleSheet(FALLBACK_STYLE)
-        label.setGeometry(0, 0, 460, 200)
-        label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        if show_label:
+            # 取证模式不画文字：文字的高频远高于条纹，会污染模糊判据
+            label = QLabel("DeskBasket 探针\n把文件拖到这里试试", self)
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet(FALLBACK_STYLE)
+            label.setGeometry(0, 0, 460, 200)
+            label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         if accept_drops:
             self.drop_handler = self.on_paths
 
@@ -489,6 +493,8 @@ def region_variance(image, x, y, width, height, step=3):
     """区域内像素亮度方差（稀疏采样），用来判断"糊没糊"。
 
     清晰的高对比条纹方差很大；被磨砂模糊后局部方差会明显下降。
+    注意：单纯加一层半透明底色也会等比降低方差，所以只靠方差没法区分
+    "模糊"和"压暗"，判定磨砂要用 region_sharpness。
     """
     if image is None:
         return 0.0
@@ -503,6 +509,30 @@ def region_variance(image, x, y, width, height, step=3):
         return 0.0
     mean = sum(values) / len(values)
     return sum((value - mean) ** 2 for value in values) / len(values)
+
+
+def region_sharpness(image, x, y, width, height, step=2):
+    """区域的高频能量：水平相邻像素亮度差的平均绝对值。
+
+    这是判定"磨砂"的关键指标——真实模糊会把高频大幅削平（比值接近 0），
+    而单纯盖一层半透明底色只是把差值等比缩小（比值≈透光率）。
+    """
+    if image is None:
+        return 0.0
+    total = 0.0
+    count = 0
+    max_x = min(x + width, image.width() - 1)
+    max_y = min(y + height, image.height())
+    for py in range(max(0, y), max_y, step):
+        previous = None
+        for px in range(max(0, x), max_x, step):
+            color = image.pixelColor(px, py)
+            value = (color.red() + color.green() + color.blue()) / 3.0
+            if previous is not None:
+                total += abs(value - previous)
+                count += 1
+            previous = value
+    return (total / count) if count else 0.0
 
 
 def wait_ms(app, milliseconds):
@@ -532,7 +562,7 @@ class StripeBackdrop(QWidget):
             QColor(30, 220, 30),
             QColor(40, 60, 240),
         ]
-        band = 24
+        band = 12
         for index in range(0, self.width() // band + 1):
             painter.fillRect(
                 index * band, 0, band, self.height(), palette[index % len(palette)]
@@ -541,44 +571,91 @@ class StripeBackdrop(QWidget):
 
 
 def run_visual_test(argv):
-    """自包含的磨砂观感取证：条纹背板 + 磨砂面板，抓屏并用方差比判定是否糊了。"""
+    """自包含的磨砂观感取证。
+
+    做法：条纹背板 + 磨砂面板，先抓一张"面板还没显示"的原始条纹图，再抓一张
+    "面板盖上去"的图，比较同一块区域的高频能量（相邻像素亮度差）。
+    真实模糊会把高频削平（比值远小于透光率），只压暗不模糊则接近透光率。
+    `--accent=off` 是反向验证：那时必须报 NOT_BLURRED，证明判据不是恒真。
+    """
+    accent_mode = acrylic.MODE_ACRYLIC
+    for token in argv:
+        if token.startswith("--accent="):
+            accent_mode = token.split("=", 1)[1]
+
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName(APP_NAME)
     backdrop = StripeBackdrop()
     backdrop.show()
     app.processEvents()
 
-    window = ProbeWindow(accent_mode=acrylic.MODE_ACRYLIC, layer=LAYER_TOP, marker=True)
+    window = ProbeWindow(
+        accent_mode=accent_mode, layer=LAYER_TOP, marker=True, show_label=False
+    )
     window.setGeometry(370, 400, 460, 200)
     window.show()
     app.processEvents()
     effective = window.apply_effects()
-    for _ in range(3):
-        app.processEvents()
+    wait_ms(app, 500)
 
-    image = None
-    wait_ms(app, 700)
-    image = grab_screen_image()
-    if image is None:
+    # 取样区域按**物理**矩形算：GetWindowRect 与 grabWindow(0) 同为物理像素，
+    # 逻辑坐标在 125%/150% 缩放下会整体偏移，写死坐标会量到面板外面去。
+    panel_rect = window_rect(int(window.winId()))
+    backdrop_rect = window_rect(int(backdrop.winId()))
+    if not panel_rect or not backdrop_rect:
+        print("VISUAL_FAIL 取不到窗口矩形", flush=True)
+        return 1
+
+    def sample():
+        image = grab_screen_image()
+        if image is None:
+            return None, None
+        return image, (
+            panel_rect[0] + 24,
+            panel_rect[1] + 40,
+        )
+
+    # A) 面板隐藏：原始条纹
+    window.hide()
+    wait_ms(app, 400)
+    hidden_image, (sx, sy) = sample()
+    if hidden_image is None:
         print("VISUAL_FAIL 抓屏失败", flush=True)
         return 1
-    image.save(os.path.join(PROJECT_ROOT, "docs", "probe_visual.png"), "PNG")
 
-    inside = region_variance(image, 500, 470, 200, 60)
-    outside = region_variance(image, 260, 200, 200, 60)
-    ratio = (inside / outside) if outside else 0.0
+    # B) 面板显示：同一块区域
+    window.show()
+    window.apply_effects()
+    wait_ms(app, 500)
+    shown_image, _ = sample()
+    if shown_image is None:
+        print("VISUAL_FAIL 抓屏失败", flush=True)
+        return 1
+    shown_image.save(os.path.join(PROJECT_ROOT, "docs", "probe_visual.png"), "PNG")
+
+    sample_w, sample_h = 240, 60
+    sharp_hidden = region_sharpness(hidden_image, sx, sy, sample_w, sample_h)
+    sharp_shown = region_sharpness(shown_image, sx, sy, sample_w, sample_h)
+    ratio = (sharp_shown / sharp_hidden) if sharp_hidden else 0.0
+    tint_transmittance = 1.0 - (frosted_window.PANEL_TINT.alpha() / 255.0)
+
     print("VISUAL_ACCENT %s" % effective, flush=True)
     print(
-        "BLUR_VARIANCE_INSIDE %.1f OUTSIDE %.1f RATIO %.3f"
-        % (inside, outside, ratio),
+        "PANEL_RECT %s BACKDROP_RECT %s SAMPLE_AT (%d,%d) IMAGE %dx%d"
+        % (panel_rect, backdrop_rect, sx, sy, shown_image.width(), shown_image.height()),
+        flush=True,
+    )
+    print(
+        "SHARPNESS_HIDDEN %.2f SHOWN %.2f RATIO %.3f TINT_TRANSMITTANCE %.2f"
+        % (sharp_hidden, sharp_shown, ratio, tint_transmittance),
         flush=True,
     )
     print(
         "BLUR_VERDICT %s"
-        % ("BLURRED" if outside and ratio < 0.6 else "NOT_BLURRED"),
+        % ("BLURRED" if sharp_hidden and ratio < 0.5 else "NOT_BLURRED"),
         flush=True,
     )
-    print("VISUAL_OK %d %d" % (image.width(), image.height()), flush=True)
+    print("VISUAL_OK %d %d" % (shown_image.width(), shown_image.height()), flush=True)
     window.hide()
     backdrop.hide()
     return 0

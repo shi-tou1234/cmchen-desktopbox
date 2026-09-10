@@ -116,16 +116,27 @@ $ tasklist  →  python.exe   11,180 K       # 工作集 11.2 MB
 
 **磨砂确实生效（不是靠半透明假装）**
 
-程序里有一项自包含取证：铺一块高对比条纹背板，把磨砂面板盖上去，抓屏后比较"面板内的像素方差"和"面板外的方差"。模糊会把条纹糊平，方差显著下降。
+程序里有一项自包含取证：铺一块高对比条纹背板，先抓一张"面板还没显示"的原始条纹图，再把磨砂面板盖上去抓第二张，比较同一块区域的**高频能量**（相邻像素亮度差）。真实模糊会把高频削平，而单纯盖一层半透明底色只是等比缩小——两者的比值有本质区别。
 
 ```
 $ .venv/Scripts/python.exe main.py --visual
 VISUAL_ACCENT acrylic
-BLUR_VARIANCE_INSIDE 2048.4 OUTSIDE 6063.5 RATIO 0.338
+SHARPNESS_HIDDEN 11.67 SHOWN 0.00 RATIO 0.000 TINT_TRANSMITTANCE 0.62
 BLUR_VERDICT BLURRED
 ```
 
-取证图：`docs/probe_visual.png`。
+反向验证（同一命令关掉磨砂，必须报 NOT_BLURRED，证明判据不是恒真）：
+
+```
+$ .venv/Scripts/python.exe main.py --visual --accent=off
+VISUAL_ACCENT off
+SHARPNESS_HIDDEN 11.67 SHOWN 7.27 RATIO 0.623 TINT_TRANSMITTANCE 0.62
+BLUR_VERDICT NOT_BLURRED
+```
+
+注意 0.623 几乎正好等于面板底色的透光率 0.62——这精确印证了"只压暗不模糊"与"真模糊"是两回事：acrylic 下高频被削到 0.000，关掉磨砂后只剩底色等比衰减。
+
+取证图：`docs/probe_visual.png`（面板内条纹明显糊开，面板外依旧锐利）。
 
 **开机自启**
 
