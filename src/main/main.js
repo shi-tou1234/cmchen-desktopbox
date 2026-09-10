@@ -164,7 +164,7 @@ async function iconFor(target, size = 48) {
 // ------------------------------------------------------------------ 窗口：筐
 
 function createBasketWindow(basket) {
-  const win = winFactory.createNormalWindow({
+  const win = winFactory.createBehaviorWindow(settings.basket_behavior, {
     glass: winFactory.glassEnabled(settings),
     width: basket.w,
     height: basket.h,
@@ -226,7 +226,7 @@ function applyDockGeometry() {
 
 function createDockWindow() {
   const rect = dockTargetGeometry();
-  const win = winFactory.createWidgetWindow({
+  const win = winFactory.createBehaviorWindow(settings.dock_behavior, {
     ...rect,
     glass: winFactory.glassEnabled(settings),
     title: `${APP_NAME} Dock`
@@ -237,10 +237,7 @@ function createDockWindow() {
   win.on('closed', () => {
     dockWindow = null;
   });
-  // 固定于桌面：不允许拖走或缩放
-  win.setResizable(false);
-  win.setMovable(false);
-  win.setAlwaysOnTop(true, 'floating');
+  // 行为完全交给 dock_behavior（默认 desktop：不置顶、不可拖、不可缩放）
   return win;
 }
 
@@ -276,7 +273,7 @@ function syncDockItems() {
 // ------------------------------------------------------------------ 窗口：浏览器 / 设置
 
 function openExplorer(target) {
-  const win = winFactory.createNormalWindow({
+  const win = winFactory.createBehaviorWindow('normal', {
     glass: winFactory.glassEnabled(settings),
     width: 720,
     height: 520,
@@ -298,7 +295,7 @@ function openSettings() {
     settingsWindow.focus();
     return settingsWindow;
   }
-  settingsWindow = winFactory.createNormalWindow({
+  settingsWindow = winFactory.createBehaviorWindow('normal', {
     glass: winFactory.glassEnabled(settings),
     width: 560,
     height: 640,
@@ -546,9 +543,12 @@ function registerIpc() {
 
   ipcMain.handle('settings:update', (_event, { patch }) => {
     const before = settings.accent_mode;
+    const beforeBehaviors = `${settings.basket_behavior}|${settings.dock_behavior}`;
     settings = store.mergedSettings({ ...settings, ...(patch || {}) });
     persist();
-    if (before !== settings.accent_mode) {
+    const behaviorsChanged =
+      beforeBehaviors !== `${settings.basket_behavior}|${settings.dock_behavior}`;
+    if (before !== settings.accent_mode || behaviorsChanged) {
       // transparent / backgroundMaterial 在窗口创建时就锁定了，改模式必须重建窗口
       rebuildWindows();
     }

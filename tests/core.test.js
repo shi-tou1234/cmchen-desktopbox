@@ -13,6 +13,7 @@ const store = require('../src/main/store');
 const baskets = require('../src/main/baskets');
 const dockmodel = require('../src/main/dockmodel');
 const filebrowse = require('../src/main/filebrowse');
+const behavior = require('../src/main/windowBehavior');
 
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'deskbasket-test-'));
@@ -47,10 +48,41 @@ function makeLinks(dir, names) {
 
 // ---------------------------------------------------------------- 配置
 
-test('默认配置：完全透明、Dock 常驻', () => {
-  assert.strictEqual(store.DEFAULTS.accent_mode, 'off');
+test('默认配置：磨砂玻璃（token 默认）＋ Dock 常驻', () => {
+  assert.strictEqual(store.DEFAULTS.accent_mode, 'acrylic');
   assert.strictEqual(store.DEFAULTS.dock_always_visible, true);
   assert.strictEqual(store.DEFAULTS.dock_enabled, true);
+});
+
+test('默认窗口行为：文件筐＝普通窗口，Dock＝固定于桌面', () => {
+  assert.strictEqual(store.DEFAULTS.basket_behavior, 'normal');
+  assert.strictEqual(store.DEFAULTS.dock_behavior, 'desktop');
+});
+
+test('窗口行为三个 profile 与 token 一致', () => {
+  const floating = behavior.WINDOW_BEHAVIOR_PROFILES.floating;
+  assert.strictEqual(floating.alwaysOnTop, true);
+  assert.strictEqual(floating.draggable, true);
+
+  const normal = behavior.WINDOW_BEHAVIOR_PROFILES.normal;
+  assert.strictEqual(normal.alwaysOnTop, false);
+  assert.strictEqual(normal.draggable, true);
+  assert.strictEqual(normal.resizable, true);
+  assert.strictEqual(normal.focusable, true);
+
+  const desktop = behavior.WINDOW_BEHAVIOR_PROFILES.desktop;
+  assert.strictEqual(desktop.alwaysOnTop, false, '固定于桌面不置顶');
+  assert.strictEqual(desktop.draggable, false, '固定于桌面不可拖');
+  assert.strictEqual(desktop.resizable, false, '固定于桌面不可缩放');
+  assert.strictEqual(desktop.cssClass, 'desktop-mode');
+});
+
+test('窗口行为取值非法时回退，兼容旧的 alwaysOnTop 字段', () => {
+  assert.strictEqual(behavior.normalizeWindowBehavior('乱写', 'normal'), 'normal');
+  assert.strictEqual(behavior.normalizeWindowBehavior('DESKTOP'), 'desktop');
+  assert.strictEqual(behavior.modeFromSettings({ alwaysOnTop: true }), 'floating');
+  assert.strictEqual(behavior.modeFromSettings({ alwaysOnTop: false }), 'normal');
+  assert.strictEqual(behavior.modeFromSettings({ windowBehavior: 'desktop' }), 'desktop');
 });
 
 test('坏 JSON 回退默认，不抛异常', () => {
@@ -93,7 +125,7 @@ test('非法取值回退默认', () => {
     icon_size: 9999,
     dock_hide_delay_ms: 5
   });
-  assert.strictEqual(merged.accent_mode, 'off');
+  assert.strictEqual(merged.accent_mode, 'acrylic');
   assert.strictEqual(merged.icon_size, store.DEFAULTS.icon_size);
   assert.strictEqual(merged.dock_hide_delay_ms, store.DEFAULTS.dock_hide_delay_ms);
 });

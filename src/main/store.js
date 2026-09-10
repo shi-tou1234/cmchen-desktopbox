@@ -6,13 +6,15 @@
 
 const fs = require('node:fs');
 const os = require('node:os');
+
+const behavior = require('./windowBehavior');
 const path = require('node:path');
 
 const SETTINGS_FILENAME = 'settings.json';
 const APP_DIR_NAME = 'DeskBasket';
 
 const DEFAULTS = {
-  accent_mode: 'off',          // off=完全透明（默认）／acrylic=系统磨砂玻璃／blur=轻量模糊
+  accent_mode: 'acrylic',      // acrylic=系统磨砂玻璃（token 默认）／off=完全透明／blur=轻量模糊
   autostart: false,
   icon_size: 48,
   baskets: [],
@@ -21,7 +23,10 @@ const DEFAULTS = {
   dock_icon_size: 48,
   dock_hide_delay_ms: 400,
   dock_items: [],
-  dock_removed: []
+  dock_removed: [],
+  // 窗口行为，与 token 的 windowBehavior 同一套：floating / normal / desktop
+  basket_behavior: 'normal',   // 文件筐＝普通窗口
+  dock_behavior: 'desktop'     // Dock＝固定于桌面（不置顶、不可拖、不可缩放）
 };
 
 const ACCENT_MODES = ['off', 'acrylic', 'blur'];
@@ -130,6 +135,8 @@ function mergedSettings(raw) {
   );
   out.dock_items = normalizePathList(raw.dock_items);
   out.dock_removed = normalizePathList(raw.dock_removed);
+  out.basket_behavior = behavior.normalizeWindowBehavior(raw.basket_behavior, 'normal');
+  out.dock_behavior = behavior.normalizeWindowBehavior(raw.dock_behavior, 'desktop');
   return out;
 }
 

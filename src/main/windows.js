@@ -11,6 +11,8 @@
 const { BrowserWindow, screen } = require('electron');
 const path = require('node:path');
 
+const behavior = require('./windowBehavior');
+
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
 
 const GLASS_MATERIAL = 'acrylic';
@@ -52,6 +54,7 @@ function baseOptions(options = {}) {
     maximizable = false,
     focusable = false,
     skipTaskbar = true,
+    movable = true,
     alwaysOnTop = false,
     title = 'DeskBasket'
   } = options;
@@ -65,6 +68,7 @@ function baseOptions(options = {}) {
     show: false,
     hasShadow: false,
     resizable,
+    movable,
     minimizable,
     maximizable,
     focusable,
@@ -90,30 +94,29 @@ function loadPage(win, page, query) {
   return win;
 }
 
-// 桌面挂件类窗口：不抢焦点、不进任务栏、常驻置顶
-function createWidgetWindow(options = {}) {
-  const win = new BrowserWindow(
-    baseOptions({ focusable: false, skipTaskbar: true, alwaysOnTop: true, ...options })
-  );
-  if (typeof win.setAlwaysOnTop === 'function') {
-    win.setAlwaysOnTop(true, 'floating');
-  }
-  win.setMenuBarVisibility?.(false);
-  return win;
-}
-
-// 普通窗口（按领导要求：文件夹做成普通窗口——可聚焦、进任务栏、可最小化）
-function createNormalWindow(options = {}) {
+// 按行为模式建窗：floating / normal / desktop 三个 profile 与 token 一致
+function createBehaviorWindow(behaviorName, options = {}) {
+  const profile = behavior.WINDOW_BEHAVIOR_PROFILES[
+    behavior.normalizeWindowBehavior(behaviorName, 'normal')
+  ];
   const win = new BrowserWindow(
     baseOptions({
-      focusable: true,
+      focusable: profile.focusable,
       skipTaskbar: false,
-      resizable: true,
-      minimizable: true,
-      alwaysOnTop: false,
+      resizable: profile.resizable,
+      movable: profile.draggable,
+      minimizable: profile.mode !== 'desktop',
+      maximizable: profile.mode !== 'desktop',
+      alwaysOnTop: profile.alwaysOnTop,
       ...options
     })
   );
+  if (typeof win.setAlwaysOnTop === 'function') {
+    win.setAlwaysOnTop(profile.alwaysOnTop, 'floating');
+  }
+  if (typeof win.setMovable === 'function') win.setMovable(profile.draggable);
+  if (typeof win.setResizable === 'function') win.setResizable(profile.resizable);
+  win.__behavior = profile.mode;
   win.setMenuBarVisibility?.(false);
   return win;
 }
@@ -135,9 +138,8 @@ function listDisplays() {
 
 module.exports = {
   GLASS_MATERIAL,
+  createBehaviorWindow,
   glassEnabled,
-  createNormalWindow,
-  createWidgetWindow,
   glassOptions,
   listDisplays,
   loadPage,

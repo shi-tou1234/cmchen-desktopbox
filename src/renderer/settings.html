@@ -31,6 +31,21 @@
       </div>
 
       <div class="group">
+        <h3>窗口行为（与 token 同一套模式）</h3>
+        <div class="row">
+          <label for="basketBehavior">文件筐</label>
+          <select id="basketBehavior"></select>
+        </div>
+        <div class="row">
+          <label for="dockBehavior">Dock</label>
+          <select id="dockBehavior"></select>
+        </div>
+        <div class="row">
+          <span class="hint">普通窗口＝可拖动可缩放；固定于桌面＝不置顶、不可拖、不可缩放；浮动置顶＝浮在其他窗口上方</span>
+        </div>
+      </div>
+
+      <div class="group">
         <h3>底部 Dock</h3>
         <div class="row">
           <label for="dockEnabled">显示 Dock（固定于桌面底部）</label>
@@ -85,6 +100,11 @@
 
   <script>
     const api = window.deskbasket;
+    const BEHAVIOR_LABELS = {
+      normal: '普通窗口（可拖动、可缩放）',
+      desktop: '固定于桌面（不可拖、不置顶）',
+      floating: '浮动置顶（浮在其他窗口上方）'
+    };
     const ACCENT_LABELS = {
       acrylic: '磨砂玻璃（Win11 系统材质，推荐）',
       blur: '轻量模糊',
@@ -136,6 +156,18 @@
         el('accent').append(option);
       }
       el('accent').value = settings.accent_mode;
+      for (const [key, label] of Object.entries(BEHAVIOR_LABELS)) {
+        for (const id of ['basketBehavior', 'dockBehavior']) {
+          if (!el(id).querySelector(`option[value="${key}"]`)) {
+            const option = document.createElement('option');
+            option.value = key;
+            option.textContent = label;
+            el(id).append(option);
+          }
+        }
+      }
+      el('basketBehavior').value = settings.basket_behavior;
+      el('dockBehavior').value = settings.dock_behavior;
       el('iconSize').value = settings.icon_size;
       el('dockEnabled').checked = settings.dock_enabled;
       el('dockAlways').checked = settings.dock_always_visible;
@@ -159,6 +191,12 @@
     });
     el('iconSize').addEventListener('change', (event) => {
       push({ icon_size: Number(event.target.value) }, '筐内图标大小已更新');
+    });
+    el('basketBehavior').addEventListener('change', (event) => {
+      push({ basket_behavior: event.target.value }, '文件筐窗口行为已更新（窗口会重建）');
+    });
+    el('dockBehavior').addEventListener('change', (event) => {
+      push({ dock_behavior: event.target.value }, 'Dock 窗口行为已更新（窗口会重建）');
     });
     el('dockEnabled').addEventListener('change', (event) => {
       push({ dock_enabled: event.target.checked }, event.target.checked ? 'Dock 已显示' : 'Dock 已隐藏');

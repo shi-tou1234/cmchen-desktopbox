@@ -316,3 +316,7 @@ body.dragover .dock {
   border-color: rgba(140, 190, 255, 0.85);
   background: rgba(40, 70, 120, 0.22);
 }
+
+/* token 的 desktop 模式会加这个类：窗口不可拖动，拖拽区一律失效 */
+body.desktop-mode .drag-region { -webkit-app-region: no-drag; }
+body.desktop-mode .panel { cursor: default; }

@@ -345,3 +345,34 @@ DESKTOP_UNCHANGED_OK
 - 完全透明模式实测：筐面板透光比 **0.92**。
 - 截图：`docs/screenshot-electron.png`。
 
+## 补做：窗口行为模式对齐 token（领导明确「这两个模式都是 token 有的」）
+
+领导指出「文件夹做成普通窗口、dock 做成固定于桌面」这两个模式 token 本来就有。于是去读 token 的实现（`src/electron/windowBehavior.js`），照它的 profile 原样搬过来，而不是我自己发明：
+
+| 模式 | 置顶 | 可拖动 | 可缩放 | 可聚焦 | cssClass |
+|---|---|---|---|---|---|
+| `floating` | true | true | true | true | — |
+| `normal` | false | true | true | true | — |
+| `desktop` | false | **false** | **false** | true | `desktop-mode` |
+
+关键认识：token 的 `desktop` **不是置顶**，也没有用 Win32 的 z 序技巧（没有 WorkerW/Progman），就是「不置顶 ＋ 不能拖 ＋ 不能缩放 ＋ 加一个 `desktop-mode` 类」。我之前把 Dock 做成 `alwaysOnTop` 是过度设计了。
+
+**改动**：
+1. 新增 `src/main/windowBehavior.js`，与 token 同一套 profile／归一化／旧字段兼容（`alwaysOnTop: true → floating`）。
+2. 配置新增 `basket_behavior`（默认 `normal`）与 `dock_behavior`（默认 `desktop`）；设置面板各给一个下拉。
+3. 渲染层加上同名 `desktop-mode` 类（该模式下拖动区一律失效）。
+4. **透明默认改回 token 的默认**：`accent_mode` 默认从 `off`（完全透明）改回 `acrylic`（系统磨砂）——token 的 `systemGlass` 默认就是开着的。两种模式在设置里都能选。
+5. 窗口行为改了同样触发重建（置顶/可拖动这类属性也只在创建时定）。
+
+**真机核对**（窗口扩展样式）：
+
+```
+DeskBasket Dock  rect=(88,972,1832,1082)  EX=0x00200100  置顶=False 工具窗=False NOREDIR=True
+文件筐            rect=(82,110,518,418)     EX=0x00200100  置顶=False 工具窗=False NOREDIR=True
+```
+
+Dock 不再置顶、不进工具窗、固定位置（desktop）；文件筐是普通窗口（normal，进任务栏）。
+
+**验收**：`npm test` → **34 passed / 0 fail**（新增 3 条：默认行为、三个 profile 语义、取值归一化与旧字段兼容）。
+
+
