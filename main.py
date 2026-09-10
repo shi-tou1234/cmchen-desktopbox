@@ -809,7 +809,6 @@ class DeskBasketApp:
         self.dock = DockWindow(
             self.icon_cache,
             on_changed=self._on_dock_changed,
-            accent_mode=self.settings["accent_mode"],
             icon_size=self.settings["dock_icon_size"],
             hide_delay_ms=self.settings["dock_hide_delay_ms"],
         )
@@ -869,7 +868,7 @@ class DeskBasketApp:
             window.accent_mode = saved["accent_mode"]
             window.apply_effects()
         if self.dock is not None:
-            self.dock.set_accent_mode(saved["accent_mode"])
+            # Dock 固定透明形态，不跟随全局磨砂模式（领导要求 Dock 不要背景）
             if self.dock.icon_size != saved["dock_icon_size"]:
                 self.dock.set_icon_size(saved["dock_icon_size"])
             self.dock.hide_delay_ms = saved["dock_hide_delay_ms"]
@@ -978,26 +977,61 @@ def run_app(argv):
 
 
 def run_screenshot(argv):
-    """真机截图取证：显示筐、内置浏览器窗口、滑出的 Dock 后抓整屏。"""
+    """真机截图取证：筐、内置浏览器窗口、滑出的 Dock 同框后抓整屏。"""
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName(APP_NAME)
     state = DeskBasketApp(app, demo_fill=12)
     windows = state.build_windows()
+
+    dock = state.build_dock()
+    shortcuts = collect_desktop_shortcuts(limit=12)
+    if shortcuts:
+        dock.set_items(shortcuts)
+    # 取证期间钉住：否则鼠标一离开，400ms 后它会按设计自动收起，截图上就没了
+    dock.locked = True
+    dock.reveal(animate=False)
+
     if windows:
-        windows[0].setGeometry(160, 200, 520, 360)
+        windows[0].setGeometry(150, 170, 520, 360)
         explorer = state.open_explorer(str(Path.home() / "Desktop"))
-        explorer.setGeometry(720, 240, 700, 480)
+        explorer.setGeometry(700, 210, 700, 470)
         wait_until(lambda: not explorer._pending, timeout_ms=6000)
+    # Dock 最后再抬一次，确保它在最上层（截图的三个东西要都在画面里）
+    dock.reveal(animate=False)
     wait_ms(app, 900)
+
     target = os.path.join(data_root(), "docs", "screenshot.png")
     os.makedirs(os.path.dirname(target), exist_ok=True)
     size = save_screen(target)
+
+    hold_seconds = 0.0
+    for token in argv:
+        if token.startswith("--hold="):
+            hold_seconds = float(token.split("=", 1)[1])
+    if hold_seconds > 0:
+        dock_rect = dock._geometry_for(True) if dock is not None else None
+        print(
+            "HOLDING %d dock_visible=%s dock_rect=%s screen=%s"
+            % (hold_seconds, dock.isVisible() if dock else False,
+               dock_rect, dock._screen_rect() if dock else None),
+            flush=True,
+        )
+        wait_ms(app, hold_seconds * 1000)
+
     for window in list(state.basket_windows) + list(state.explorer_windows):
         window.hide()
+    if dock is not None:
+        dock.stop_polling()
+        dock.hide()
     if size is None:
         print("SCREENSHOT_FAIL", flush=True)
         return 1
-    print("SCREENSHOT_OK %d %d" % size, flush=True)
+    print(
+        "SCREENSHOT_OK %d %d dock_items=%d basket_items=%d"
+        % (size[0], size[1], dock.item_count() if dock else 0,
+           windows[0].model.rowCount() if windows else 0),
+        flush=True,
+    )
     return 0
 
 

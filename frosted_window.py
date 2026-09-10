@@ -58,12 +58,14 @@ class FrostedWindow(QWidget):
         accept_drops=True,
         corner_radius=CORNER_RADIUS,
         translucent=True,
+        draw_panel=True,
     ):
         super().__init__(parent)
         self.accent_mode = accent_mode
         self.effective_accent = "none"
         self.layer = layer
         self.corner_radius = corner_radius
+        self.draw_panel = draw_panel
         self.drop_handler = None
         self.on_top = layer == LAYER_TOP
         self.attached = False
@@ -107,6 +109,9 @@ class FrostedWindow(QWidget):
 
     def paintEvent(self, event):  # noqa: N802 - Qt 命名
         self.paint_count += 1
+        if not self.draw_panel:
+            # 透明形态（Dock 用）：只画子控件，面板本身一点底色都不铺
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)

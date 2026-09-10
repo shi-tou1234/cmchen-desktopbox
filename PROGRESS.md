@@ -184,3 +184,20 @@ DESKTOP_UNCHANGED_OK
 **任务 3 反向验证**：把 `merged_settings` 的「保留未知字段」改成丢弃 → 4 条测试变红（`test_unknown_scalar_field_is_preserved`、`test_unknown_nested_field_is_preserved_as_is`、`test_unknown_fields_survive_save_and_reload`、`test_window_keeps_unknown_fields_after_a_change`），且 `--selftest` 打印 `SELFTEST_FAIL_settings: 未知字段在改动后丢了`；还原后全绿。
 
 **情报（术）**：设置面板要能打字，而现有默认层级带 `WindowDoesNotAcceptFocus` + `WA_ShowWithoutActivating`（那是给桌面挂件用的），所以新增 `LAYER_DIALOG`＝`FramelessWindowHint | Window`，不带 Tool、不带 NoFocus，并跳过 `WA_ShowWithoutActivating`。这属于"给合适的东西用合适的层级"，不是放宽原有约束。
+
+## 任务 4 收口：接线＋打包＋取证（第二轮完成）
+
+**交付**：托盘接上「显示/隐藏 Dock」「设置…」；`run_screenshot` 让筐／浏览器／Dock 三物同框；README 全面更新（Dock、设置面板、247 条测试、两条已知限制、坐标系约定）。
+
+**验收实测**：
+- `powershell -ExecutionPolicy Bypass -File build.ps1` → `dist\DeskBasket.exe` **36.6 MB**（上限 48MB），源码与 exe 两遍自检全绿：`SELFTEST_OK_probe 460 200 / OK_drop 1 / OK_basket 5 / OK_explorer 5 / OK_settings 1`，exe `ExitCode=0`。
+- 截图：`SCREENSHOT_OK 2560 1600 dock_items=12 basket_items=12`，画面里筐、内置浏览器、滑出的 Dock 三样齐全（我先用像素统计确认 Dock 区域从「暗色 0.88」变成透明后的「亮色 0.94」，再肉眼核对）。
+- 自启反向验证：`--autostart on` → `reg query ... /v DeskBasket` 能查到；`--autostart off` → `错误: 系统找不到指定的注册表项或值`。
+- 桌面零改动：`BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 0` → `DESKTOP_UNCHANGED_OK`。
+- 全量测试：`247 passed`，skipped=0（任务书要求 ≥186）。
+
+**按领导要求做的两处调整（领导留言：Dock 不要有背景、要透明）**：
+- 新增 `FrostedWindow(draw_panel=False)`：面板一点底色都不铺；Dock 固定 `accent_mode="off"`、不跟随全局磨砂模式，于是只剩图标浮在桌面上，悬停/选中时每一项自己有一层淡淡圆角高亮。
+- Dock 高度从 `图标+24` 提到 `图标+34`，并显式把列表铺进窗口（原先没有布局管理器、子视图是默认小尺寸），修掉标签被裁的问题。
+
+**取证期间的一个坑**：第一次截图里 Dock 不见了，查下来是**自动收起逻辑按设计生效**——截屏前鼠标不在 Dock 区域，900ms 后（超过 400ms 延迟）它已经收起来了。取证时把 `dock.locked = True` 钉住即可，产品行为不需要改。另外 `--hold` 我一开始把秒当毫秒传，只停了 22 毫秒，已修。

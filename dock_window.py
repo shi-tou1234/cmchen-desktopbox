@@ -28,6 +28,10 @@ BAR_PADDING = 10
 BAR_MARGIN = 4
 MIN_BAR_WIDTH = 220
 MAX_BAR_WIDTH_RATIO = 0.9
+# 领导要求：Dock 不要有背景，要透明的——所以不铺面板底色、也不上后排模糊，
+# 只让图标浮在桌面上（悬停/选中时每一项自己有一层淡淡的圆角高亮）。
+DOCK_ACCENT_MODE = "off"
+DOCK_DRAW_PANEL = False
 
 LIST_STYLE = """
 QListView { background: transparent; border: none; outline: none; }
@@ -127,14 +131,19 @@ class DockWindow(FrostedWindow):
         self,
         icon_cache,
         on_changed=None,
-        accent_mode="acrylic",
+        accent_mode=DOCK_ACCENT_MODE,
         icon_size=48,
         hide_delay_ms=dockmodel.HIDE_DELAY_MS,
         edge=dockmodel.EDGE_BOTTOM,
         monitor_preference="primary",
         parent=None,
     ):
-        super().__init__(parent=parent, accent_mode=accent_mode, layer=LAYER_TOP)
+        super().__init__(
+            parent=parent,
+            accent_mode=accent_mode,
+            layer=LAYER_TOP,
+            draw_panel=DOCK_DRAW_PANEL,
+        )
         self.icon_cache = icon_cache
         self.on_changed = on_changed
         self.icon_size = int(icon_size)
@@ -155,13 +164,13 @@ class DockWindow(FrostedWindow):
     def _build_ui(self):
         self.view = DockList(self.add_paths, self._sync_order_from_model, self)
         self.view.setIconSize(QSize(self.icon_size, self.icon_size))
-        self.view.setGridSize(QSize(self.icon_size + 22, self.icon_size + 16))
+        self.view.setGridSize(QSize(self.icon_size + 22, self.icon_size + 32))
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._on_context_menu)
         self.view.clicked.connect(self._on_clicked)
         self.model = QStandardItemModel(self.view)
         self.view.setModel(self.model)
-        self.resize(MIN_BAR_WIDTH, self.icon_size + 24)
+        self.resize(MIN_BAR_WIDTH, self.icon_size + 34)
         self.set_items([])
 
     def set_accent_mode(self, mode):
@@ -171,7 +180,7 @@ class DockWindow(FrostedWindow):
     def set_icon_size(self, size):
         self.icon_size = int(size)
         self.view.setIconSize(QSize(self.icon_size, self.icon_size))
-        self.view.setGridSize(QSize(self.icon_size + 22, self.icon_size + 16))
+        self.view.setGridSize(QSize(self.icon_size + 22, self.icon_size + 32))
         self._relayout()
         self.refresh()
 
@@ -253,11 +262,11 @@ class DockWindow(FrostedWindow):
         wanted = BAR_PADDING * 2 + max(1, len(self.items)) * cell
         limit = int(screen_width * MAX_BAR_WIDTH_RATIO)
         width = max(MIN_BAR_WIDTH, min(wanted, limit))
-        self.resize(width, self.icon_size + 24)
-        if not self.revealed:
-            self._apply_geometry(self._geometry_for(False), animate=False)
-        else:
-            self._apply_geometry(self._geometry_for(True), animate=False)
+        height = self.icon_size + 34  # 图标 + 下面一行文字的余量，别把标签裁掉
+        self.resize(width, height)
+        # 没有布局管理器，得显式把列表铺进窗口，否则它会用默认小尺寸
+        self.view.setGeometry(BAR_PADDING, 0, max(1, width - BAR_PADDING * 2), height)
+        self._apply_geometry(self._geometry_for(self.revealed), animate=False)
 
     # ------------------------------------------------------------------ 几何
 
