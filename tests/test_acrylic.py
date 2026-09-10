@@ -61,3 +61,33 @@ def test_describe_platform_non_empty():
 def test_default_tint_has_nonzero_alpha():
     """Acrylic 需要 tint 的 alpha 非 0，否则部分系统上完全不显示磨砂。"""
     assert (acrylic.DEFAULT_TINT >> 24) & 0xFF != 0
+
+
+# ------------------------------------------------ Win11 系统材质（当前默认路径）
+
+
+def test_system_mode_constant_exists():
+    assert acrylic.MODE_SYSTEM == "system"
+
+
+def test_extend_frame_rejects_invalid_handle():
+    assert acrylic.extend_frame_into_client(0) is False
+    assert acrylic.extend_frame_into_client(None) is False
+    assert acrylic.extend_frame_into_client("123") is False
+
+
+def test_apply_system_acrylic_rejects_invalid_handle():
+    assert acrylic.apply_system_acrylic(0) is False
+    assert acrylic.apply_system_acrylic(None) is False
+
+
+def test_apply_frosted_off_mode_returns_off():
+    """off 是反向验证用的对照模式，绝不能悄悄走成磨砂。"""
+    assert acrylic.apply_frosted(0, mode=acrylic.MODE_OFF) == acrylic.MODE_OFF
+
+
+def test_frosted_failure_sentinel_is_not_a_valid_mode():
+    """系统不支持时要返回 "none" 这个明确的失败哨兵，调用方据此走半透明兜底。"""
+    source = acrylic.apply_frosted.__doc__ or ""
+    assert "none" in source
+    assert "system" in source

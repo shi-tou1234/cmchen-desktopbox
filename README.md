@@ -88,7 +88,7 @@ python -m venv --system-site-packages .venv
 
 ```
 $ .venv/Scripts/python.exe -m pytest tests -rs
-247 passed in 3.4s
+252 passed in 3.5s
 ```
 
 覆盖筐数据模型（去重、失效检测、清理）、设置持久化（坏 JSON 回退、原子写、未知字段保留、旧配置兼容）、拖放解析（中文/空格/百分号编码/盘符/多文件）、目录浏览（面包屑、上级、分批、权限失败、2100 项目录）、图标缓存（内存+磁盘双层）、Dock（热区、全屏拦截、最大化窗口不拦、位置计算、收录白名单、去重、排序持久化）、设置面板（旧配置字段不丢、改一项立刻落盘、恢复默认）、窗口行为（拖入接受与拒绝、根目录置灰、offscreen 降级）。
@@ -123,7 +123,7 @@ SELFTEST_OK_drop 1
 SELFTEST_OK_basket 5
 SELFTEST_OK_explorer 5      # 以上为 exe 自检，ExitCode 0
 SELFTEST_OK_settings 1
-247 passed in 3.4s
+252 passed in 3.5s
 DeskBasket.exe 36.6 MB
 ```
 
@@ -141,8 +141,8 @@ $ tasklist  →  python.exe   11,180 K       # 工作集 11.2 MB
 
 ```
 $ .venv/Scripts/python.exe main.py --visual
-VISUAL_ACCENT acrylic
-SHARPNESS_HIDDEN 11.67 SHOWN 0.00 RATIO 0.000 TINT_TRANSMITTANCE 0.62
+VISUAL_ACCENT system
+SHARPNESS_HIDDEN 11.67 SHOWN 0.00 RATIO 0.000 TINT_TRANSMITTANCE 0.69
 BLUR_VERDICT BLURRED
 ```
 
@@ -151,11 +151,25 @@ BLUR_VERDICT BLURRED
 ```
 $ .venv/Scripts/python.exe main.py --visual --accent=off
 VISUAL_ACCENT off
-SHARPNESS_HIDDEN 11.67 SHOWN 7.27 RATIO 0.623 TINT_TRANSMITTANCE 0.62
+SHARPNESS_HIDDEN 11.67 SHOWN 8.01 RATIO 0.687 TINT_TRANSMITTANCE 0.69
 BLUR_VERDICT NOT_BLURRED
 ```
 
-注意 0.623 几乎正好等于面板底色的透光率 0.62——这精确印证了"只压暗不模糊"与"真模糊"是两回事：acrylic 下高频被削到 0.000，关掉磨砂后只剩底色等比衰减。
+注意 0.687 几乎正好等于面板底色的透光率 0.69——这精确印证了"只压暗不模糊"与"真模糊"是两回事：系统材质下高频被削到 0.000，关掉磨砂后只剩底色等比衰减。
+
+**磨砂用哪套 API：老 API 会渲染成黑块，已换成 Win11 系统材质**
+
+这是第二轮里花时间最多的一处实测。`ACCENT_ENABLE_ACRYLICBLURBEHIND`（网上绝大多数 PyQt 教程用的那套）在这台机器（Win11 build 26200）上会渲染成**近乎不透明的黑块**：
+
+| 配置 | 面板空白区亮度（浅色背景下） |
+|---|---|
+| 老 API `ACRYLICBLURBEHIND`，面板底色 alpha 0x60 | 17.3 / 255 |
+| 同上，面板底色 alpha **0x00**（完全不铺底） | 17.3 / 255（**一模一样** → Qt 自己画的东西被完全盖住） |
+| `BLURBEHIND`（模糊模式） | 17.3 / 255 |
+| 关掉材质，只留半透明底色 | 156 ~ 192 / 255 |
+| **Win11 系统材质**（`DwmExtendFrameIntoClientArea` + 系统背景材质） | **63.7 / 255**（深色烟熏玻璃，背后内容可见且被糊开） |
+
+所以 `acrylic` 模式现在**优先走 Win11 系统材质**，失败才回退老 API，再失败回退纯半透明底色（绝不因为没磨砂就崩）。上表里"面板底色 alpha 0x00 与 0x60 结果完全相同"这一条最能说明问题：老 API 生效时，Qt 画的底色根本参与不到合成里。
 
 取证图：`docs/probe_visual.png`（面板内条纹明显糊开，面板外依旧锐利）。
 
@@ -213,7 +227,7 @@ filebrowse.py        浏览纯逻辑（面包屑/上级/列举/分批，只读�
 fileicons.py         系统图标缓存（内存 + 磁盘）
 dropfiles.py         拖放 uri-list / QUrl 解析（纯函数）
 autostart.py         开机自启（注册表 / LaunchAgents / XDG）
-tests/               247 条单元测试（含 tests/data/settings_v1.json 旧配置兼容样本）
+tests/               252 条单元测试（含 tests/data/settings_v1.json 旧配置兼容样本）
 scripts/             桌面快照、窗口 dump、图标生成
 docs/                截图与测试取证
 ```
@@ -227,6 +241,7 @@ docs/                截图与测试取证
 - **offscreen 安全**：所有 Windows API 调用在无显示器环境（自检/单测）下静默降级，返回值标记为 `offscreen`；`--dock-selftest` 在 800×800 的假屏上也能自洽跑完。
 - **配置向后兼容**：`settings.merged_settings` 保留不认识的字段，`baskets.normalize_basket` 给旧配置缺的键补默认值（如 `visible`），所以新版本读旧配置不丢东西。
 - 改代码后请跑 `pytest tests -rs`、`main.py --selftest`、`main.py --dock-selftest`，都要求 `skipped=0` / rc=0。
+- **别只看「测试绿」**：Qt 在 `paintEvent` 里抛异常只会往控制台打日志、不会让测试失败。这一轮就靠真实截图量像素才抓到「面板变成不透明黑块」和「`QPen` 未导入导致每次重绘都报错」两个问题。改外观一定要真机截图核对。
 
 ## 打包
 

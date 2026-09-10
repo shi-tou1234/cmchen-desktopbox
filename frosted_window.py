@@ -7,7 +7,7 @@ API，只标记 "offscreen"，所以 --selftest 能在没有桌面的环境里�
 """
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 import acrylic
@@ -23,7 +23,10 @@ LAYER_BOTTOM = desktoplayer.LAYER_BOTTOM
 
 CORNER_RADIUS = 14
 # 面板自身的淡底色：磨砂负责"透"，这层负责压暗一点让图标看得清。
-PANEL_TINT = QColor(16, 16, 22, 96)
+# alpha 越小越"透"、越像玻璃，但白字在亮壁纸上会越难读——0x50 是实机挑出来的平衡点。
+PANEL_TINT = QColor(16, 16, 22, 0x50)
+# 玻璃边缘那一圈细高光。真实玻璃有反光边，纯色块没有；加上它质感差别很大。
+PANEL_RIM = QColor(255, 255, 255, 0x30)
 
 
 def desktop_layer_flags(layer=LAYER_WINDOW):
@@ -59,6 +62,9 @@ class FrostedWindow(QWidget):
         corner_radius=CORNER_RADIUS,
         translucent=True,
         draw_panel=True,
+        panel_tint=None,
+        panel_rim=None,
+        accent_tint=None,
     ):
         super().__init__(parent)
         self.accent_mode = accent_mode
@@ -66,6 +72,9 @@ class FrostedWindow(QWidget):
         self.layer = layer
         self.corner_radius = corner_radius
         self.draw_panel = draw_panel
+        self.panel_tint = QColor(panel_tint) if panel_tint is not None else QColor(PANEL_TINT)
+        self.panel_rim = QColor(panel_rim) if panel_rim is not None else QColor(PANEL_RIM)
+        self.accent_tint = accent_tint if accent_tint is not None else acrylic.DEFAULT_TINT
         self.drop_handler = None
         self.on_top = layer == LAYER_TOP
         self.attached = False
@@ -95,7 +104,7 @@ class FrostedWindow(QWidget):
             self.setGeometry(self.geometry())
             self.repaint()
         self.effective_accent = acrylic.apply_frosted(
-            hwnd, self.accent_mode, rounded=True
+            hwnd, self.accent_mode, tint=self.accent_tint, rounded=True
         )
         self.update()
         return self.effective_accent
@@ -118,7 +127,15 @@ class FrostedWindow(QWidget):
         path = QPainterPath()
         rect = self.rect().adjusted(0, 0, -1, -1)
         path.addRoundedRect(rect, self.corner_radius, self.corner_radius)
-        painter.fillPath(path, PANEL_TINT)
+        painter.fillPath(path, self.panel_tint)
+        # 一圈细高光，模仿玻璃边缘的反光；没有它面板会像一块纯色黑片
+        pen = QPen(self.panel_rim)
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(
+            rect.adjusted(0.5, 0.5, -0.5, -0.5), self.corner_radius, self.corner_radius
+        )
         painter.end()
 
     # ------------------------------------------------------------ 拖放

@@ -20,6 +20,7 @@ ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
 
 MODE_ACRYLIC = "acrylic"
 MODE_BLUR = "blur"
+MODE_SYSTEM = "system"
 MODE_OFF = "off"
 ACCENT_STATES = {
     MODE_ACRYLIC: ACCENT_ENABLE_ACRYLICBLURBEHIND,
@@ -174,8 +175,14 @@ def apply_system_backdrop(hwnd, kind=DWMSBT_TRANSIENTWINDOW):
 def apply_frosted(hwnd, mode=MODE_ACRYLIC, tint=DEFAULT_TINT, rounded=True):
     """一站式上效果。返回实际生效的模式字符串，供日志与自检断言。
 
-    返回值："acrylic" / "blur" / "off"（off＝明确要求不上磨砂）/
-    "none"（系统不支持，调用方应自行用半透明底色兜底，不要因为没磨砂就崩）。
+    返回："system"（Win11 系统材质）/ "acrylic" / "blur" / "off" / "none"。
+
+    重要实测（2026-09-11）：老的 ACCENT_ENABLE_ACRYLICBLURBEHIND 在这台机器上
+    （Win11 build 26200）会渲染成近乎不透明的黑块——浅色背景上量到的空白区亮度
+    只有 17/255，而且 Qt 自己画的底色完全被盖住（alpha 0x00 与 0x60 结果一模一样）。
+    同场景下改用 Win11 系统材质（DwmExtendFrameIntoClientArea + 系统背景材质）
+    得到的是 63.7/255 的深色烟熏玻璃，背后内容可见且被糊开——所以 acrylic 模式
+    优先走系统材质，失败才回退老 API，再失败回退纯模糊，最后才认输返回 "none"。
     """
     if not _valid(hwnd):
         return MODE_OFF
@@ -184,6 +191,10 @@ def apply_frosted(hwnd, mode=MODE_ACRYLIC, tint=DEFAULT_TINT, rounded=True):
         apply_rounded_corners(hwnd, True)
     if mode == MODE_OFF:
         return MODE_OFF
+
+    if mode != MODE_BLUR and apply_system_acrylic(hwnd, dark=True):
+        return MODE_SYSTEM
+
     want = MODE_BLUR if mode == MODE_BLUR else MODE_ACRYLIC
     if apply_accent(hwnd, want, tint):
         return want
@@ -195,6 +206,53 @@ def apply_frosted(hwnd, mode=MODE_ACRYLIC, tint=DEFAULT_TINT, rounded=True):
 def accent_state_value(mode):
     """模式名到 AccentState 数值；未知模式按 acrylic 处理。"""
     return ACCENT_STATES.get(mode, ACCENT_ENABLE_ACRYLICBLURBEHIND)
+
+
+class MARGINS(ctypes.Structure):
+    _fields_ = [
+        ("cxLeftWidth", ctypes.c_int),
+        ("cxRightWidth", ctypes.c_int),
+        ("cyTopHeight", ctypes.c_int),
+        ("cyBottomHeight", ctypes.c_int),
+    ]
+
+
+def extend_frame_into_client(hwnd, all_sides=True):
+    """把 DWM 边框扩展到整个客户区（"整片玻璃"）。
+
+    这是 Win11 系统级背景材质（Mica/Acrylic）生效的前提：客户区扩展之后，
+    应用没画东西的地方会交给 DWM 合成，系统材质才透得出来。
+    实测：不走这一步、只调 ACCENT_ENABLE_ACRYLICBLURBEHIND，在这台机器上
+    会渲染成近乎不透明的黑块（空白区亮度 17/255，对浅色背景也一律是黑）。
+    """
+    if not _valid(hwnd):
+        return False
+    dwmapi = _dwmapi()
+    if dwmapi is None:
+        return False
+    margins = MARGINS(-1 if all_sides else 0, -1 if all_sides else 0,
+                      -1 if all_sides else 0, -1 if all_sides else 0)
+    try:
+        result = dwmapi.DwmExtendFrameIntoClientArea(
+            ctypes.c_void_p(hwnd), ctypes.byref(margins)
+        )
+    except (AttributeError, OSError):
+        return False
+    return result == 0
+
+
+def apply_system_acrylic(hwnd, dark=False):
+    """Win11 系统 Acrylic：扩展边框 + 系统背景材质。返回是否成功。
+
+    与 ACCENT_ENABLE_ACRYLICBLURBEHIND 的区别：这套是 Win11 官方材质，
+    跟随系统明暗主题、透光而不发黑；老 API 已被微软弃用。
+    """
+    if not _valid(hwnd):
+        return False
+    _set_dwm_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 1 if dark else 0)
+    if not extend_frame_into_client(hwnd):
+        return False
+    return apply_system_backdrop(hwnd, DWMSBT_TRANSIENTWINDOW)
 
 
 def describe_platform():

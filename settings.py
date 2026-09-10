@@ -17,8 +17,8 @@ APP_DIR_NAME = "DeskBasket"
 
 ACCENT_MODES = ("acrylic", "blur")
 ACCENT_LABELS = {
-    "acrylic": "磨砂玻璃（Acrylic）",
-    "blur": "轻量模糊（Blur，拖动更跟手）",
+    "acrylic": "磨砂玻璃 · 深色（推荐，Win11 系统材质）",
+    "blur": "轻量模糊 · 老 API（部分系统上会偏暗）",
 }
 
 ICON_SIZE_MIN, ICON_SIZE_MAX = 24, 128
