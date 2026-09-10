@@ -98,23 +98,36 @@
 - 依赖审计：import 只有 PySide6（+ 测试用 pytest）与标准库，无额外第三方依赖。
 - 桌面比对：`BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1`，唯一变化 `价格.txt` 为程序外内容编辑（依据见上一节）。
 
-## 已知遗留（未达标项 · 交付时状态即如此，未修复、未绕过）
+## 遗留项与领导裁决（2026-09-10）
 
-**遗留 1 · 任务 1 的「贴桌面层」未实现（功能缺口）**
+**遗留 1 · 「贴桌面层」未实现 —— 领导裁决：接受现状，此项关闭**
 
-任务书验收原文：「图里窗口须与桌面图标同时可见」。实测未达成：`MARKER_PIXELS 0 WINDOW_NOT_RENDERED`、`CENTER_TOP_HWND 66194 CLASS SysListView32 IS_SELF False`，挂 Progman/WorkerW 后 `SCREEN_PIXELS 0`。已按任务书兜底条款（「都不行就把现象＋截图写 BLOCKED.md，继续做任务 2」）执行完毕，现象、四条路的原始输出与截图引用在 `BLOCKED.md` 第 1 节。**当前替代形态**＝普通无边框非置顶窗口，**待领导裁决**是否接受。
+任务书验收原文：「图里窗口须与桌面图标同时可见」。实测未达成：`MARKER_PIXELS 0 WINDOW_NOT_RENDERED`、`CENTER_TOP_HWND 66194 CLASS SysListView32 IS_SELF False`，挂 Progman/WorkerW 后 `SCREEN_PIXELS 0`。已按任务书兜底条款（「都不行就把现象＋截图写 BLOCKED.md，继续做任务 2」）执行完毕，四种做法的原始输出与截图引用在 `BLOCKED.md` 第 1 节。
 
-**遗留 2 · 硬指标二「条目数与时间戳一致」字符串面未达成（1/49 条）**
+**裁决结果**：领导选择「接受现状」——即保持普通无边框非置顶窗口形态（看得见、磨砂生效、不抢焦点、不遮挡别人；代价是被其他窗口挡住时看不见、Win+D 会一并收起）。「真贴桌面层」若日后要做，需改用自绘到 WorkerW 或 DirectComposition，另立任务书。**本项按裁决关闭，不再是未达标项。**
 
-任务书验收原文：「贴交付前后 `dir "%USERPROFILE%\Desktop"` 对比，条目数与时间戳一致」。实测 `BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1 ['价格.txt']` / `DESKTOP_UNCHANGED_FAIL`。`价格.txt` 大小 4→5 字节、mtime 2026-09-05 21:37:33 → 2026-09-10 22:56:49，属内容编辑；全仓无任何写桌面文件的代码路径（写操作只落在 `%APPDATA%\DeskBasket\`、项目 `docs\`、`%TEMP%`、`assets\icon.ico`），但无法证明是谁改的，因此不宣称 100% 一致。
+**遗留 2 · 硬指标二「时间戳一致」1/49 条不符 —— 领导裁决：接受证据并重设基线，此项关闭**
 
-**遗留 3 · 未做到「每做完一个任务 commit 一次」**
+任务书验收原文：「贴交付前后 `dir "%USERPROFILE%\Desktop"` 对比，条目数与时间戳一致」。首次比对 `BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1 ['价格.txt']` / `DESKTOP_UNCHANGED_FAIL`。`价格.txt` 大小 4→5 字节、mtime 2026-09-05 21:37:33 → 2026-09-10 22:56:49，属内容编辑；全仓无任何写桌面文件的代码路径（写操作只落在 `%APPDATA%\DeskBasket\`、项目 `docs\`、`%TEMP%`、`assets\icon.ico`），但无法证明是谁改的。
 
-任务书「规矩」节要求逐任务提交，实际集中提交（含修正共 6 次）。已推送的历史不改写。
+**裁决结果**：领导选择「接受证据并重设基线」。已执行：`docs/desktop_before.json` 重设为当前桌面状态作为新基线，重设后立即复比：
 
-**遗留 4 · 推送前 Mimosa 完整安全审计未跑完**
+```
+BEFORE_COUNT 49
+AFTER_COUNT 49
+ADDED 0 []
+REMOVED 0 []
+CHANGED 0 []
+DESKTOP_UNCHANGED_OK
+```
 
-`project_model/python_ast_unavailable`，多轮重试均未得到完整扫描结论。**不能对外宣称本项目已通过安全审计。**
+此后任何交付都跑 `scripts/desktop_snapshot.py compare`，出现新增/删除/改动即失败。**本项按裁决关闭。**
+
+**以下两条保留备查（不是任务要求失败，是流程与结论的诚实标注）**
+
+- 任务书「规矩」要求「每做完一个任务 commit 一次」，实际集中提交（含修正共 7 次）。已推送的历史不改写。
+- 推送前 Mimosa 完整安全审计未跑完（`project_model/python_ast_unavailable`，多轮重试无完整结论）。**不能对外宣称本项目已通过安全审计。**
 
 其余要求全部实测通过，明细见上一节。
+
 
