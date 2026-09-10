@@ -77,9 +77,10 @@ def foreground_info():
 class DockList(QListView):
     """Dock 的图标条：内部拖拽排序，外部拖文件则交给 Dock 追加。"""
 
-    def __init__(self, on_external_drop, parent=None):
+    def __init__(self, on_external_drop, on_reordered, parent=None):
         super().__init__(parent)
         self.on_external_drop = on_external_drop
+        self.on_reordered = on_reordered
         self.setViewMode(QListView.IconMode)
         self.setFlow(QListView.LeftToRight)
         self.setWrapping(False)
@@ -112,6 +113,11 @@ class DockList(QListView):
             event.acceptProposedAction()
             return
         super().dropEvent(event)
+        # 内部拖拽排序结束后（模型已是最终状态）再同步一次顺序。
+        # 不能靠 rowsMoved 信号：QStandardItemModel 没实现 moveRows，
+        # QListView 的 InternalMove 是用"插入副本+删除原件"做的，
+        # 只会发 rowsInserted/rowsRemoved，而且发信号时模型处于中间状态。
+        self.on_reordered()
 
 
 class DockWindow(FrostedWindow):
@@ -147,7 +153,7 @@ class DockWindow(FrostedWindow):
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self):
-        self.view = DockList(self.add_paths, self)
+        self.view = DockList(self.add_paths, self._sync_order_from_model, self)
         self.view.setIconSize(QSize(self.icon_size, self.icon_size))
         self.view.setGridSize(QSize(self.icon_size + 22, self.icon_size + 16))
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -155,7 +161,6 @@ class DockWindow(FrostedWindow):
         self.view.clicked.connect(self._on_clicked)
         self.model = QStandardItemModel(self.view)
         self.view.setModel(self.model)
-        self.model.rowsMoved.connect(self._on_rows_moved)
         self.resize(MIN_BAR_WIDTH, self.icon_size + 24)
         self.set_items([])
 
@@ -438,14 +443,15 @@ class DockWindow(FrostedWindow):
                 self, "打不开这一项", "系统没有能打开它的程序，或者文件已经不在了：\n" + path
             )
 
-    def _on_rows_moved(self, *_args):
-        """内部拖拽排序结束后，把模型里的新顺序同步回 items 并落盘。"""
+    def _sync_order_from_model(self):
+        """把模型里的当前顺序同步回 items 并落盘（拖拽排序结束后调用）。"""
         ordered = [
             self.model.item(row).data(PATH_ROLE) for row in range(self.model.rowCount())
         ]
         if ordered != self.items:
             self.items = ordered
             self._notify_changed()
+        return ordered
 
     def _on_context_menu(self, position):
         index = self.view.indexAt(position)

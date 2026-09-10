@@ -989,6 +989,10 @@ def run_dock_selftest(argv):
         return 1
 
     print(
+        "DOCK_ICONS %d" % dock.item_count(),
+        flush=True,
+    )
+    print(
         "DOCK_OK reveal=%d hidden=%d fullscreen_block=%s items=%d accent=%s"
         % (y_shown, y_hidden, fullscreen_block, dock.item_count(), effective),
         flush=True,

@@ -153,3 +153,21 @@ DESKTOP_UNCHANGED_OK
 - `dist\DeskBasket.exe` = 36.6 MB，`--selftest` → `SELFTEST_OK_probe 690 300` / `OK_drop 1` / `OK_basket 5` / `OK_explorer 5`，`ExitCode=0`
 
 三条全部对上，未发现与任务书不符之处，不需要写 BLOCKED。
+
+## 任务 1、2 收口（含三个真 bug）
+
+**交付**：`dockmodel.py`（纯逻辑）、`dock_window.py`（磨砂置顶 Dock）、`tests/test_dockmodel.py`(54)、`tests/test_dock_window.py`(18)；`settings.py` 新增 `dock_*` 五项并**保留未知字段**。
+
+**验收实测**：
+- `main.py --dock-selftest`（真机）→ `DOCK_ICONS 6` ＋ `DOCK_OK reveal=991 hidden=1067 fullscreen_block=True items=6 accent=acrylic`，rc=0。数字自洽：逻辑屏 1707×1067、图标 48＋padding 24＋margin 4 = 76，1067−76 = 991。
+- `pytest tests -rs` → 218 passed，skipped=0（任务书要求 ≥162／≥174）。
+
+**任务 1 反向验证**：把 `foreground_blocks_dock` 的全屏判定改成恒 False → `test_fullscreen_app_blocks_dock`、`test_true_fullscreen_still_blocks` 变红，且 `--dock-selftest` 打印 `DOCK_FAIL 全屏判定不对：全屏拦截=False`；还原后全绿。
+
+**任务 2 反向验证**：把 `is_collectable` 的后缀白名单改成「全收」→ `test_auto_collection_only_takes_shortcut_types`、`test_non_collectable_types_are_rejected` 变红；还原后全绿。
+
+**过程中修掉的真 bug（都是"跑起来才发现"的那种）**：
+
+1. **混用坐标系**：`QCursor.pos()` 与 `QWidget.move()` 用 Qt 逻辑像素，`GetWindowRect` 用物理像素。本机缩放 150%（逻辑 1707×1067 / 物理 2560×1600），混用会让底部热区判定永远不命中。已统一到 Qt 逻辑坐标，前台窗口矩形按 `devicePixelRatio` 折算后再比。
+2. **最大化窗口被误判成全屏**：Windows 最大化窗口的 `GetWindowRect` 含 DWM 阴影边框，实测逻辑矩形 `(-5,-5,1712,1072)` 比 1707×1067 的屏幕还大，纯矩形判定必然判成全屏——结果是**任何最大化窗口在前时 Dock 都弹不出来**（正好是最常见的使用场景）。改用 `IsZoomed` 区分：最大化一律不拦，只有真正的全屏（非最大化且铺满整屏）才拦。已补 4 条回归测试。
+3. **排序永远不落盘**：`QStandardItemModel` 没有实现 `moveRows`（`moveRow` 恒返回 False），`QListView` 的 InternalMove 是用「插入副本＋删除原件」实现的，所以 `rowsMoved` 信号**永远不会发**——原来靠它同步顺序，等于排序功能是死的。改成在拖放结束后（模型已是最终状态）同步一次；顺带避免了「信号发出时模型处于中间状态、会存下错误顺序」的隐患。
