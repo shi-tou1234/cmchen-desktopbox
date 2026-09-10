@@ -48,8 +48,8 @@ function makeLinks(dir, names) {
 
 // ---------------------------------------------------------------- 配置
 
-test('默认配置：磨砂玻璃（token 默认）＋ Dock 常驻', () => {
-  assert.strictEqual(store.DEFAULTS.accent_mode, 'acrylic');
+test('默认配置：完全透明 ＋ Dock 常驻', () => {
+  assert.strictEqual(store.DEFAULTS.accent_mode, 'off');
   assert.strictEqual(store.DEFAULTS.dock_always_visible, true);
   assert.strictEqual(store.DEFAULTS.dock_enabled, true);
 });
@@ -125,7 +125,7 @@ test('非法取值回退默认', () => {
     icon_size: 9999,
     dock_hide_delay_ms: 5
   });
-  assert.strictEqual(merged.accent_mode, 'acrylic');
+  assert.strictEqual(merged.accent_mode, 'off');
   assert.strictEqual(merged.icon_size, store.DEFAULTS.icon_size);
   assert.strictEqual(merged.dock_hide_delay_ms, store.DEFAULTS.dock_hide_delay_ms);
 });

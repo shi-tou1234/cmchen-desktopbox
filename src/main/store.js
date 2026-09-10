@@ -14,7 +14,7 @@ const SETTINGS_FILENAME = 'settings.json';
 const APP_DIR_NAME = 'DeskBasket';
 
 const DEFAULTS = {
-  accent_mode: 'acrylic',      // acrylic=系统磨砂玻璃（token 默认）／off=完全透明／blur=轻量模糊
+  accent_mode: 'off',          // off=完全透明（默认，领导指定）／acrylic=系统磨砂玻璃／blur=轻量模糊
   autostart: false,
   icon_size: 48,
   baskets: [],
@@ -32,7 +32,7 @@ const DEFAULTS = {
 const ACCENT_MODES = ['off', 'acrylic', 'blur'];
 // 与 token 监测一致：它也有「磨砂」和「完全透明」两种模式，这里一一对应
 const ACCENT_LABELS = {
-  off: '完全透明（默认，桌面完全透出来）',
+  off: '完全透明（桌面完全透出来）',
   acrylic: '磨砂玻璃（Win11 系统材质，背景被糊开）',
   blur: '轻量模糊（老 API，部分系统偏暗）'
 };

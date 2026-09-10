@@ -25,8 +25,8 @@ html, body {
   position: absolute;
   inset: 0;
   border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  background: rgba(14, 15, 20, 0.06);   /* 几乎不铺底色：领导要求完全透明 */
+  border: 1px solid rgba(255, 255, 255, 0.30);
+  background: transparent;              /* 完全透明：一点底色都不铺，只留一圈细边框 */
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -127,8 +127,8 @@ html, body {
   position: absolute;
   inset: 0;
   border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.20);
-  background: rgba(14, 15, 20, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: transparent;
   display: flex;
   align-items: flex-end;
   justify-content: center;
