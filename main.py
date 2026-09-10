@@ -955,12 +955,48 @@ class DeskBasketApp:
         self.save()
 
 
+def acquire_single_instance(app, key=None):
+    """抢单实例锁。返回 QLocalServer；已有实例在跑时返回 None。
+
+    为什么必须有：Dock 常驻轮询、筐窗口会写配置，起两个实例就是两条 Dock、
+    两套筐，而且会同时往同一份 settings.json 里写、互相覆盖。开机自启之后再手动
+    点一次图标，是最容易触发这条的路径。
+
+    用 QLocalSocket 探测 + QLocalServer 占坑（Qt 自带、不引入依赖，走命名管道、
+    不需要管理员权限）。
+    """
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+
+    server_key = key or "DeskBasket.SingleInstance"
+    probe = QLocalSocket()
+    probe.connectToServer(server_key)
+    if probe.waitForConnected(300):
+        probe.write(b"show")
+        probe.flush()
+        probe.waitForBytesWritten(300)
+        probe.disconnectFromServer()
+        return None
+    # 上次异常退出可能留下没人清理的坑位，先删掉再占
+    QLocalServer.removeServer(server_key)
+    server = QLocalServer(app)
+    server.listen(server_key)
+    return server
+
+
 def run_app(argv):
     """正常启动。"""
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
+
+    server = acquire_single_instance(app)
+    if server is None:
+        print(
+            "已有 DeskBasket 在运行，本次不再启动（避免两条 Dock 抢同一份配置）",
+            flush=True,
+        )
+        return 0
 
     demo_fill = 0
     for token in argv:
@@ -970,6 +1006,18 @@ def run_app(argv):
     state.build_windows()
     state.build_dock()
     state.install_tray()
+
+    def on_second_launch():
+        """第二个实例来敲门时，把已有窗口亮出来。"""
+        while server.hasPendingConnections():
+            connection = server.nextPendingConnection()
+            connection.disconnected.connect(connection.deleteLater)
+        state.show_all()
+        if state.dock is not None:
+            state.dock.reveal(animate=True)
+
+    server.newConnection.connect(on_second_launch)
+
     if state.settings.get("autostart"):
         autostart.sync(True)
     return app.exec()

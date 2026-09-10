@@ -233,3 +233,21 @@ DESKTOP_UNCHANGED_OK
 
 1. **`QPen` 未导入**：新加的玻璃边缘高光用到了 `QPen`，但 `frosted_window.py` 没导入 → `paintEvent` **每次重绘都抛异常**。Qt 只在控制台打日志、不影响 `pytest` 通过，所以 252 条测试全绿也没拦住它。已修，并把「别只看测试绿、改外观必须真机截图核对」写进 README 的开发约定。
 2. **上一节记录的取样区错误**：三个变体量出相同数字，正是因为取样区压在图标上——同一类错误这轮犯了两次（第一轮也是），已在 PROGRESS 里记下，取样一律先确认区域是空的。
+
+## 继续 bug 检查（第二轮，第二晚）
+
+1. **加了单实例保护（真漏洞）**：原来双击两次 exe 会起两个实例 → 两条 Dock、两套筐窗口，而且两个进程会同时往同一份 `settings.json` 里写、互相覆盖。开机自启之后再手动点一次图标是最容易踩的路径。用 `QLocalServer`/`QLocalSocket` 占坑（Qt 自带、命名管道、不需要管理员权限），第二次启动提示「已有 DeskBasket 在运行」并返回 0，同时把已有窗口亮出来。
+   真机验证：起两次 → 第二次输出 `已有 DeskBasket 在运行，本次不再启动`、退出码 0，窗口清单里只有**一套**（一个筐 + 一条 Dock）。
+2. **稳定性与内存**：带 Dock 轮询（60ms 一次）连续跑 60 秒，工作集恒为 **10.9 MB**、无增长（不泄漏），运行日志**零错误零警告**。
+3. 测试 252 → 255（新增单实例的获取/拒绝/释放三条），新增测试 `tests/test_acrylic.py` 里系统材质的契约测试。
+4. 再次确认**没有动项目外的任何文件**：桌面比对 `CHANGED 0 / DESKTOP_UNCHANGED_OK`；开机自启注册表值为空（测试期间开过又关掉了，净效果为零）。程序自身只写 `%APPDATA%\DeskBasket\`（这是任务书要求的配置位置）。
+
+## 第二轮最终验收（复跑）
+
+- `pytest tests -rs` → `255 passed`，skipped=0。
+- `QT_QPA_PLATFORM=offscreen main.py --selftest` → `SELFTEST_OK_probe / OK_drop 1 / OK_basket 5 / OK_explorer 5 / OK_settings 1`，rc=0。
+- `dist\DeskBasket.exe --selftest` → 同上五项，`ExitCode=0`；产物 **36.6 MB**。
+- `main.py --dock-selftest` → `DOCK_ICONS 6` / `DOCK_OK reveal=981 hidden=1067 fullscreen_block=True items=6 accent=off`。
+- `main.py --visual` → `VISUAL_ACCENT system` / `RATIO 0.000` / `BLURRED`；`--accent=off` → `RATIO 0.687` ≈ 透光率 0.69。
+- `--screenshot` → `SCREENSHOT_OK 2560 1600`，筐／内置浏览器／透明 Dock 三物同框。
+- 桌面零改动 `DESKTOP_UNCHANGED_OK`；自启注册表净效果为零。

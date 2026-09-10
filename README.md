@@ -36,6 +36,7 @@ Windows 11 实测通过（build 26200.9445）。
 - **失效项提醒**：筐里指向的文件被删掉或改名后，条目标灰并在标题旁标注"n 项失效"，右键可一键清理（同样只清数据，不动磁盘）。
 - **多筐**：想建几个筐都行，每个筐独立记名字、位置、大小、显隐，配置持久化。
 - **开机自启**：写 HKCU 注册表 Run 值（登录时静默启动，不弹黑窗），开/关都幂等。
+- **单实例保护**：重复启动会被挡住并提示「已有 DeskBasket 在运行」，避免出现两条 Dock、两套筐，以及两个进程同时写同一份 `settings.json` 互相覆盖。第二次点击图标会把已有窗口亮出来。
 - **系统托盘**：显示所有筐、新建筐、显示/隐藏 Dock、设置、开机自启开关、退出。
 - **不抢焦点**：筐和 Dock 都带 `WindowDoesNotAcceptFocus` + `WA_ShowWithoutActivating`，点它们不会打断你正在做的事。
 
@@ -88,7 +89,7 @@ python -m venv --system-site-packages .venv
 
 ```
 $ .venv/Scripts/python.exe -m pytest tests -rs
-252 passed in 3.5s
+255 passed in 3.8s
 ```
 
 覆盖筐数据模型（去重、失效检测、清理）、设置持久化（坏 JSON 回退、原子写、未知字段保留、旧配置兼容）、拖放解析（中文/空格/百分号编码/盘符/多文件）、目录浏览（面包屑、上级、分批、权限失败、2100 项目录）、图标缓存（内存+磁盘双层）、Dock（热区、全屏拦截、最大化窗口不拦、位置计算、收录白名单、去重、排序持久化）、设置面板（旧配置字段不丢、改一项立刻落盘、恢复默认）、窗口行为（拖入接受与拒绝、根目录置灰、offscreen 降级）。
@@ -123,7 +124,7 @@ SELFTEST_OK_drop 1
 SELFTEST_OK_basket 5
 SELFTEST_OK_explorer 5      # 以上为 exe 自检，ExitCode 0
 SELFTEST_OK_settings 1
-252 passed in 3.5s
+255 passed in 3.8s
 DeskBasket.exe 36.6 MB
 ```
 
@@ -227,7 +228,7 @@ filebrowse.py        浏览纯逻辑（面包屑/上级/列举/分批，只读�
 fileicons.py         系统图标缓存（内存 + 磁盘）
 dropfiles.py         拖放 uri-list / QUrl 解析（纯函数）
 autostart.py         开机自启（注册表 / LaunchAgents / XDG）
-tests/               252 条单元测试（含 tests/data/settings_v1.json 旧配置兼容样本）
+tests/               255 条单元测试（含 tests/data/settings_v1.json 旧配置兼容样本）
 scripts/             桌面快照、窗口 dump、图标生成
 docs/                截图与测试取证
 ```

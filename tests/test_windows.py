@@ -377,3 +377,41 @@ def test_layer_top_uses_top_hint(qapp):
 
 def test_frosted_window_platform_is_offscreen_in_tests(qapp):
     assert FrostedWindow.application_platform() == "offscreen"
+
+
+# ---------------------------------------------------------------- 单实例锁
+
+
+def test_single_instance_lock_can_be_acquired(qapp):
+    key = "DeskBasket.Test.First"
+    server = main.acquire_single_instance(qapp, key=key)
+    assert server is not None, "第一个实例应该拿到锁"
+    server.close()
+    server.removeServer(key)
+
+
+def test_single_instance_second_launch_is_rejected(qapp):
+    """第二个实例必须被挡住：否则会出现两条 Dock、两套筐，
+    并且同时往同一份 settings.json 里写、互相覆盖。"""
+    key = "DeskBasket.Test.Second"
+    first = main.acquire_single_instance(qapp, key=key)
+    assert first is not None
+    try:
+        second = main.acquire_single_instance(qapp, key=key)
+        assert second is None, "已有实例在跑时第二次启动必须被拒绝"
+    finally:
+        first.close()
+        first.removeServer(key)
+
+
+def test_single_instance_releases_after_shutdown(qapp):
+    key = "DeskBasket.Test.Release"
+    first = main.acquire_single_instance(qapp, key=key)
+    assert first is not None
+    first.close()
+    first.removeServer(key)
+    again = main.acquire_single_instance(qapp, key=key)
+    assert again is not None, "上一个实例退出后应该能重新启动"
+    again.close()
+    again.removeServer(key)
+
