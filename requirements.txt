@@ -1,0 +1,13 @@
+# DeskBasket 运行与开发依赖
+#
+# 运行只需 PySide6-Essentials（Qt 官方 PySide6 核心发行包）。
+# 除此之外不引入任何第三方依赖：磨砂玻璃用标准库 ctypes 直调 DWM，
+# 目录遍历用 os.scandir，设置用 json，开机自启用 winreg。
+#
+# 安装：
+#   python -m venv --system-site-packages .venv
+#   .venv/Scripts/python.exe -m pip install -r requirements.txt
+
+pyside6-essentials>=6.11
+pyinstaller>=6.22
+pytest>=9.0

@@ -4,6 +4,7 @@
 """
 
 import os
+import shutil
 
 from PySide6.QtCore import QEventLoop, QTimer
 
@@ -250,6 +251,45 @@ def test_explorer_renders_large_directory_in_batches(qapp, tmp_path):
     drained = drain(window)
     assert drained
     assert window.model.rowCount() == total
+    window.hide()
+
+
+def test_explorer_renders_over_2000_entries_without_hanging(qapp):
+    """任务书要求 >2000 项分批渲染不卡死：用真的 2100 个文件跑一遍。"""
+    import tempfile
+    import time
+
+    workdir = tempfile.mkdtemp(prefix="deskbasket-bigdir-")
+    try:
+        for _ in range(2100):
+            handle, _path = tempfile.mkstemp(dir=workdir, suffix=".txt")
+            os.close(handle)
+        window = ExplorerWindow(workdir, fileicons.IconCache(size=32))
+        window.show()
+        started = time.time()
+        drained = drain(window, timeout_ms=60000)
+        elapsed = time.time() - started
+        assert drained, "2100 项目录的分批渲染没有在时限内完成"
+        assert window.model.rowCount() == 2100
+        assert elapsed < 30.0, "2100 项渲染耗时 %.1f 秒，太慢" % elapsed
+        window.hide()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_explorer_cancels_stale_batch_when_navigating_away(qapp, tmp_path):
+    """切目录后，上一批没渲染完的条目不许再往新列表里塞。"""
+    big = tmp_path / "大目录"
+    big.mkdir()
+    make_files(big, filebrowse.CHUNK_SIZE * 3)
+    small = tmp_path / "小目录"
+    small.mkdir()
+    make_files(small, 2)
+    window = ExplorerWindow(str(big), fileicons.IconCache(size=32))
+    window.show()
+    window.navigate_to(str(small))
+    assert drain(window)
+    assert window.model.rowCount() == 2
     window.hide()
 
 

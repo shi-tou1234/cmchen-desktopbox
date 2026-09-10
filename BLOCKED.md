@@ -17,6 +17,11 @@
 | `SetParent` 挂壁纸 WorkerW | **不可见** | — | `PROBE_OK hwnd=2493070 accent=off layer=workerw attached=True parent=Progman` / `SCREEN_PIXELS 0` |
 | 普通无边框非置顶窗口（`FramelessWindowHint｜Tool｜WindowDoesNotAcceptFocus`） | **可见** | **生效** | `PROBE_OK hwnd=6752350 accent=acrylic layer=window` / `SCREEN_PIXELS 4486`（屏幕上确实有 4486 个探针标记像素） |
 
+### 截图证据
+
+- `docs/probe.png`：按 Win+D 后截的全屏。画面里只有桌面壁纸和桌面图标，**探针窗口不在其中**（该窗口当时的矩形是 `(730, 440, 1190, 640)`，正好在画面中央）。
+- `docs/probe_visual.png`：为判定"磨砂到底有没有生效"另做的自包含取证——条纹背板＋磨砂面板，面板内方差 2048.4、面板外 6063.5，比值 0.338，条纹在面板后被明显糊开。这张图证明**磨砂本身没问题**，失败的是层级。
+
 补充实验：把窗口改成不透明（去掉 `WA_TranslucentBackground`）再挂 Progman，依然是 `SCREEN_PIXELS 0`——说明子窗口不渲染与透明/磨砂无关，是 Windows 根本不合成 Progman 子窗口。
 
 ### 结论与我的处置
