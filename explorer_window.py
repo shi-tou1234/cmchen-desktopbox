@@ -13,9 +13,6 @@ from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
-    QIcon,
-    QPainter,
-    QPixmap,
     QStandardItem,
     QStandardItemModel,
 )
@@ -30,7 +27,6 @@ from PySide6.QtWidgets import (
 )
 
 import filebrowse
-import fileicons
 from frosted_window import LAYER_WINDOW, FrostedWindow
 
 PATH_ROLE = Qt.UserRole + 1

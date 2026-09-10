@@ -910,7 +910,6 @@ class DeskBasketApp:
     # ------------------------------------------------------------ 托盘
 
     def install_tray(self):
-        from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
         if not QSystemTrayIcon.isSystemTrayAvailable():

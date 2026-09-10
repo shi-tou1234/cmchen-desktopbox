@@ -7,14 +7,10 @@
 
 import os
 
-from PySide6.QtCore import QFileInfo, QSize, Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import (
-    QAction,
     QColor,
     QDesktopServices,
-    QIcon,
-    QPainter,
-    QPixmap,
     QStandardItem,
     QStandardItemModel,
 )
@@ -29,7 +25,6 @@ from PySide6.QtWidgets import (
 )
 
 import baskets
-import fileicons
 from frosted_window import LAYER_WINDOW, FrostedWindow
 
 PATH_ROLE = Qt.UserRole + 1

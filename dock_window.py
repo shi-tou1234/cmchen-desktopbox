@@ -17,7 +17,6 @@ from PySide6.QtWidgets import QListView, QMenu
 
 import dockmodel
 import dropfiles
-import fileicons
 from frosted_window import LAYER_TOP, FrostedWindow
 
 PATH_ROLE = Qt.UserRole + 1

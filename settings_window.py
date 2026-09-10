@@ -9,8 +9,6 @@
   只碰自己认识的键，不认识的键原样带回去。
 """
 
-import os
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -24,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -236,7 +235,13 @@ class SettingsWindow(FrostedWindow):
         group = self._group(parent, "文件筐")
         self.basket_list_widget = QListWidget(group)
         self.basket_list_widget.setStyleSheet(LIST_STYLE)
-        self.basket_list_widget.setMinimumHeight(120)
+        # 固定高度：QListWidget 默认 Expanding，会把整组撑到占满剩余空间，
+        # 结果下面的「系统」组被挤到底部、中间留一大片空白。
+        self.basket_list_widget.setMinimumHeight(112)
+        self.basket_list_widget.setMaximumHeight(150)
+        self.basket_list_widget.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
         group._grid.addWidget(self.basket_list_widget, 0, 0, 1, 4)
 
         self.rename_button = QPushButton("改名", group)

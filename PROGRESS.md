@@ -201,3 +201,12 @@ DESKTOP_UNCHANGED_OK
 - Dock 高度从 `图标+24` 提到 `图标+34`，并显式把列表铺进窗口（原先没有布局管理器、子视图是默认小尺寸），修掉标签被裁的问题。
 
 **取证期间的一个坑**：第一次截图里 Dock 不见了，查下来是**自动收起逻辑按设计生效**——截屏前鼠标不在 Dock 区域，900ms 后（超过 400ms 延迟）它已经收起来了。取证时把 `dock.locked = True` 钉住即可，产品行为不需要改。另外 `--hold` 我一开始把秒当毫秒传，只停了 22 毫秒，已修。
+
+## 收尾 bug 检查（领导要求「仔细检查是否存在 bug，可以截图查看 ui」）
+
+1. **设置面板的布局是真有问题，已修**：`QListWidget` 默认 `Expanding`，把「文件筐」那一组撑到占满剩余空间，结果下面的「系统」组被挤到底部、中间一大片空白，按钮也被拉开。改成固定高度（112–150）＋ `QSizePolicy(Expanding, Fixed)`，并把面板正式渲染出来核对过（`docs/settings_preview.png`，真机截屏，能看到深色磨砂、文字清晰、两个筐都在列表里）。
+2. **未使用的导入清理**：用 AST 扫了一遍全仓 `import` 与符号引用，清掉 13 处只有导入行、正文从未使用的符号（`basket_window` 的 QFileInfo/QAction/QIcon/QPainter/QPixmap/fileicons、`explorer_window` 的 QIcon/QPainter/QPixmap/fileicons、`dock_window` 的 fileicons、`main` 里函数内的局部 QIcon、`settings_window` 的 os）。清理后复扫为「（无）」。
+3. **`compileall` 全仓通过**，无语法/字节码错误。
+4. **真实端到端验证 Dock（不是脚本内自证）**：启动真程序 → 日志零错误零警告 → 鼠标在底边时 `DeskBasket Dock` 窗口矩形 `(85, 981, 1621, 1063)`（滑出）→ 鼠标移开 3 秒后 `(85, 1067, 1621, 1149)`（完全收起，y = 屏底）。另用外部通道（computer-use 截屏）独立确认 Dock 就在屏幕底部、**只有图标没有背景条**。
+
+**过程中查清的一个"假 bug"**：脚本里一度看到 `tick()` 返回 `show` 但窗口 y 仍停在收起位置，一度以为是滑出动画坏了。查下来是**脚本自己没跑事件循环**——`QPropertyAnimation` 需要事件循环推进，脚本里 `wait_ms` 那一步之前就取了几何位置。加上事件循环后 300ms 内到位（1067 → 1022 → 981）。产品代码没问题，但这说明「验证脚本本身的时序」也得当成嫌疑对象。
