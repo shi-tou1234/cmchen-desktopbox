@@ -27,15 +27,18 @@
   body.dragover .popup-edge { border-color: rgba(140, 190, 255, 0.9); }
 
   /* 打开/收起动画：整块内容从图标位置"抽"出来再缩回去（macOS 的文件夹堆栈那种感觉）。
-     变换原点落在 Dock 图标中心（--origin-x 由主进程按锚点算好），底边贴齐。 */
+     变换原点落在 Dock 图标中心（--origin-x 由主进程按锚点算好），底边贴齐。
+     完全透明模式：窗口本身是透的、没有"底盘"，内容可以放心从很小放大。
+     磨砂模式（body.glass）：窗口底是一整块系统材质，内容缩到 0.28 会和材质底对不上、
+     看着像闪一下，所以那一档改成"轻微下沉 + 淡"。
+     **窗口本身不做透明度动画**：给挂材质的窗口 setOpacity 会让材质底闪一下，
+     开和关都看得见。 */
   .popup-frame {
     position: absolute;
     inset: 0;
     transform-origin: var(--origin-x, 50%) 100%;
-    /* 交给合成器单独一层：缩放/淡入就只是图层变换，不会每帧重画整块内容
-       （弹窗是大窗口，重画很容易掉帧，看着就是"一卡一卡"） */
+    /* 交给合成器单独一层：缩放/淡入就只是图层变换，不会每帧重画整块内容 */
     will-change: transform, opacity;
-    /* 打开：末尾带一点回弹，像真的从图标里"抽"出来 */
     transition:
       transform 260ms cubic-bezier(0.34, 1.28, 0.5, 1),
       opacity 180ms ease-out;
@@ -46,6 +49,18 @@
     /* 收起：干脆收回去，不拖泥带水 */
     transition:
       transform 200ms cubic-bezier(0.4, 0, 0.9, 0.4),
+      opacity 150ms ease-in;
+  }
+  body.glass .popup-frame {
+    transition:
+      transform 190ms cubic-bezier(0.34, 1.2, 0.5, 1),
+      opacity 170ms ease-out;
+  }
+  body.glass.collapsed .popup-frame {
+    transform: translateY(10px) scale(0.94);
+    opacity: 0;
+    transition:
+      transform 160ms ease-in,
       opacity 150ms ease-in;
   }
 
@@ -354,18 +369,21 @@
       view = payload;
       homeView = payload;
       iconSize = payload.iconSize || 48;
+      // 磨砂模式的窗口底是一整块系统材质，动画得换个做法（见下面的 CSS）
+      document.body.classList.toggle('glass', payload.glass === true);
       // 动画原点落在被点开的 Dock 图标中心
       if (Number.isFinite(payload.originX)) {
         document.documentElement.style.setProperty('--origin-x', payload.originX * 100 + '%');
       }
       document.body.classList.add('collapsed');   // 先回到"收起"态，再从那里展开
       render();
-      // 数据就绪后显示窗口（showInactive：不抢用户当前应用的焦点）。
-      // 主进程会等页面画出第一帧再显示，所以这里要等它回话才开始展开，
-      // 否则窗口还没露面、动画已经播掉一截。
-      api.popupPresent().then(() => {
+      // 等这一帧真的画出来（新内容也画好了）再让主进程显示窗口——复用热窗口时尤其重要，
+      // 不然窗口会先亮出上一次的旧内容，看着就是"闪一下"。显示之后再开始展开。
+      requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          requestAnimationFrame(() => document.body.classList.remove('collapsed'));
+          api.popupPresent().then(() => {
+            requestAnimationFrame(() => document.body.classList.remove('collapsed'));
+          });
         });
       });
     }

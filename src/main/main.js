@@ -46,9 +46,12 @@ const POPUP_HEIGHT = 460;
 const POPUP_EDGE_GAP = 8;    // 弹窗与屏幕左右/上边的最小距离
 const POPUP_DOCK_GAP = 10;   // 弹窗与 Dock 上沿的间距
 const POPUP_BLUR_CLOSE_MS = 220; // 失焦后多久关（留出"点击 Dock 图标切换"的时间）
-const POPUP_CLOSE_ANIM_MS = 200; // 收起动画时长：先让渲染层缩回去，再销毁窗口
-const POPUP_FADE_MS = 160;       // 窗口整体淡入/淡出：磨砂模式下材质底是不透明的，
-const POPUP_FADE_STEPS = 7;      // 光靠内容缩放会和材质底对不上，所以两者一起做
+const POPUP_CLOSE_ANIM_MS = 210; // 收起动画时长：先让渲染层缩回去，再隐藏窗口
+// 磨砂模式的收起更短：内容淡掉就可以收，别让一块空的材质底多晾着（那看着就是"闪一下"）
+const POPUP_CLOSE_ANIM_GLASS_MS = 170;
+// 打开/收起的淡入淡出全部由页面自己用 CSS 做（见 popup.html）。
+// **不要用 setOpacity 去淡窗口**：挂系统材质（磨砂）的窗口改不透明度时，
+// 材质底会先闪一下再跟上，开着和关着都能看见"闪一闪"。
 // 鼠标离开自动关：弹窗显示不抢焦点（showInactive），拿不到系统失焦事件，
 // 由主进程轮询鼠标位置——不在弹窗 ∪ Dock 的附近区域连续一段时间就关。
 const POPUP_HOVER_CHECK_MS = 250;
@@ -661,50 +664,8 @@ function rebuildPopupPayload() {
   return popupPayload;
 }
 
-// 窗口整体淡入/淡出。磨砂模式下窗口底是不透明的系统材质，只有内容缩放的话
-// 会出现"磨砂矩形瞬间铺满、内容在里面缩"的错位，所以整体也淡一下。
-// **完全透明模式不需要**：页面自己的 opacity 过渡已经在做同一件事，两套一起跑等于
-// 每帧多一次整窗重合成——这是弹窗"一卡一卡"的一个来源。
-function fadeWindow(win, from, to) {
-  if (!win || win.isDestroyed() || typeof win.setOpacity !== 'function') return;
-  if (!winFactory.glassEnabled(settings)) {
-    try {
-      win.setOpacity(1);
-    } catch (_) {
-      /* 不支持就保持原样 */
-    }
-    return;
-  }
-  try {
-    win.setOpacity(from);
-  } catch (_) {
-    return;
-  }
-  let step = 0;
-  const timer = setInterval(() => {
-    if (!win || win.isDestroyed()) {
-      clearInterval(timer);
-      return;
-    }
-    step += 1;
-    const ratio = Math.min(1, step / POPUP_FADE_STEPS);
-    try {
-      win.setOpacity(from + (to - from) * ratio);
-    } catch (_) {
-      clearInterval(timer);
-      try {
-        win.setOpacity(to);
-      } catch (_) {
-        /* 个别平台不支持透明度：那就保持原样 */
-      }
-      return;
-    }
-    if (ratio >= 1) clearInterval(timer);
-  }, Math.max(12, Math.round(POPUP_FADE_MS / POPUP_FADE_STEPS)));
-}
-
-// 关文件夹弹窗：先通知渲染层播"收回"动画，动画时长后再销毁窗口。
-// 立刻销毁会看到窗口"啪"地消失，和打开时的抽出动画对不上。
+// 关文件夹弹窗：先通知渲染层播"收回"动画，动画放完再隐藏窗口。
+// 立刻隐藏会看到窗口"啪"地消失，和打开时的抽出动画对不上。
 function closeFolderPopup() {
   clearTimeout(popupBlurTimer);
   popupBlurTimer = null;
@@ -718,20 +679,16 @@ function closeFolderPopup() {
   } catch (_) {
     /* 页面可能还没就绪：直接隐藏即可 */
   }
-  fadeWindow(win, 1, 0);
-  // 收起动画放完就**隐藏**，不销毁：下次打开直接复用这个热窗口——不用再起一个渲染
-  // 进程、不用重新加载页面、图标也在解码缓存里，展开动画才能从第一帧就顺。
+  // 收起动画（内容缩小/淡出）放完就**隐藏**，不销毁：下次打开直接复用这个热窗口——
+  // 不用再起一个渲染进程、不用重新加载页面、图标也在解码缓存里。
+  // 窗口自己不做透明度动画：材质底跟着 setOpacity 会闪（见文件头的说明）。
+  const closeMs = popupGlass ? POPUP_CLOSE_ANIM_GLASS_MS : POPUP_CLOSE_ANIM_MS;
   clearTimeout(popupHideTimer);
   popupHideTimer = setTimeout(() => {
     popupHideTimer = null;
     if (popupWindow !== win || win.isDestroyed()) return;
     win.hide();
-    try {
-      win.setOpacity(1);   // 复位不透明度，免得下次出现时是半透明的
-    } catch (_) {
-      /* 不支持就忽略 */
-    }
-  }, POPUP_CLOSE_ANIM_MS);
+  }, closeMs);
 }
 
 // 鼠标离开自动关的轮询
@@ -809,7 +766,9 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
   popupPayload = {
     ...data,
     originX,
-    iconSize: settings.icon_size
+    iconSize: settings.icon_size,
+    // 页面按这个挑动画：磨砂模式窗口底是整块材质，内容不能缩得太小（见 popup.html）
+    glass: winFactory.glassEnabled(settings)
   };
 
   // 复用上一个热窗口：渲染进程、页面、图片解码缓存都是现成的，展开动画从第一帧就顺。
@@ -1408,7 +1367,6 @@ function registerIpc() {
       popupOpenedAt = 0;
       popupOpenMode = '';
     }
-    fadeWindow(win, 0, 1);
     win.showInactive();
     startPopupAwayWatch();
     return true;
