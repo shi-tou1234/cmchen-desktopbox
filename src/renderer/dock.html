@@ -45,18 +45,8 @@
     filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
   }
 
-  /* 悬停时图标后面一层淡高亮，和放大动画配合 */
-  .dock-item::after {
-    content: '';
-    position: absolute;
-    inset: -6px -4px 2px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.12);
-    opacity: 0;
-    transition: opacity 0.15s;
-    z-index: -1;
-  }
-  .dock-item:hover::after { opacity: 1; }
+  /* 悬停不给底色：只在 ::after 时代的那圈灰被去掉了（领导说丑），
+     反馈只靠放大动画 + 图标自带的投影。 */
 
   .dock-item.dragging { opacity: 0.4; }
   body.dragover { outline: none; }
