@@ -19,6 +19,7 @@ const {
   BrowserWindow,
   Menu,
   Tray,
+  dialog,
   ipcMain,
   nativeImage,
   nativeTheme,
@@ -487,6 +488,21 @@ function createDockWindow() {
   return win;
 }
 
+// 把若干路径加进 Dock：重复的跳过，并从"移除过"的黑名单里解封（拖入、设置面板勾选、
+// 文件选择器三条路都走这里，行为一致）
+function addDockPaths(paths) {
+  let items = settings.dock_items;
+  for (const item of paths || []) {
+    const result = dockmodel.addItem(items, item);
+    items = result.items;
+    settings.dock_removed = dockmodel.removeItem(settings.dock_removed, item);
+  }
+  settings.dock_items = items;
+  persist();
+  syncDock();
+  return items;
+}
+
 // 预取 Dock 里靠 shell 解析的图标（快捷方式与系统虚拟项）。从这里一次性发起，
 // 避免渲染层逐条请求把同一批拆成好几个 PowerShell 进程——每次都重付一遍编译开销。
 // 已有缓存时整批直接命中，等于空操作。
@@ -905,17 +921,31 @@ function registerIpc() {
     return settings.dock_specials;
   });
 
-  ipcMain.handle('dock:add', (_event, { paths }) => {
-    let items = settings.dock_items;
-    for (const item of paths || []) {
-      const result = dockmodel.addItem(items, item);
-      items = result.items;
-      settings.dock_removed = dockmodel.removeItem(settings.dock_removed, item);
-    }
-    settings.dock_items = items;
-    persist();
-    syncDock();
-    return items;
+  ipcMain.handle('dock:add', (_event, { paths }) => addDockPaths(paths));
+
+  // 设置面板里的"逐个添加"：列出桌面上可收录的条目，并标出哪些已经在 Dock 上
+  ipcMain.handle('dock:candidates', () =>
+    dockmodel.shortcutCandidates(desktopItems(), settings.dock_items)
+  );
+
+  // 从磁盘任意位置挑文件加进 Dock（不限于桌面）
+  ipcMain.handle('dock:pick', async () => {
+    const options = {
+      title: '选择要放进 Dock 的快捷方式',
+      buttonLabel: '加入 Dock',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: '快捷方式与程序', extensions: ['lnk', 'url', 'exe'] },
+        { name: '全部文件', extensions: ['*'] }
+      ]
+    };
+    const owner = settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : null;
+    // 两个重载分开写：不要把 undefined 当第一个参数传进去
+    const picked = owner
+      ? await dialog.showOpenDialog(owner, options)
+      : await dialog.showOpenDialog(options);
+    if (picked.canceled || !picked.filePaths.length) return settings.dock_items;
+    return addDockPaths(picked.filePaths);
   });
 
   ipcMain.handle('dock:remove', (_event, { itemPath }) => {

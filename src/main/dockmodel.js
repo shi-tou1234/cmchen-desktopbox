@@ -6,6 +6,7 @@
 // 坐标一律用「屏幕逻辑像素」的 {x, y, width, height}。
 
 const { normalizePath, pathKey } = require('./store');
+const path = require('node:path');
 
 const EDGE_BOTTOM = 'bottom';
 const HOT_ZONE_THICKNESS = 3;
@@ -206,6 +207,24 @@ function findIndex(items, rawPath) {
   return items.findIndex((item) => pathKey(item) === key);
 }
 
+// 设置面板里"逐个添加"用的候选清单：桌面上可收录的条目 ＋ 是否已经在 Dock 上。
+// 排序按名称（中文按拼音顺序），返回 [{ path, name, onDock }]。
+function shortcutCandidates(desktopPaths, items) {
+  const onDock = new Set((items || []).map(pathKey));
+  const rows = [];
+  const seen = new Set();
+  for (const raw of desktopPaths || []) {
+    const value = normalizePath(raw);
+    if (!value || !isCollectable(value)) continue;
+    const key = pathKey(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({ path: value, name: path.basename(value), onDock: onDock.has(key) });
+  }
+  rows.sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  return rows;
+}
+
 module.exports = {
   ACTION_HIDE,
   ACTION_NONE,
@@ -236,5 +255,6 @@ module.exports = {
   revealedGeometry,
   shouldHide,
   shouldReveal,
+  shortcutCandidates,
   syncDesktopShortcuts
 };

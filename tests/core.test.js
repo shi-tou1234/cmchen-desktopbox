@@ -564,6 +564,28 @@ test('虚拟项：此电脑与回收站都带 shell 解析名和打开方式', (
   assert.ok(bin.parsingName.startsWith('::{'));
 });
 
+test('快捷方式候选：只列可收录的、去重、标出是否已在 Dock 上', () => {
+  const desktop = [
+    'C:\\Users\\me\\Desktop\\QQ音乐.lnk',
+    'C:\\Users\\me\\Desktop\\价格.txt',
+    'C:\\Users\\me\\Desktop\\ZCode.lnk',
+    'C:\\Users\\me\\Desktop\\学习通.url',
+    'C:\\Users\\me\\Desktop\\万用表.exe',
+    'C:\\Users\\me\\Desktop\\QQ音乐.lnk' // 重复项
+  ];
+  const rows = dockmodel.shortcutCandidates(desktop, ['C:\\Users\\me\\Desktop\\ZCode.lnk']);
+  assert.deepStrictEqual(
+    rows.map((row) => row.name).sort(),
+    ['QQ音乐.lnk', 'ZCode.lnk', '学习通.url', '万用表.exe'].sort()
+  );
+  assert.strictEqual(rows.find((row) => row.name === 'ZCode.lnk').onDock, true);
+  assert.strictEqual(rows.find((row) => row.name === 'QQ音乐.lnk').onDock, false);
+  assert.strictEqual(rows.find((row) => row.name === '学习通.url').onDock, false);
+  // 没有任何候选时给空数组，不抛
+  assert.deepStrictEqual(dockmodel.shortcutCandidates([], ['C:\\x.lnk']), []);
+  assert.deepStrictEqual(dockmodel.shortcutCandidates(null, null), []);
+});
+
 test('虚拟项：不认识的 id 丢掉、重复去重、顺序保持', () => {
   assert.deepStrictEqual(
     specials.normalizeSpecials(['recyclebin', '不存在', 'thispc', 'recyclebin', 42, null]),

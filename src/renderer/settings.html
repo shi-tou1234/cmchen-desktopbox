@@ -16,6 +16,27 @@
     font-size: 12px;
     width: 180px;
   }
+  /* 快捷方式候选清单：一行一项，左边勾选框 + 图标 + 名字 */
+  .shortcut-list {
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.07);
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 4px;
+  }
+  .shortcut-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .shortcut-row:hover { background: rgba(255, 255, 255, 0.10); }
+  .shortcut-row img { width: 18px; height: 18px; object-fit: contain; }
+  .shortcut-row .name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .shortcut-row .state { font-size: 11px; color: #9a9ba4; flex: 0 0 auto; }
 </style>
 </head>
 <body>
@@ -59,6 +80,15 @@
         </div>
         <div class="row">
           <span class="hint" id="dockCount"></span>
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>Dock 上的快捷方式</h3>
+        <div class="shortcut-list" id="shortcutList"></div>
+        <div class="row" style="margin-top:6px;justify-content:flex-start;gap:8px;flex-wrap:wrap">
+          <button class="btn" id="btnPick">选择文件添加…</button>
+          <span class="hint">勾选即加入 Dock，取消勾选即移除；也可以直接把文件拖到 Dock 上。图标取的是不带 Windows 小箭头的原图。</span>
         </div>
       </div>
 
@@ -171,7 +201,56 @@
         settings.baskets.filter((b) => b.visible !== false).length + ' 个文件夹' +
         '；自动收录桌面的 .lnk / .url / .exe，也可直接拖进去';
       renderBaskets();
+      renderShortcuts();
       loading = false;
+    }
+
+    // 快捷方式候选清单：桌面上可收录的条目，勾选＝加入 Dock、取消＝移除。
+    // 图标走 api.getIcon（和 Dock 同一条链路：.lnk 由 shell 给原图，不带 Windows 小箭头）。
+    async function renderShortcuts() {
+      const host = el('shortcutList');
+      let rows = [];
+      try {
+        rows = await api.dockCandidates();
+      } catch (_) {
+        rows = [];
+      }
+      host.innerHTML = '';
+      if (!rows.length) {
+        host.textContent = '桌面上没有可收录的 .lnk / .url / .exe';
+        return;
+      }
+      for (const row of rows) {
+        const line = document.createElement('label');
+        line.className = 'shortcut-row';
+
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = row.onDock;
+        box.addEventListener('change', async () => {
+          if (box.checked) await api.addDockPaths([row.path]);
+          else await api.removeDockItem(row.path);
+          flash((box.checked ? '已加入 Dock：' : '已从 Dock 移除：') + row.name);
+          await renderShortcuts();
+        });
+
+        const icon = document.createElement('img');
+        icon.alt = '';
+        api.getIcon(row.path, 24).then((url) => {
+          if (url) icon.src = url;
+        });
+
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = row.name.replace(/\.(lnk|url)$/i, '');
+
+        const state = document.createElement('span');
+        state.className = 'state';
+        state.textContent = row.onDock ? '在 Dock 上' : '';
+
+        line.append(box, icon, name, state);
+        host.append(line);
+      }
     }
 
     async function push(patch, message) {
@@ -201,6 +280,12 @@
     });
     el('dockMagnify').addEventListener('change', (event) => {
       push({ dock_magnify: Number(event.target.value) }, '悬停放大程度已更新');
+    });
+
+    el('btnPick').addEventListener('click', async () => {
+      const items = await api.pickDockFiles();
+      flash('已加入 Dock，现有 ' + items.length + ' 个快捷方式');
+      await refresh();
     });
 
     el('basketName').addEventListener('change', async (event) => {

@@ -36,6 +36,9 @@ contextBridge.exposeInMainWorld('deskbasket', {
   addDockPaths: (paths) => ipcRenderer.invoke('dock:add', { paths }),
   removeDockItem: (itemPath) => ipcRenderer.invoke('dock:remove', { itemPath }),
   reorderDock: (items) => ipcRenderer.invoke('dock:reorder', { items }),
+  // 逐个添加：桌面候选清单 ＋ 从磁盘挑文件
+  dockCandidates: () => ipcRenderer.invoke('dock:candidates'),
+  pickDockFiles: () => ipcRenderer.invoke('dock:pick'),
   // 系统虚拟项（此电脑 / 回收站）
   getSpecialIcon: (id) => ipcRenderer.invoke('special:icon', { id }),
   openSpecial: (id) => ipcRenderer.invoke('special:open', { id }),
