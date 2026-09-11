@@ -50,6 +50,16 @@
 
   .dock-item.dragging { opacity: 0.4; }
   body.dragover { outline: none; }
+
+  /* 被移除/删掉的条目：留在原位缩小淡出，别"啪"一下就没了 */
+  .dock-item.leaving {
+    position: fixed;
+    pointer-events: none;
+    transition:
+      opacity 200ms ease-in,
+      transform 200ms cubic-bezier(0.4, 0, 1, 1);
+  }
+  .dock-item.leaving.gone { opacity: 0; transform: scale(0.2); }
 </style>
 </head>
 <body>
@@ -102,11 +112,32 @@
       return entry.name || '';
     }
 
+    // 条目的身份：用来判断这次重画里谁是新来的、谁走了、谁只是挪了位置
+    function keyOf(entry) {
+      return entry.type === 'shortcut' ? 'p:' + entry.path : entry.type + ':' + entry.id;
+    }
+
     // ---------------------------------------------------------------- 渲染
 
     function makeNode(entry) {
       const item = document.createElement('div');
       item.className = 'dock-item';
+      // 每条挂一份动画状态，全部由 tick 逐帧积分：
+      //   influence 悬停联动 / press 按下回弹 / hopAt 点开时的弹跳 / enter 新条目进场 / dx,dy 位移
+      const node = {
+        entry,
+        el: item,
+        key: keyOf(entry),
+        influence: 0,
+        press: 0,
+        pressV: 0,
+        pressTarget: 0,
+        hopAt: 0,
+        enter: 0,
+        enterAt: 0,
+        dx: 0,
+        dy: 0
+      };
 
       const img = document.createElement('img');
       img.alt = '';
@@ -137,7 +168,21 @@
       // 不画悬停名称气泡（领导要求）：视觉名称只留给无障碍用
       item.setAttribute('aria-label', displayName(entry));
 
+      // 按下压一下、松手弹回来（弹簧在 tick 里积分），点开时再向上跳一下
+      item.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+        node.pressTarget = 1;
+      });
+      const releasePress = () => {
+        node.pressTarget = 0;
+      };
+      item.addEventListener('pointerup', releasePress);
+      item.addEventListener('pointerleave', releasePress);
+      item.addEventListener('pointercancel', releasePress);
+      item.addEventListener('dragstart', releasePress);
+
       item.addEventListener('click', () => {
+        node.hopAt = performance.now();
         const rect = item.getBoundingClientRect();
         const centerX = rect.left + rect.width / 2;
         if (entry.type === 'basket') {
@@ -258,7 +303,7 @@
         });
       }
 
-      return { entry, el: item, influence: 0 };
+      return node;
     }
 
     function shortcutIndexOf(entry) {
@@ -272,13 +317,52 @@
 
     function render() {
       document.documentElement.style.setProperty('--icon', iconSize + 'px');
+      // 重画前先记住旧图标的位置和身份，好让这次重画有"来龙去脉"：
+      // 新来的淡入放大、走掉的缩小淡出、留下的按位移滑过去（拖拽排序也吃这套）
+      const before = new Map();
+      for (const node of nodes) {
+        before.set(node.key, { el: node.el, rect: node.el.getBoundingClientRect() });
+      }
+
       dockEl.innerHTML = '';
+      const firstPaint = before.size === 0;
       nodes = entries.map((entry) => {
         const node = makeNode(entry);
         dockEl.append(node.el);
         return node;
       });
       measureNodes();
+
+      nodes.forEach((node, index) => {
+        const old = before.get(node.key);
+        if (old) {
+          const rect = node.el.getBoundingClientRect();
+          node.dx = old.rect.left - rect.left;
+          node.dy = old.rect.top - rect.top;
+          before.delete(node.key);
+          return;
+        }
+        // 新条目：从小、淡 → 正常。首次铺满时按顺序错开一点，像依次落位
+        node.enter = 1;
+        node.enterAt = performance.now() + (firstPaint ? index * 26 : 0);
+      });
+
+      // 剩下没被认领的就是这次消失的条目
+      for (const old of before.values()) {
+        const ghost = old.el.cloneNode(true);
+        ghost.classList.add('leaving');
+        ghost.classList.remove('dragging');
+        // 清掉动画帧留下的内联 transform/opacity，否则它们会盖住 .gone 的缩小淡出
+        ghost.style.transform = '';
+        ghost.style.opacity = '';
+        ghost.style.left = old.rect.left + 'px';
+        ghost.style.top = old.rect.top + 'px';
+        ghost.style.width = old.rect.width + 'px';
+        ghost.style.height = old.rect.height + 'px';
+        document.body.append(ghost);
+        requestAnimationFrame(() => ghost.classList.add('gone'));
+        setTimeout(() => ghost.remove(), 260);
+      }
     }
 
     // 测量每个条目的中心点（动画联动按中心距离衰减）
@@ -343,8 +427,18 @@
       return 0.5 + 0.5 * Math.cos((Math.PI * distance) / range);
     }
 
+    // 点击与进场的动画参数
+    const PRESS_SCALE = 0.16;   // 按住时压到 84%
+    const HOP_LIFT = 22;        // 点开时向上跳 22px
+    const HOP_SCALE = 0.10;     // 同时放大 10%
+    const HOP_MS = 420;         // 一次弹跳的时长
+    const ENTER_DECAY = 0.84;   // 进场每帧衰减：约 180ms 落位
+    const SLIDE_DECAY = 0.80;   // 位移每帧衰减：约 200ms 滑到位
+
     function tick() {
+      const now = performance.now();
       for (const node of nodes) {
+        // 悬停联动
         let target = 0;
         if (pointer) {
           const dx = Math.abs(pointer.x - node.centerX);
@@ -353,13 +447,49 @@
         }
         node.influence += (target - node.influence) * EASE;
         if (Math.abs(target - node.influence) < 0.002) node.influence = target;
-        if (node.influence < 0.001) {
-          node.el.style.transform = '';
-        } else {
-          const scale = 1 + boostScale * node.influence;
-          const lift = BOOST_LIFT * node.influence;
-          node.el.style.transform = `translateY(${-lift.toFixed(2)}px) scale(${scale.toFixed(3)})`;
+
+        // 按下回弹：欠阻尼弹簧，松手会自己过冲一下，看着是"弹"回来的
+        const pressTarget = node.pressTarget;
+        node.pressV = (node.pressV + (pressTarget - node.press) * 0.35) * 0.62;
+        node.press += node.pressV;
+        if (Math.abs(pressTarget - node.press) < 0.002 && Math.abs(node.pressV) < 0.002) {
+          node.press = pressTarget;
+          node.pressV = 0;
         }
+
+        // 点开时的一次弹跳（半个正弦波）
+        let hop = 0;
+        if (node.hopAt) {
+          const t = (now - node.hopAt) / HOP_MS;
+          if (t >= 1) node.hopAt = 0;
+          else hop = Math.sin(Math.PI * t);
+        }
+
+        // 新条目进场
+        if (node.enter && now >= node.enterAt) {
+          node.enter *= ENTER_DECAY;
+          if (node.enter < 0.01) node.enter = 0;
+        }
+
+        // 位移缓动回 0
+        node.dx = Math.abs(node.dx) < 0.4 ? 0 : node.dx * SLIDE_DECAY;
+        node.dy = Math.abs(node.dy) < 0.4 ? 0 : node.dy * SLIDE_DECAY;
+
+        const resting =
+          !node.influence && !node.press && !hop && !node.enter && !node.dx && !node.dy;
+        if (resting) {
+          node.el.style.transform = '';
+          node.el.style.opacity = '';
+          continue;
+        }
+        const scale =
+          (1 + boostScale * node.influence) *
+          (1 - PRESS_SCALE * node.press + HOP_SCALE * hop) *
+          (1 - 0.35 * node.enter);
+        const lift = BOOST_LIFT * node.influence + HOP_LIFT * hop;
+        node.el.style.transform =
+          `translate(${node.dx.toFixed(2)}px, ${(-lift + node.dy).toFixed(2)}px) scale(${scale.toFixed(3)})`;
+        node.el.style.opacity = node.enter ? (1 - 0.8 * node.enter).toFixed(3) : '';
       }
       requestAnimationFrame(tick);
     }

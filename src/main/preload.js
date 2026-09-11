@@ -87,8 +87,12 @@ contextBridge.exposeInMainWorld('deskbasket', {
   // 提示框交给主进程弹：Dock 窗口不可聚焦，页内 alert 会阻塞渲染进程（和 window.prompt 同一类问题）
   alertMessage: (text) => ipcRenderer.invoke('ui:alert', { text: String(text || '') }),
 
-  // 页面内右键菜单：交给主进程弹原生菜单，避免被小窗口裁掉
-  popupMenu: (items, x, y) => ipcRenderer.invoke('menu:popup', { items, x, y }),
+  // 页面内右键菜单：主进程弹一个自绘的小菜单窗（失焦即关，支持键盘）
+  openMenu: (items, x, y) => ipcRenderer.invoke('menu:open', { items, x, y }),
+  // 菜单窗自己用：取要画的项、选中、取消
+  menuItems: () => ipcRenderer.invoke('menu:items'),
+  menuPick: (key) => ipcRenderer.invoke('menu:pick', { key }),
+  menuDismiss: () => ipcRenderer.invoke('menu:dismiss'),
 
   // 拖放：把 DataTransfer 里的文件转成本地路径
   pathsFromFiles: (files) =>

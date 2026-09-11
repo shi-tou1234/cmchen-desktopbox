@@ -145,6 +145,18 @@ function pointNearBounds(point, bounds, pad = 0) {
   );
 }
 
+// Dock 底边贴在哪条线上：
+//   - 任务栏占位（没自动隐藏）时贴它的上沿，也就是工作区底边；
+//   - 但离屏幕底边至少留 gap —— 自动隐藏的任务栏冒出来约 40px 高，不留缝就会盖住图标。
+// 取两者里更高的那条（y 越小越靠上），所以 gap 小于任务栏高度时不会白留一道缝。
+function bottomAnchor(workArea, screenRect, gap = 0) {
+  const workBottom = workArea
+    ? workArea.y + workArea.height
+    : rectBottom(screenRect);
+  const limit = rectBottom(screenRect) - Math.max(0, Number(gap) || 0);
+  return Math.min(workBottom, limit);
+}
+
 function hiddenGeometry(screen, dockSize, edge = EDGE_BOTTOM, peek = 0) {
   const x = screen.x + Math.max(0, Math.floor((screen.width - dockSize.width) / 2));
   if (edge === EDGE_BOTTOM) {
@@ -202,6 +214,37 @@ function syncDesktopShortcuts(items, removed, desktopPaths) {
   return result;
 }
 
+// 右键菜单窗口的尺寸。自绘菜单要用一个尺寸刚好的窗口装它（原生菜单没有这个问题，
+// 但它挂在不聚焦的 Dock 窗口上时点别处关不掉）。宽度按最长一条标签估算：
+// 中日韩字符按 13px、其余按 7px，再加图标/内边距的余量。
+const MENU_ITEM_H = 30;
+const MENU_SEPARATOR_H = 9;
+const MENU_PADDING_Y = 8;
+const MENU_MIN_W = 180;
+const MENU_MAX_W = 320;
+const CJK_CHAR = /[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]/;
+
+function menuLayout(items) {
+  const list = Array.isArray(items) ? items : [];
+  let width = MENU_MIN_W;
+  let height = MENU_PADDING_Y * 2;
+  for (const item of list) {
+    if (item && item.separator) {
+      height += MENU_SEPARATOR_H;
+      continue;
+    }
+    height += MENU_ITEM_H;
+    const label = String((item && item.label) || '');
+    let textWidth = 0;
+    for (const ch of label) textWidth += CJK_CHAR.test(ch) ? 13 : 7;
+    width = Math.max(width, Math.min(MENU_MAX_W, Math.ceil(textWidth) + 48));
+  }
+  return {
+    width: Math.max(MENU_MIN_W, Math.min(MENU_MAX_W, width)),
+    height: Math.max(MENU_ITEM_H + MENU_PADDING_Y * 2, height)
+  };
+}
+
 function findIndex(items, rawPath) {
   const key = pathKey(rawPath || '');
   return items.findIndex((item) => pathKey(item) === key);
@@ -253,8 +296,12 @@ module.exports = {
   EDGE_BOTTOM,
   HIDE_DELAY_MS,
   HOT_ZONE_THICKNESS,
+  MENU_ITEM_H,
+  MENU_PADDING_Y,
+  MENU_SEPARATOR_H,
   SHELL_WINDOW_CLASSES,
   addItem,
+  bottomAnchor,
   dockLayout,
   displayName,
   findIndex,
@@ -264,6 +311,7 @@ module.exports = {
   isFullscreen,
   isHotZone,
   isShellWindow,
+  menuLayout,
   monitorGeometry,
   moveItem,
   pointNearBounds,

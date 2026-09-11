@@ -66,8 +66,7 @@ let popupKey = null;           // 'basket:b1' 或 'dir:C:\\xx'，用于点同一
 let popupPayload = null;        // 弹窗渲染层就绪时取走的数据
 let popupBlurTimer = null;
 let popupHoverTimer = null;    // 鼠标离开自动关的轮询
-let menuOpen = false;          // 有原生命令菜单在弹：期间弹窗不许"失焦即关"
-let menuPicked = null;         // 命令菜单选中的 key
+let menuOpen = false;          // 自绘右键菜单开着：期间弹窗不许"失焦即关"
 
 const iconCache = new Map();      // `${size}:${pathKey}` -> dataURL
 const shortcutCache = new Map();  // pathKey -> shell.readShortcutLink 结果或 null
@@ -322,11 +321,12 @@ function dockSize() {
 function dockTargetGeometry() {
   const display = screen.getPrimaryDisplay();
   const size = dockSize();
-  // 紧贴底部：任务栏占位（未自动隐藏）时贴其上沿，否则贴屏幕底边，一点缝都不留
-  const anchor =
-    display.workArea.height < display.bounds.height
-      ? display.workArea.y + display.workArea.height
-      : display.bounds.y + display.bounds.height;
+  // 贴任务栏上沿，再往上抬 dock_bottom_gap：贴死底边时自动隐藏的任务栏一冒头就盖住图标
+  const anchor = dockmodel.bottomAnchor(
+    display.workArea,
+    display.bounds,
+    settings.dock_bottom_gap
+  );
   return dockmodel.revealedGeometry(display.bounds, size, dockmodel.EDGE_BOTTOM, 0, anchor);
 }
 
@@ -335,7 +335,8 @@ function applyDockGeometry() {
   // 收起状态下别把它拽回底边（比如改了图标大小触发几何重算时）
   const target =
     !settings.dock_auto_hide || dockRevealed ? dockTargetGeometry() : dockHiddenGeometry();
-  dockWindow.setBounds(target);
+  // 走滑动而不是瞬移：改图标大小/离底边距离时看得见它是"挪"过去的
+  slideDockTo(target);
 }
 
 // ------------------------------------------------------------------ Dock 自动收起
@@ -397,8 +398,11 @@ function cursorNearDock() {
   if (!dockWindow || dockWindow.isDestroyed()) return false;
   const display = screen.getPrimaryDisplay();
   const point = screen.getCursorScreenPoint();
+  // 抬起来之后，Dock 底边与屏幕底边之间那条缝也算"在附近"：鼠标从底边往上移过去时
+  // 不能中途判定成"离开"而收起来
+  const pad = 6 + Math.max(0, settings.dock_bottom_gap || 0);
   return (
-    dockmodel.pointNearBounds(point, dockWindow.getBounds(), 6) ||
+    dockmodel.pointNearBounds(point, dockWindow.getBounds(), pad) ||
     dockmodel.isHotZone(point, display.bounds, dockmodel.EDGE_BOTTOM, DOCK_HOT_ZONE_PX)
   );
 }
@@ -761,6 +765,102 @@ async function toggleFolderPopup(kind, payload, anchorXInDock) {
   return { open: Boolean(popupWindow) };
 }
 
+// ------------------------------------------------------------------ 窗口：右键菜单
+//
+// 以前用系统原生菜单（Menu.popup）。它确实不会被小窗口裁掉，但**挂在一个不聚焦的
+// Dock 窗口上时，点别的窗口/桌面经常关不掉**（领导报的就是这个），而且收不到键盘。
+// 现在自绘：一个尺寸刚好的可聚焦小窗，失焦即关（点别处左键就消失了）、方向键+回车
+// 可选、Esc 取消，还能做淡入动画。
+
+const MENU_GAP = 6;          // 菜单与鼠标点击处的间距
+const MENU_EDGE_PAD = 4;     // 菜单与工作区边缘的最小距离
+
+let menuWindow = null;
+let menuItems = [];
+let menuResolve = null;
+let menuFocused = false;     // 已经拿到过焦点才认「失焦即关」，否则刚开就被自己的 blur 关掉
+
+function menuPosition(ownerBounds, clickX, clickY, size) {
+  const area = winFactory.primaryWorkArea();
+  const baseX = ownerBounds ? ownerBounds.x : area.x;
+  const baseY = ownerBounds ? ownerBounds.y : area.y;
+  const pointX = baseX + (Number.isFinite(clickX) ? clickX : 0);
+  const pointY = baseY + (Number.isFinite(clickY) ? clickY : 0);
+  // 默认往下展开；下面放不下就翻到点击处上方（Dock 贴底，实际总是向上翻）
+  let y =
+    pointY + size.height + MENU_GAP > area.y + area.height - MENU_EDGE_PAD
+      ? pointY - size.height - MENU_GAP
+      : pointY + MENU_GAP;
+  let x = pointX;
+  x = Math.max(area.x + MENU_EDGE_PAD, Math.min(x, area.x + area.width - size.width - MENU_EDGE_PAD));
+  y = Math.max(area.y + MENU_EDGE_PAD, y);
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+function closeMenuWindow(picked = null) {
+  const resolve = menuResolve;
+  menuResolve = null;
+  menuOpen = false;
+  menuFocused = false;
+  const win = menuWindow;
+  menuWindow = null;
+  if (win && !win.isDestroyed()) win.destroy();
+  if (resolve) resolve(picked);
+}
+
+function openMenuWindow(event, payload = {}) {
+  const raw = Array.isArray(payload.items) ? payload.items : [];
+  const items = raw
+    .filter((item) => item && (item.separator || item.key))
+    .map((item) =>
+      item.separator
+        ? { separator: true }
+        : { key: String(item.key), label: String(item.label || '').slice(0, 60) }
+    );
+  if (!items.some((item) => !item.separator)) return Promise.resolve(null);
+
+  closeMenuWindow(null);            // 连点两次右键：先收掉上一个（顺带把上一个等的人放掉）
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const ownerBounds = owner && !owner.isDestroyed() ? owner.getContentBounds() : null;
+  const size = dockmodel.menuLayout(items);
+  const spot = menuPosition(ownerBounds, Number(payload.x), Number(payload.y), size);
+
+  menuItems = items;
+  menuOpen = true;                  // 菜单开着时，文件夹弹窗不许"失焦即关"
+  return new Promise((resolve) => {
+    menuResolve = resolve;
+    menuFocused = false;
+    const win = winFactory.createMenuWindow({
+      ...spot,
+      ...size,
+      title: APP_NAME
+    });
+    menuWindow = win;
+    attachDiagnostics(win, 'menu');
+    winFactory.loadPage(win, 'menu.html');
+    win.once('ready-to-show', () => {
+      if (win.isDestroyed()) return;
+      win.show();
+      win.focus();
+    });
+    win.on('focus', () => {
+      menuFocused = true;
+    });
+    // 点别处 → 窗口失焦 → 关掉。这就是"右键后点其他地方菜单不消失"的修法。
+    win.on('blur', () => {
+      if (menuFocused) closeMenuWindow(null);
+    });
+    win.on('closed', () => {
+      if (menuWindow === win) menuWindow = null;
+      const pending = menuResolve;
+      menuResolve = null;
+      menuOpen = false;
+      menuFocused = false;
+      if (pending) pending(null);
+    });
+  });
+}
+
 // ------------------------------------------------------------------ 窗口：设置
 
 // 打开设置窗口
@@ -794,11 +894,11 @@ const RENAME_WIDTH = 320;
 const RENAME_HEIGHT = 132;
 const RENAME_DOCK_GAP = 12;
 
-function renamePosition(anchorX) {
+function renamePosition(anchorScreenX) {
   const area = winFactory.primaryWorkArea();
   const dockTop = dockTargetGeometry().y;
-  const wanted = Number.isFinite(anchorX)
-    ? Math.round(anchorX - RENAME_WIDTH / 2)
+  const wanted = Number.isFinite(anchorScreenX)
+    ? Math.round(anchorScreenX - RENAME_WIDTH / 2)
     : Math.round(area.x + (area.width - RENAME_WIDTH) / 2);
   const x = Math.min(
     Math.max(wanted, area.x + POPUP_EDGE_GAP),
@@ -814,7 +914,7 @@ function closeRenameWindow() {
   renameTarget = null;
 }
 
-function openRenameWindow(payload = {}) {
+function openRenameWindow(event, payload = {}) {
   let pending = null;
   let current = '';
   if (payload.kind === 'basket') {
@@ -830,7 +930,13 @@ function openRenameWindow(payload = {}) {
   }
   closeRenameWindow();     // 连点两次右键时，先收掉上一个
   renameTarget = pending;
-  const spot = renamePosition(Number(payload.anchorX));
+  // 渲染层给的是**窗口内坐标**（右键那个图标的中心），先换算到屏幕坐标，
+  // 否则从 Dock 里改名时窗口会跑到屏幕最左边（Dock 窗口本身不在 x=0）
+  const owner = event && event.sender ? BrowserWindow.fromWebContents(event.sender) : null;
+  const ownerBounds = owner && !owner.isDestroyed() ? owner.getContentBounds() : null;
+  const localX = Number(payload.anchorX);
+  const anchorScreenX = Number.isFinite(localX) ? (ownerBounds ? ownerBounds.x : 0) + localX : NaN;
+  const spot = renamePosition(anchorScreenX);
   renameWindow = winFactory.createRenameWindow({
     ...spot,
     glass: winFactory.glassEnabled(settings),
@@ -1076,45 +1182,20 @@ function registerIpc() {
     );
   });
 
-  // 右键菜单：弹原生菜单并等用户选完。原生菜单不受窗口尺寸限制，
-  // 位置、键盘操作、点外面关闭都由系统处理，不会再被 Dock 那种小窗口裁掉。
-  ipcMain.handle('menu:popup', (event, payload = {}) => {
-    const items = Array.isArray(payload.items) ? payload.items : [];
-    const actionable = items.some((item) => !item.separator && item.key);
-    if (!actionable) return null;
-    const template = items.map((item) =>
-      item.separator
-        ? { type: 'separator' }
-        : {
-            label: String(item.label || ''),
-            click: () => {
-              menuPicked = item.key;
-            }
-          }
-    );
-    return new Promise((resolve) => {
-      // 原生命令菜单会短暂夺走前台，弹窗的"失焦即关"要在此期间暂停，
-      // 否则菜单还开着、文件夹窗口先自己关了。
-      menuOpen = true;
-      menuPicked = null;
-      const finish = () => {
-        menuOpen = false;
-        resolve(menuPicked);
-      };
-      try {
-        const menu = Menu.buildFromTemplate(template);
-        const win = BrowserWindow.fromWebContents(event.sender);
-        menu.popup({
-          ...(win && !win.isDestroyed() ? { window: win } : {}),
-          ...(Number.isInteger(payload.x) ? { x: payload.x } : {}),
-          ...(Number.isInteger(payload.y) ? { y: payload.y } : {}),
-          callback: finish
-        });
-      } catch (error) {
-        console.error('[menu] 弹菜单失败', error && error.message);
-        finish();
-      }
-    });
+  // 右键菜单：自绘菜单窗（见 openMenuWindow）。返回被选中的 key，取消返回 null。
+  ipcMain.handle('menu:open', (event, payload = {}) => openMenuWindow(event, payload));
+
+  // 菜单窗加载完来取要画哪些项
+  ipcMain.handle('menu:items', () => menuItems);
+
+  ipcMain.handle('menu:pick', (_event, { key } = {}) => {
+    closeMenuWindow(key === undefined ? null : String(key));
+    return true;
+  });
+
+  ipcMain.handle('menu:dismiss', () => {
+    closeMenuWindow(null);
+    return true;
   });
 
   ipcMain.handle('popup:ready', (event) => {
@@ -1174,7 +1255,7 @@ function registerIpc() {
   });
 
   // 改名：Dock 右键「改名…」与设置面板里的「改名」都走这里
-  ipcMain.handle('rename:open', (_event, payload = {}) => openRenameWindow(payload));
+  ipcMain.handle('rename:open', (event, payload = {}) => openRenameWindow(event, payload));
 
   ipcMain.handle('rename:commit', (_event, payload = {}) => {
     const target = renameTarget;
@@ -1230,6 +1311,7 @@ function registerIpc() {
       dock_auto_hide: settings.dock_auto_hide,
       dock_icon_size: settings.dock_icon_size,
       dock_magnify: settings.dock_magnify,
+      dock_bottom_gap: settings.dock_bottom_gap,
       basket_count: settings.baskets.length
     };
     settings = store.mergedSettings({ ...settings, ...(patch || {}) });
@@ -1240,6 +1322,7 @@ function registerIpc() {
       applyDockLayerMode();
     } else if (
       settings.dock_icon_size !== before.dock_icon_size ||
+      settings.dock_bottom_gap !== before.dock_bottom_gap ||
       settings.baskets.length !== before.basket_count
     ) {
       applyDockGeometry();

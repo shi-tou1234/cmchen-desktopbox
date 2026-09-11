@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>DeskBasket 菜单</title>
+<link rel="stylesheet" href="common.css">
+<style>
+  /* 窗口是透明且尺寸刚好的，菜单底色由这里画：不跟随磨砂设置——菜单要的是一眼看清 */
+  html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+
+  .menu {
+    position: absolute;
+    inset: 0;
+    padding: 4px 0;
+    border-radius: 10px;
+    background: rgba(32, 33, 40, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    /* 展开动画：从"点下去的那一侧"长出来（Dock 在下面，所以原点默认在下） */
+    transform-origin: var(--origin-x, 12px) var(--origin-y, 100%);
+    opacity: 0;
+    transform: scale(0.92) translateY(4px);
+    transition:
+      opacity 90ms ease-out,
+      transform 150ms cubic-bezier(0.34, 1.4, 0.64, 1);
+  }
+  body.ready .menu { opacity: 1; transform: none; }
+
+  .menu-item {
+    height: 30px;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    font-size: 12.5px;
+    color: #eef0f5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: default;
+  }
+  .menu-item.hot { background: rgba(255, 255, 255, 0.16); }
+  .menu-item.picked { background: rgba(110, 160, 255, 0.55); }
+  .menu-item.danger.hot { background: rgba(229, 90, 90, 0.55); }
+
+  .menu-sep {
+    height: 9px;
+    flex: 0 0 auto;
+    position: relative;
+  }
+  .menu-sep::after {
+    content: '';
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    top: 4px;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.14);
+  }
+</style>
+</head>
+<body>
+  <div class="menu" id="menu"></div>
+  <script>
+    const api = window.deskbasket;
+    const host = document.getElementById('menu');
+    const DANGER = /删除|清空/;
+
+    const rows = [];     // 可选项：[{ key, el }]，跳过分隔线
+    let hot = -1;        // 当前高亮的下标
+
+    function paint() {
+      rows.forEach((row, index) => row.el.classList.toggle('hot', index === hot));
+    }
+
+    function move(step) {
+      if (!rows.length) return;
+      hot = (hot + step + rows.length) % rows.length;
+      paint();
+    }
+
+    async function pick(index) {
+      const row = rows[index];
+      if (!row) return;
+      row.el.classList.add('picked');
+      // 先让高亮闪一下再关窗：不然点下去像是"没反应"
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      api.menuPick(row.key);
+    }
+
+    (async () => {
+      const items = (await api.menuItems()) || [];
+      for (const item of items) {
+        if (item.separator) {
+          const sep = document.createElement('div');
+          sep.className = 'menu-sep';
+          host.append(sep);
+          continue;
+        }
+        const el = document.createElement('div');
+        el.className = 'menu-item' + (DANGER.test(item.label) ? ' danger' : '');
+        el.textContent = item.label;
+        const index = rows.length;
+        el.addEventListener('mouseenter', () => {
+          hot = index;
+          paint();
+        });
+        el.addEventListener('click', () => pick(index));
+        rows.push({ key: item.key, el });
+        host.append(el);
+      }
+
+      // 第一项默认高亮，键盘直接就能用
+      if (rows.length) {
+        hot = 0;
+        paint();
+      }
+      // 下一帧再加 ready，让淡入/展开的 transition 真的跑起来
+      requestAnimationFrame(() => document.body.classList.add('ready'));
+    })();
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        move(1);
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        move(-1);
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        if (hot >= 0) pick(hot);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        api.menuDismiss();
+      }
+    });
+
+    // 鼠标移出菜单就撤掉高亮
+    document.addEventListener('mouseleave', () => {
+      hot = -1;
+      paint();
+    });
+  </script>
+</body>
+</html>

@@ -23,6 +23,7 @@ const DEFAULTS = {
   dock_icon_size: 48,
   dock_magnify: 50,            // 鼠标靠近时图标放大程度（百分比，0=不放大）
   dock_hide_delay_ms: 400,
+  dock_bottom_gap: 48,         // Dock 底边离屏幕底边的距离（px）：高过自动隐藏的任务栏，不被它盖住
   dock_items: [],
   dock_aliases: {},            // 快捷方式在 Dock 上的显示名：只存设置，绝不动磁盘上的文件名
   dock_specials: ['thispc', 'recyclebin'],  // 系统虚拟项：此电脑、回收站
@@ -45,6 +46,8 @@ const DOCK_MAGNIFY_MIN = 0;    // 不放大
 const DOCK_MAGNIFY_MAX = 100;  // 最大放大一倍
 const DOCK_HIDE_DELAY_MIN = 100;
 const DOCK_HIDE_DELAY_MAX = 3000;
+const DOCK_BOTTOM_GAP_MIN = 0;
+const DOCK_BOTTOM_GAP_MAX = 200;
 
 // 存储根目录。生产环境固定为 %APPDATA%\DeskBasket —— **对外 API 不接受任何路径参数**，
 // 从结构上就没有路径穿越入口。测试用 __setRootForTests 注入临时目录（同样做绝对路径校验）。
@@ -162,6 +165,12 @@ function mergedSettings(raw) {
     DOCK_HIDE_DELAY_MAX
   );
   out.dock_items = normalizePathList(raw.dock_items);
+  out.dock_bottom_gap = clampInt(
+    raw.dock_bottom_gap,
+    DEFAULTS.dock_bottom_gap,
+    DOCK_BOTTOM_GAP_MIN,
+    DOCK_BOTTOM_GAP_MAX
+  );
   out.dock_aliases = normalizeAliases(raw.dock_aliases);
   out.dock_specials = specials.normalizeSpecials(
     'dock_specials' in raw ? raw.dock_specials : DEFAULTS.dock_specials
@@ -200,6 +209,8 @@ module.exports = {
   ACCENT_MODES,
   ALIAS_MAX,
   DEFAULTS,
+  DOCK_BOTTOM_GAP_MAX,
+  DOCK_BOTTOM_GAP_MIN,
   DOCK_HIDE_DELAY_MAX,
   DOCK_HIDE_DELAY_MIN,
   DOCK_MAGNIFY_MAX,

@@ -80,6 +80,9 @@
           <input type="number" id="dockMagnify" min="0" max="100" step="10">
         </div>
         <div class="row">
+          <label for="dockBottomGap">离屏幕底边的距离（px）</label>          <input type="number" id="dockBottomGap" min="0" max="200" step="4">
+        </div>
+        <div class="row">
           <span class="hint" id="dockCount"></span>
         </div>
       </div>
@@ -185,6 +188,7 @@
       el('dockAlways').checked = !settings.dock_auto_hide;
       el('dockIconSize').value = settings.dock_icon_size;
       el('dockMagnify').value = settings.dock_magnify;
+      el('dockBottomGap').value = settings.dock_bottom_gap;
       el('dockCount').textContent =
         'Dock 现有 ' + settings.dock_items.length + ' 个快捷方式 ＋ ' +
         (settings.dock_specials || []).length + ' 个系统图标（此电脑/回收站）＋ ' +
@@ -290,6 +294,9 @@
     });
     el('dockMagnify').addEventListener('change', (event) => {
       push({ dock_magnify: Number(event.target.value) }, '悬停放大程度已更新');
+    });
+    el('dockBottomGap').addEventListener('change', (event) => {
+      push({ dock_bottom_gap: Number(event.target.value) }, 'Dock 离底边的距离已更新');
     });
 
     el('btnPick').addEventListener('click', async () => {

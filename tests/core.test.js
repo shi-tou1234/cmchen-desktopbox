@@ -656,6 +656,72 @@ test('虚拟项：不认识的 id 丢掉、重复去重、顺序保持', () => {
   assert.deepStrictEqual(specials.normalizeSpecials(undefined), []);
 });
 
+// ---------------------------------------------------------------- Dock 离底边的距离
+
+test('配置：Dock 默认抬起 48px，越界/非法值回落默认', () => {
+  assert.strictEqual(store.DEFAULTS.dock_bottom_gap, 48);
+  assert.strictEqual(store.mergedSettings({}).dock_bottom_gap, 48);
+  assert.strictEqual(store.mergedSettings({ dock_bottom_gap: 0 }).dock_bottom_gap, 0);
+  assert.strictEqual(store.mergedSettings({ dock_bottom_gap: 80 }).dock_bottom_gap, 80);
+  assert.strictEqual(store.mergedSettings({ dock_bottom_gap: 9999 }).dock_bottom_gap, 48);
+  assert.strictEqual(store.mergedSettings({ dock_bottom_gap: -5 }).dock_bottom_gap, 48);
+  assert.strictEqual(store.mergedSettings({ dock_bottom_gap: 12.5 }).dock_bottom_gap, 48);
+});
+
+test('几何：任务栏占位时贴它上沿，抬起高度足够时从屏幕底边算', () => {
+  const screenRect = { x: 0, y: 0, width: 1920, height: 1080 };
+  const taskbar = { x: 0, y: 0, width: 1920, height: 1038 };   // 任务栏占了 42px
+  const full = { x: 0, y: 0, width: 1920, height: 1080 };      // 任务栏自动隐藏：工作区就是整屏
+  // gap=0：老行为，贴着任务栏上沿
+  assert.strictEqual(dockmodel.bottomAnchor(taskbar, screenRect, 0), 1038);
+  // 自动隐藏的任务栏冒出来约 40px，gap 比它高就从屏幕底边往上算
+  assert.strictEqual(dockmodel.bottomAnchor(full, screenRect, 48), 1032);
+  assert.strictEqual(dockmodel.bottomAnchor(taskbar, screenRect, 48), 1032);
+  // gap 比任务栏矮：不用白留一道缝，仍然贴着任务栏上沿
+  assert.strictEqual(dockmodel.bottomAnchor(taskbar, screenRect, 20), 1038);
+  // 没有工作区信息（极端情况）时退回屏幕底边
+  assert.strictEqual(dockmodel.bottomAnchor(null, screenRect, 48), 1032);
+
+  // 和 revealedGeometry 拼起来就是 Dock 窗口的 y
+  const size = { width: 288, height: 111 };
+  const anchor = dockmodel.bottomAnchor(full, screenRect, 48);
+  assert.strictEqual(
+    dockmodel.revealedGeometry(screenRect, size, dockmodel.EDGE_BOTTOM, 0, anchor).y,
+    1080 - 48 - 111
+  );
+});
+
+// ---------------------------------------------------------------- 右键菜单尺寸
+
+test('菜单尺寸：按条目数累加高度，分隔线更矮', () => {
+  const one = dockmodel.menuLayout([{ key: 'open', label: '打开' }]);
+  assert.strictEqual(one.height, dockmodel.MENU_ITEM_H + dockmodel.MENU_PADDING_Y * 2);
+  const two = dockmodel.menuLayout([
+    { key: 'open', label: '打开' },
+    { separator: true },
+    { key: 'remove', label: '从 Dock 移除' }
+  ]);
+  assert.strictEqual(
+    two.height,
+    dockmodel.MENU_ITEM_H * 2 + dockmodel.MENU_SEPARATOR_H + dockmodel.MENU_PADDING_Y * 2
+  );
+  assert.ok(two.height > one.height);
+});
+
+test('菜单尺寸：宽度跟着最长的标签走，并且收在上下限内', () => {
+  const narrow = dockmodel.menuLayout([{ key: 'a', label: '打开' }]);
+  const wide = dockmodel.menuLayout([{ key: 'b', label: '用系统资源管理器打开所在位置' }]);
+  assert.strictEqual(narrow.width, 180, '最短也留 180，别挤成一条');
+  assert.ok(wide.width > narrow.width, '长标签要更宽');
+  assert.ok(wide.width <= 320, '再长也不超过 320（超出交给省略号）');
+  assert.ok(wide.width >= 220);
+  // 空菜单不抛，给最小尺寸
+  const empty = dockmodel.menuLayout([]);
+  assert.strictEqual(empty.width, 180);
+  assert.strictEqual(empty.height, dockmodel.MENU_ITEM_H + dockmodel.MENU_PADDING_Y * 2);
+  assert.deepStrictEqual(dockmodel.menuLayout(null), empty);
+});
+
 test('配置：dock_specials 默认就是此电脑＋回收站（老配置也会拿到）', () => {
   assert.deepStrictEqual(store.DEFAULTS.dock_specials, ['thispc', 'recyclebin']);
   assert.deepStrictEqual(store.mergedSettings({}).dock_specials, ['thispc', 'recyclebin']);

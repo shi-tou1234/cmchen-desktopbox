@@ -29,13 +29,18 @@
     position: absolute;
     inset: 0;
     transform-origin: var(--origin-x, 50%) 100%;
+    /* 打开：末尾带一点回弹，像真的从图标里"抽"出来 */
     transition:
-      transform 230ms cubic-bezier(0.22, 1, 0.36, 1),
-      opacity 170ms ease-out;
+      transform 260ms cubic-bezier(0.34, 1.28, 0.5, 1),
+      opacity 180ms ease-out;
   }
   body.collapsed .popup-frame {
     transform: translateY(16px) scale(0.28);
     opacity: 0;
+    /* 收起：干脆收回去，不拖泥带水 */
+    transition:
+      transform 200ms cubic-bezier(0.4, 0, 0.9, 0.4),
+      opacity 150ms ease-in;
   }
 
   .popup {

@@ -212,9 +212,43 @@ function createRenameWindow(options = {}) {
   return win;
 }
 
+// 右键菜单窗：自绘菜单要一个尺寸刚好的可聚焦小窗。
+// 不做系统材质——菜单要的是一直看得清，所以窗口全透明、底色由页面自己画。
+function createMenuWindow(options = {}) {
+  const { width = 220, height = 120, x, y, title = 'DeskBasket 菜单' } = options;
+  const win = new BrowserWindow({
+    width,
+    height,
+    ...(Number.isInteger(x) ? { x } : {}),
+    ...(Number.isInteger(y) ? { y } : {}),
+    frame: false,
+    show: false,
+    hasShadow: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    movable: false,
+    focusable: true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    title,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    },
+    ...glassOptions(false)
+  });
+  win.setAlwaysOnTop(true, 'popup');
+  win.setMenuBarVisibility?.(false);
+  return win;
+}
+
 module.exports = {
   GLASS_MATERIAL,
   createBehaviorWindow,
+  createMenuWindow,
   createPopupWindow,
   createRenameWindow,
   glassEnabled,
