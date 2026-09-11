@@ -48,6 +48,26 @@ function makeLinks(dir, names) {
 
 // ---------------------------------------------------------------- 配置
 
+test('筐候选清单：列桌面上的所有条目（不筛后缀）、标出已在筐里的、按名称排序', () => {
+  const desktop = [
+    'C:\\Users\\me\\Desktop\\价格.txt',
+    'C:\\Users\\me\\Desktop\\QQ音乐.lnk',
+    'C:\\Users\\me\\Desktop\\学业',
+    'C:\\Users\\me\\Desktop\\QQ音乐.lnk', // 重复
+    ''
+  ];
+  const rows = dockmodel.basketCandidates(desktop, ['C:\\Users\\me\\Desktop\\QQ音乐.lnk']);
+  assert.deepStrictEqual(
+    rows.map((row) => row.name),
+    [...rows.map((row) => row.name)].sort((a, b) => a.localeCompare(b, 'zh'))
+  );
+  assert.strictEqual(rows.length, 3);
+  assert.strictEqual(rows.find((row) => row.name === 'QQ音乐.lnk').inBasket, true);
+  assert.strictEqual(rows.find((row) => row.name === '价格.txt').inBasket, false);
+  assert.strictEqual(rows.find((row) => row.name === '学业').inBasket, false, '文件夹也能进筐');
+  assert.deepStrictEqual(dockmodel.basketCandidates(null, null), []);
+});
+
 test('默认配置：完全透明 ＋ Dock 开着且自动收起', () => {
   assert.strictEqual(store.DEFAULTS.accent_mode, 'off');
   assert.strictEqual(store.DEFAULTS.dock_enabled, true);

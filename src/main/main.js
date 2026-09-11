@@ -1080,6 +1080,14 @@ function registerIpc() {
     return { added, total: saved.items.length };
   });
 
+  // 设置面板：往选中的筐里批量勾选（桌面上的条目，勾上就加进去、取消就移出）。
+  // 这是"一次加一堆"最省事的入口——不用一层层翻文件对话框。
+  ipcMain.handle('basket:candidates', (_event, { basketId } = {}) => {
+    const basket = findBasket(basketId);
+    if (!basket) return [];
+    return dockmodel.basketCandidates(desktopItems(), basket.items);
+  });
+
   // 「添加文件…」/「添加文件夹…」：选完直接登记进筐。
   // 注意 Windows 上 openFile 与 openDirectory **不能同时传**——同时传时对话框只剩选文件夹
   // （标签都变成「文件夹:」），那就没法加文件了。所以分成两个入口。
@@ -1090,6 +1098,8 @@ function registerIpc() {
     const picked = await dialog.showOpenDialog({
       title: (wantsDirs ? '往「' : '把文件加进「') + basket.name + '」',
       buttonLabel: '添加',
+      // 默认停在桌面：这个程序整理的就是桌面上的东西，省得每次从头翻目录
+      defaultPath: desktopDir(),
       properties: wantsDirs ? ['openDirectory', 'multiSelections'] : ['openFile', 'multiSelections']
     });
     if (picked.canceled || !picked.filePaths.length) return { added: 0, total: basket.items.length };

@@ -111,6 +111,10 @@
           <button class="btn" id="btnNew">新建文件夹</button>
           <button class="btn" id="btnDelete">删除</button>
         </div>
+        <div class="row" style="margin-top:8px;display:block">
+          <span class="hint" id="basketCandidateHint">桌面上的条目：勾选即加进这个筐（一次能勾一堆；磁盘文件不动）。不在桌面上的文件用上面的「添加文件…」（对话框里按住 Ctrl / Shift 可多选）。</span>
+        </div>
+        <div class="shortcut-list" id="basketCandidateList"></div>
       </div>
 
       <div class="group">
@@ -172,6 +176,60 @@
       if (!selectedBasketId && settings.baskets.length) {
         selectedBasketId = settings.baskets[0].id;
         el('basketName').value = settings.baskets[0].name;
+      }
+      renderBasketCandidates();
+    }
+
+    // 桌面条目的勾选清单：一次能勾一堆，不用反复开文件对话框。
+    // 图标走 api.getIcon（与 Dock / 弹窗同一条链路：.lnk 由 shell 给不带小箭头的原图）。
+    async function renderBasketCandidates() {
+      const host = el('basketCandidateList');
+      host.innerHTML = '';
+      if (!selectedBasketId) {
+        host.textContent = '先在上面选一个文件夹';
+        return;
+      }
+      let rows = [];
+      try {
+        rows = await api.basketCandidates(selectedBasketId);
+      } catch (_) {
+        rows = [];
+      }
+      if (!rows.length) {
+        host.textContent = '桌面上没有条目';
+        return;
+      }
+      for (const row of rows) {
+        const line = document.createElement('label');
+        line.className = 'shortcut-row';
+
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = row.inBasket;
+        box.addEventListener('change', async () => {
+          if (box.checked) await api.addPaths(selectedBasketId, [row.path]);
+          else await api.removeItem(selectedBasketId, row.path);
+          flash((box.checked ? '已加进筐：' : '已移出筐：') + row.name.replace(/\.(lnk|url)$/i, ''));
+          // 刷新面板（筐的计数、Dock 上的名字）
+          await refresh();
+        });
+
+        const icon = document.createElement('img');
+        icon.alt = '';
+        api.getIcon(row.path, 24).then((url) => {
+          if (url) icon.src = url;
+        });
+
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = row.name.replace(/\.(lnk|url)$/i, '');
+
+        const state = document.createElement('span');
+        state.className = 'state';
+        state.textContent = row.inBasket ? '在这个筐里' : '';
+
+        line.append(box, icon, name, state);
+        host.append(line);
       }
     }
 

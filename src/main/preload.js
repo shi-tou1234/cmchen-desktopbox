@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('deskbasket', {
   basketGet: (basketId) => ipcRenderer.invoke('basket:get', { basketId }),
   addPaths: (basketId, paths) => ipcRenderer.invoke('basket:add', { basketId, paths }),
   pickBasketFiles: (basketId, mode) => ipcRenderer.invoke('basket:pick-add', { basketId, mode }),
+  // 设置面板里的批量勾选清单：桌面上所有条目 + 是否已在这个筐里
+  basketCandidates: (basketId) => ipcRenderer.invoke('basket:candidates', { basketId }),
   removeItem: (basketId, itemPath) => ipcRenderer.invoke('basket:remove', { basketId, itemPath }),
   updateBasket: (basket) => ipcRenderer.invoke('basket:update', { basket }),
   pruneMissing: (basketId) => ipcRenderer.invoke('basket:prune', { basketId }),

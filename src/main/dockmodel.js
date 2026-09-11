@@ -289,6 +289,24 @@ function shortcutCandidates(desktopPaths, items) {
   return rows;
 }
 
+// 设置面板里"往筐里批量勾选"的候选清单：桌面上**所有**条目（不筛后缀——筐里可以放
+// 任何东西，不像 Dock 只收快捷方式）。返回 [{ path, name, inBasket }]，按名称排序。
+function basketCandidates(desktopPaths, basketItems) {
+  const inBasket = new Set((basketItems || []).map(pathKey));
+  const rows = [];
+  const seen = new Set();
+  for (const raw of desktopPaths || []) {
+    const value = normalizePath(raw);
+    if (!value) continue;
+    const key = pathKey(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({ path: value, name: path.basename(value), inBasket: inBasket.has(key) });
+  }
+  rows.sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  return rows;
+}
+
 module.exports = {
   ACTION_HIDE,
   ACTION_NONE,
@@ -307,6 +325,7 @@ module.exports = {
   MENU_SEPARATOR_H,
   SHELL_WINDOW_CLASSES,
   addItem,
+  basketCandidates,
   bottomAnchor,
   dockLayout,
   displayName,
