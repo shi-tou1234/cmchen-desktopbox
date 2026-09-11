@@ -70,6 +70,12 @@ contextBridge.exposeInMainWorld('deskbasket', {
     ipcRenderer.on('popup:closing', listener);
     return () => ipcRenderer.removeListener('popup:closing', listener);
   },
+  // 复用同一个热窗口时，新内容从这里送进来（页面重画 + 再播一次展开动画）
+  onPopupData: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on('popup:data', listener);
+    return () => ipcRenderer.removeListener('popup:data', listener);
+  },
   // 弹窗里把文件拖到筐外/Dock 的场景不需要；反向（往筐里加）走 basket:add
   addPathsToBasket: (basketId, paths) => ipcRenderer.invoke('basket:add', { basketId, paths }),
 

@@ -186,6 +186,59 @@ $debug = $env:DESKBASKET_ICON_DEBUG
 $marker = '${MARKER}'
 $size = [int]$env:DESKBASKET_ICON_SIZE
 
+# 找出不透明像素的包围盒。有些图标的 48/256 槽位里只在左上角画了一小块
+# （典型是只带了 16x16 资源的 .ico），原样画出来就是"图标偏小"。
+# 用 LockBits 一次拷出来再扫，比 GetPixel 快两个数量级。
+function Get-IconContentBox($bmp) {
+    $rect = New-Object System.Drawing.Rectangle(0, 0, $bmp.Width, $bmp.Height)
+    $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+        $bytes = New-Object byte[] ($data.Stride * $bmp.Height)
+        [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $bytes, 0, $bytes.Length)
+        $minX = $bmp.Width; $minY = $bmp.Height; $maxX = -1; $maxY = -1
+        for ($y = 0; $y -lt $bmp.Height; $y++) {
+            $row = $y * $data.Stride
+            for ($x = 0; $x -lt $bmp.Width; $x++) {
+                if ($bytes[$row + $x * 4 + 3] -gt 8) {
+                    if ($x -lt $minX) { $minX = $x }
+                    if ($x -gt $maxX) { $maxX = $x }
+                    if ($y -lt $minY) { $minY = $y }
+                    if ($y -gt $maxY) { $maxY = $y }
+                }
+            }
+        }
+        if ($maxX -lt 0) { return $null }
+        return New-Object System.Drawing.Rectangle($minX, $minY, ($maxX - $minX + 1), ($maxY - $minY + 1))
+    } finally {
+        $bmp.UnlockBits($data)
+    }
+}
+
+# 把图标画进 size×size 的目标图。有些图标的槽位里只在角落画了一小块（典型是只带了
+# 16x16 资源的 .ico），原样画出来就是"图标偏小"；这种就**先在原始分辨率上裁出内容**，
+# 再一次性缩放到满格——先缩小再放大等于把清晰度丢两遍，会糊。
+function Draw-IconFilled($graphics, $native, $size) {
+    $whole = New-Object System.Drawing.Rectangle(0, 0, $size, $size)
+    $box = Get-IconContentBox $native
+    $span = [Math]::Max($native.Width, $native.Height)
+    if ($null -eq $box -or $span -le 0) {
+        $graphics.DrawImage($native, $whole)
+        return
+    }
+    $fill = [Math]::Max($box.Width, $box.Height) / $span
+    if ($fill -ge 0.72) {
+        $graphics.DrawImage($native, $whole)
+        return
+    }
+    $inner = $size - 2
+    $scale = [Math]::Min($inner / $box.Width, $inner / $box.Height)
+    $dw = [Math]::Max(1, [int][Math]::Round($box.Width * $scale))
+    $dh = [Math]::Max(1, [int][Math]::Round($box.Height * $scale))
+    $dest = New-Object System.Drawing.Rectangle([int](($size - $dw) / 2), [int](($size - $dh) / 2), $dw, $dh)
+    $graphics.DrawImage($native, $dest, $box, [System.Drawing.GraphicsUnit]::Pixel)
+}
+
 $requests = @()
 $payload = $env:DESKBASKET_ICON_PATHS
 if (-not [string]::IsNullOrEmpty($payload)) {
@@ -214,14 +267,14 @@ foreach ($item in $requests) {
         if ($handle -eq [IntPtr]::Zero) { $handle = [DeskBasketShellIcon]::IconFrom(0, $index) }
         if ($handle -eq [IntPtr]::Zero) { throw 'image-list-failed' }
         $icon = [System.Drawing.Icon]::FromHandle($handle)
-        $pixels = $icon.Width
-        if ($pixels -gt $size) { $pixels = $size }
-        if ($pixels -le 0) { throw 'empty-icon' }
-        $bitmap = New-Object System.Drawing.Bitmap($pixels, $pixels, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $native = $icon.ToBitmap()
+        if ($native.Width -le 0) { throw 'empty-icon' }
+        $bitmap = New-Object System.Drawing.Bitmap($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
         $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $graphics.DrawImage($icon.ToBitmap(), (New-Object System.Drawing.Rectangle(0, 0, $pixels, $pixels)))
+        Draw-IconFilled $graphics $native $size
         $graphics.Dispose()
+        $native.Dispose()
         $stream = New-Object System.IO.MemoryStream
         $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
         $b64png = [Convert]::ToBase64String($stream.ToArray())

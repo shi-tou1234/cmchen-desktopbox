@@ -348,13 +348,9 @@
 
     // ---------------------------------------------------------------- 启动
 
-    (async () => {
-      const payload = await api.popupReady();
-      if (!payload) {
-        // 主进程不认这个窗口（已被顶掉）：直接关闭，别显示一片空白
-        await api.popupClose();
-        return;
-      }
+    // 铺开一份内容并播"从图标抽出来"的动画。
+    // 图标已经在载荷里（主进程算好的 dataURL），所以这一帧就是终态、没有待解码的图片。
+    function showPayload(payload) {
       view = payload;
       homeView = payload;
       iconSize = payload.iconSize || 48;
@@ -362,16 +358,33 @@
       if (Number.isFinite(payload.originX)) {
         document.documentElement.style.setProperty('--origin-x', payload.originX * 100 + '%');
       }
+      document.body.classList.add('collapsed');   // 先回到"收起"态，再从那里展开
       render();
-      // 主进程要收窗口时先让我们播"收回"动画
-      if (api.onPopupClosing) api.onPopupClosing(() => document.body.classList.add('collapsed'));
-      // 数据就绪后显示窗口（showInactive：不抢用户当前应用的焦点）
-      api.popupPresent();
-      // 等这一帧真的画完再展开：图标已在载荷里、没有待解码的图片和待排的版，
-      // 动画就不会被挤得一顿一顿（以前是固定 30ms，常常赶在图片解码中间）
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => document.body.classList.remove('collapsed'));
+      // 数据就绪后显示窗口（showInactive：不抢用户当前应用的焦点）。
+      // 主进程会等页面画出第一帧再显示，所以这里要等它回话才开始展开，
+      // 否则窗口还没露面、动画已经播掉一截。
+      api.popupPresent().then(() => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => document.body.classList.remove('collapsed'));
+        });
       });
+    }
+
+    // 主进程要收窗口时先让我们播"收回"动画
+    if (api.onPopupClosing) api.onPopupClosing(() => document.body.classList.add('collapsed'));
+    // 弹窗窗口是复用的：新内容从这里送进来（不用重新加载页面，动画从第一帧就顺）
+    if (api.onPopupData) api.onPopupData((payload) => {
+      if (payload) showPayload(payload);
+    });
+
+    (async () => {
+      const payload = await api.popupReady();
+      if (!payload) {
+        // 主进程不认这个窗口（已被顶掉）：直接关闭，别显示一片空白
+        await api.popupClose();
+        return;
+      }
+      showPayload(payload);
     })();
   </script>
 </body>

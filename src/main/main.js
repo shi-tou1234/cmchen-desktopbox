@@ -61,9 +61,16 @@ let settingsWindow = null;
 let renameWindow = null;       // 改名输入窗（钉在 Dock 上方）
 let renameTarget = null;       // { kind:'basket', id } | { kind:'shortcut', path }
 
-let popupWindow = null;        // 当前文件夹弹窗
+let popupWindow = null;        // 当前文件夹弹窗（收起时隐藏、不销毁，下次复用）
 let popupKey = null;           // 'basket:b1' 或 'dir:C:\\xx'，用于点同一个文件夹时切换关闭
 let popupPayload = null;        // 弹窗渲染层就绪时取走的数据
+let popupGlass = null;         // 这个弹窗窗口是用哪种材质建的（材质建窗时锁定，模式变了只能重建）
+let popupPageReady = false;    // 弹窗页面是否已完成首次加载（复用的前提）
+let popupSource = null;        // { kind, payload }：重新取内容（比如往筐里加了东西）时要用
+let popupHideTimer = null;     // 收起动画放完后的"隐藏"定时器
+let popupOpenedAt = 0;         // 这次打开是什么时候发起的（量"点击到显示"的耗时）
+let popupPainted = false;      // 页面是否已经画出第一帧（没画出来就显示会闪一下空白材质）
+let popupOpenMode = '';        // '新建窗口' | '复用热窗口'，只用于日志
 let popupBlurTimer = null;
 let popupHoverTimer = null;    // 鼠标离开自动关的轮询
 let menuOpen = false;          // 自绘右键菜单开着：期间弹窗不许"失焦即关"
@@ -559,8 +566,10 @@ function prewarmBasketIcons() {
 // 给弹窗载荷补上图标（dataURL）：渲染层拿到就直接塞进 img，不再逐格 IPC。
 // 超过 POPUP_ICON_WAIT_MS 就先开窗，剩下的由渲染层自己补（走同一条缓存链路）。
 const POPUP_ICON_WAIT_MS = 400;
+// 翻目录时等图标的时间要短得多：先出内容、图标随后补上（后台已经预热过）
+const POPUP_NAVIGATE_ICON_WAIT_MS = 120;
 
-async function withEntryIcons(payload) {
+async function withEntryIcons(payload, waitMs = POPUP_ICON_WAIT_MS) {
   const entries = (payload && payload.entries) || [];
   if (!entries.length) return payload;
   const size = payload.iconSize || settings.icon_size;
@@ -572,13 +581,20 @@ async function withEntryIcons(payload) {
   );
   const icons = await Promise.race([
     Promise.all(jobs).then((pairs) => new Map(pairs)),
-    new Promise((resolve) => setTimeout(() => resolve(null), POPUP_ICON_WAIT_MS))
+    new Promise((resolve) => setTimeout(() => resolve(null), waitMs))
   ]);
   if (!icons) return payload;
   return {
     ...payload,
     entries: entries.map((entry) => ({ ...entry, iconUrl: icons.get(entry.path) || '' }))
   };
+}
+
+// 目录里的图标只做后台预热：缓存热了，翻第二次就是秒开
+function warmEntryIcons(entries, size) {
+  for (const entry of entries || []) {
+    shellIcons.iconDataUrl(entry.path, size).catch(() => {});
+  }
 }
 
 function syncDock() {
@@ -637,10 +653,28 @@ function popupDataFor(kind, payload = {}) {
   return null;
 }
 
+// 重新取一份当前弹窗的内容：往筐里加了东西之后，页面会用 popupReady 再来要一次数据
+function rebuildPopupPayload() {
+  if (!popupSource || !popupPayload) return popupPayload;
+  const fresh = popupDataFor(popupSource.kind, popupSource.payload);
+  if (fresh) popupPayload = { ...popupPayload, ...fresh };
+  return popupPayload;
+}
+
 // 窗口整体淡入/淡出。磨砂模式下窗口底是不透明的系统材质，只有内容缩放的话
 // 会出现"磨砂矩形瞬间铺满、内容在里面缩"的错位，所以整体也淡一下。
+// **完全透明模式不需要**：页面自己的 opacity 过渡已经在做同一件事，两套一起跑等于
+// 每帧多一次整窗重合成——这是弹窗"一卡一卡"的一个来源。
 function fadeWindow(win, from, to) {
   if (!win || win.isDestroyed() || typeof win.setOpacity !== 'function') return;
+  if (!winFactory.glassEnabled(settings)) {
+    try {
+      win.setOpacity(1);
+    } catch (_) {
+      /* 不支持就保持原样 */
+    }
+    return;
+  }
   try {
     win.setOpacity(from);
   } catch (_) {
@@ -679,15 +713,24 @@ function closeFolderPopup() {
   popupKey = null;
   if (!popupWindow || popupWindow.isDestroyed()) return;
   const win = popupWindow;
-  popupWindow = null;
   try {
     win.webContents.send('popup:closing');
   } catch (_) {
-    /* 页面可能还没就绪：直接销毁即可 */
+    /* 页面可能还没就绪：直接隐藏即可 */
   }
   fadeWindow(win, 1, 0);
-  setTimeout(() => {
-    if (!win.isDestroyed()) win.destroy();
+  // 收起动画放完就**隐藏**，不销毁：下次打开直接复用这个热窗口——不用再起一个渲染
+  // 进程、不用重新加载页面、图标也在解码缓存里，展开动画才能从第一帧就顺。
+  clearTimeout(popupHideTimer);
+  popupHideTimer = setTimeout(() => {
+    popupHideTimer = null;
+    if (popupWindow !== win || win.isDestroyed()) return;
+    win.hide();
+    try {
+      win.setOpacity(1);   // 复位不透明度，免得下次出现时是半透明的
+    } catch (_) {
+      /* 不支持就忽略 */
+    }
   }, POPUP_CLOSE_ANIM_MS);
 }
 
@@ -740,6 +783,7 @@ function cancelPopupBlurClose() {
 
 // anchor: { centerX } —— Dock 窗口坐标里的图标中心 x（主进程换算到屏幕坐标）
 async function openFolderPopup(kind, payload, anchorXInDock) {
+  const t0 = Date.now();
   const data = popupDataFor(kind, payload);
   if (!data) return null;
 
@@ -758,14 +802,7 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
   );
 
   popupKey = popupKeyFor(kind, payload);
-  const win = winFactory.createPopupWindow({
-    ...rect,
-    // 跟随「磨砂模式」：完全透明就全透，磨砂就挂系统材质
-    glass: winFactory.glassEnabled(settings),
-    title: `${APP_NAME} · ${data.name}`
-  });
-  attachDiagnostics(win, 'popup');
-  popupWindow = win;
+  popupSource = { kind, payload };
   // 动画原点：被点开的 Dock 图标中心在弹窗里的横向比例（配合底边原点 = 从图标抽出来）
   const anchorScreenX = (dockBounds ? dockBounds.x : rect.x + rect.width / 2) + (anchorXInDock || 0);
   const originX = Math.max(0, Math.min(1, (anchorScreenX - rect.x) / rect.width));
@@ -774,11 +811,58 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
     originX,
     iconSize: settings.icon_size
   };
+
+  // 复用上一个热窗口：渲染进程、页面、图片解码缓存都是现成的，展开动画从第一帧就顺。
+  // 只有材质变了（完全透明 ⇄ 磨砂，材质建窗时锁定）或页面没就绪时才重建。
+  const glass = winFactory.glassEnabled(settings);
+  if (popupWindow && !popupWindow.isDestroyed() && popupPageReady && popupGlass === glass) {
+    clearTimeout(popupHideTimer);
+    popupHideTimer = null;
+    const win = popupWindow;
+    win.setTitle(`${APP_NAME} · ${data.name}`);
+    win.setBounds(rect);
+    popupOpenedAt = t0;
+    popupOpenMode = '复用热窗口';
+    withEntryIcons(popupPayload).then((full) => {
+      if (popupWindow !== win || win.isDestroyed()) return;
+      win.webContents.send('popup:data', full);
+    });
+    return win;
+  }
+
+  // 需要重建（材质变了，或页面没就绪）：先把旧的收掉，别留一个隐形的窗口在后台
+  if (popupWindow && !popupWindow.isDestroyed()) {
+    clearTimeout(popupHideTimer);
+    popupHideTimer = null;
+    const old = popupWindow;
+    popupWindow = null;
+    old.destroy();
+  }
+
+  const win = winFactory.createPopupWindow({
+    ...rect,
+    // 跟随「磨砂模式」：完全透明就全透，磨砂就挂系统材质
+    glass,
+    title: `${APP_NAME} · ${data.name}`
+  });
+  attachDiagnostics(win, 'popup');
+  popupWindow = win;
+  popupGlass = glass;
+  popupPageReady = false;
+  popupPainted = false;
+  win.once('ready-to-show', () => {
+    popupPainted = true;
+  });
+  popupOpenedAt = t0;
+  popupOpenMode = '新建窗口';
   win.on('closed', () => {
     if (popupWindow === win) {
       popupWindow = null;
       popupPayload = null;
       popupKey = null;
+      popupSource = null;
+      popupGlass = null;
+      popupPageReady = false;
     }
   });
   win.on('blur', () => {
@@ -1296,17 +1380,37 @@ function registerIpc() {
   ipcMain.handle('popup:ready', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win !== popupWindow || !popupPayload) return null;
-    return withEntryIcons(popupPayload);
+    popupPageReady = true;      // 页面已就绪，这个窗口之后可以复用
+    return withEntryIcons(rebuildPopupPayload());
   });
 
-  ipcMain.handle('popup:present', (event) => {
+  ipcMain.handle('popup:present', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     // showInactive：显示但不抢用户当前应用的焦点（Dock 本身也不抢焦点，体验一致）
-    if (win === popupWindow && !win.isDestroyed()) {
-      fadeWindow(win, 0, 1);
-      win.showInactive();
-      startPopupAwayWatch();
+    if (win !== popupWindow || win.isDestroyed()) return false;
+    // 等页面画出第一帧再显示：不然窗口先亮起来、内容后到，磨砂模式会闪一下空白矩形
+    // （看起来就是"弹出来一顿"）。复用热窗口时早就画好了，这里不会等。
+    if (!popupPainted) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 150);
+        win.once('ready-to-show', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      popupPainted = true;
     }
+    if (win.isDestroyed() || win !== popupWindow) return false;
+    // 从"点下去"到"真的看见"花了多久——量弹窗手感的：第一次要起渲染进程，
+    // 之后复用热窗口应该只有几毫秒
+    if (popupOpenedAt) {
+      console.log(`[popup] ${popupOpenMode}：从点击到显示 ${Date.now() - popupOpenedAt}ms`);
+      popupOpenedAt = 0;
+      popupOpenMode = '';
+    }
+    fadeWindow(win, 0, 1);
+    win.showInactive();
+    startPopupAwayWatch();
     return true;
   });
 
@@ -1316,19 +1420,25 @@ function registerIpc() {
   });
 
   // 弹窗内导航：进入子目录 / 返回上级。窗口不动，磨砂背景也不变。
+  // 图标只等很短一下（热缓存是立刻的），剩下的由渲染层自己补——翻目录要立刻出内容。
   ipcMain.handle('popup:navigate', async (event, { path: target }) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win !== popupWindow || !target) return null;
     const listing = filebrowse.listEntries(target);
-    return withEntryIcons({
-      kind: 'dir',
-      name: path.basename(target) || target,
-      path: target,
-      parent: filebrowse.parentOf(target),
-      entries: listing.entries,
-      error: listing.error,
-      iconSize: settings.icon_size
-    });
+    const entries = listing.entries || [];
+    warmEntryIcons(entries, settings.icon_size);
+    return withEntryIcons(
+      {
+        kind: 'dir',
+        name: path.basename(target) || target,
+        path: target,
+        parent: filebrowse.parentOf(target),
+        entries,
+        error: listing.error,
+        iconSize: settings.icon_size
+      },
+      POPUP_NAVIGATE_ICON_WAIT_MS
+    );
   });
 
   ipcMain.handle('file:icon', (_event, { path: target, size }) => iconFor(target, size || 48));
