@@ -1,11 +1,14 @@
 'use strict';
 
-// DeskBasket 主进程：窗口编排（筐 / 浏览器 / Dock / 设置）、托盘、IPC、自启。
+// DeskBasket 主进程：Dock 编排、文件夹弹窗、设置窗口、托盘、IPC、自启。
 //
-// 设计要点（与领导要求一致）：
-// - 磨砂玻璃用系统的 acrylic 材质（实测透光 0.86、糊化 0.09，是真磨砂）；
-// - 文件筐做成**普通窗口**：可聚焦、进任务栏、可缩放最小化，位置大小持久化；
-// - Dock **固定于桌面**：常驻显示不收起来，位置锁在屏幕底部居中，始终置顶。
+// 形态（按领导要求）：
+// - 不再有"桌面文件筐"独立窗口：筐（文件夹）显示在 Dock 里，点击弹出文件夹弹窗；
+// - Dock 完全透明（无任何系统材质、无底色）、紧贴屏幕底边、多行排布保证全部渲染；
+// - 快捷方式图标：.lnk 先从 readShortcutLink 拿目标再取真实图标；拿不到目标的是
+//   MSI 通告式快捷方式（.lnk 里只有 Darwin 描述符），改由 shellIcons 让 Windows
+//   shell 自己解析（Electron 的 getFileIcon 对 .lnk 只会给通用白纸图标）；
+// - 弹窗材质自研：透明窗口 + 截取弹窗背后的屏幕区域，渲染层自己高斯模糊成磨砂玻璃。
 
 const path = require('node:path');
 const fs = require('node:fs');
@@ -18,6 +21,7 @@ const {
   Tray,
   ipcMain,
   nativeImage,
+  nativeTheme,
   shell,
   screen
 } = require('electron');
@@ -26,22 +30,41 @@ const store = require('./store');
 const basketModel = require('./baskets');
 const dockmodel = require('./dockmodel');
 const filebrowse = require('./filebrowse');
+const shellIcons = require('./shellIcons');
+const specials = require('./specials');
 const winFactory = require('./windows');
 const autostart = require('./autostart');
 
 const APP_NAME = 'DeskBasket';
-const DOCK_HEIGHT_EXTRA = 34;
-const DOCK_BAR_PADDING = 10;
+const DOCK_PADDING = 8;
+
+// 文件夹弹窗：位置在 Dock 上方，大小固定
+const POPUP_WIDTH = 480;
+const POPUP_HEIGHT = 460;
+const POPUP_EDGE_GAP = 8;    // 弹窗与屏幕左右/上边的最小距离
+const POPUP_DOCK_GAP = 10;   // 弹窗与 Dock 上沿的间距
+const POPUP_BLUR_CLOSE_MS = 220; // 失焦后多久关（留出"点击 Dock 图标切换"的时间）
+const POPUP_CLOSE_ANIM_MS = 200; // 收起动画时长：先让渲染层缩回去，再销毁窗口
+// 鼠标离开自动关：弹窗显示不抢焦点（showInactive），拿不到系统失焦事件，
+// 由主进程轮询鼠标位置——不在弹窗 ∪ Dock 的附近区域连续一段时间就关。
+const POPUP_HOVER_CHECK_MS = 250;
+const POPUP_AWAY_CLOSE_MS = 900;
 
 let settings = null;
 let tray = null;
 let dockWindow = null;
 let settingsWindow = null;
-let dockGeometryLocked = true;
 
-const basketWindows = new Map();   // basketId -> BrowserWindow
-const explorerWindows = new Set();
-const iconCache = new Map();       // `${size}:${pathKey}` -> dataURL
+let popupWindow = null;        // 当前文件夹弹窗
+let popupKey = null;           // 'basket:b1' 或 'dir:C:\\xx'，用于点同一个文件夹时切换关闭
+let popupPayload = null;        // 弹窗渲染层就绪时取走的数据
+let popupBlurTimer = null;
+let popupHoverTimer = null;    // 鼠标离开自动关的轮询
+let menuOpen = false;          // 有原生命令菜单在弹：期间弹窗不许"失焦即关"
+let menuPicked = null;         // 命令菜单选中的 key
+
+const iconCache = new Map();      // `${size}:${pathKey}` -> dataURL
+const shortcutCache = new Map();  // pathKey -> shell.readShortcutLink 结果或 null
 
 // ------------------------------------------------------------------ 工具
 
@@ -60,10 +83,6 @@ function desktopItems() {
   }
 }
 
-function desktopShortcuts() {
-  return desktopItems().filter((item) => dockmodel.isCollectable(item));
-}
-
 function persist() {
   settings = store.saveSettings(settings);
   broadcastState();
@@ -79,7 +98,6 @@ function attachDiagnostics(win, tag) {
     console.error(`[${tag}] 渲染进程退出`, details && details.reason);
   });
   win.webContents.on('console-message', (...args) => {
-    // Electron 43 改成 (event, params)；旧签名是 (event, level, message, line, source)
     const params = args[1];
     if (params && typeof params === 'object') {
       if (params.level === 'error') {
@@ -108,12 +126,6 @@ function findBasket(id) {
 function replaceBasket(basket) {
   settings.baskets = settings.baskets.map((item) => (item.id === basket.id ? basket : item));
   persist();
-  const win = basketWindows.get(basket.id);
-  if (win && !win.isDestroyed()) {
-    win.webContents.send('state:changed', { settings });
-    if (basket.visible === false) win.hide();
-    else win.show();
-  }
   return basket;
 }
 
@@ -139,113 +151,327 @@ function basketView(basket) {
 
 function ensureBasket() {
   if (settings.baskets.length) return settings;
-  const created = basketModel.createBasket([], '桌面文件筐', 90, 110);
+  const created = basketModel.createBasket([], '桌面文件筐');
   settings.baskets = created.baskets;
   persist();
   return settings;
 }
 
-// ------------------------------------------------------------------ 图标
+// ------------------------------------------------------------------ 快捷方式解析与图标
 
+function readShortcutCached(target) {
+  const key = store.pathKey(target);
+  if (shortcutCache.has(key)) return shortcutCache.get(key);
+  let info = null;
+  try {
+    info = shell.readShortcutLink(target);
+  } catch (_) {
+    info = null;
+  }
+  shortcutCache.set(key, info);
+  return info;
+}
+
+// .url 文件是 INI：IconFile= 一行指向图标；%SystemRoot% 之类环境变量展开
+function iconFileFromUrl(target) {
+  const extract = (text) => {
+    const match = /^[ \t]*IconFile[ \t]*=[ \t]*(.+)$/gim.exec(text);
+    if (!match) return null;
+    const raw = match[1].trim();
+    if (!raw) return null;
+    const expanded = raw.replace(/%([^%]+)%/g, (_all, name) => process.env[name] || '');
+    return expanded || null;
+  };
+  try {
+    const buffer = fs.readFileSync(target);
+    // UTF-16 BOM 先按 utf16le 读，否则按 utf8
+    if (buffer[0] === 0xff && buffer[1] === 0xfe) {
+      const found = extract(buffer.toString('utf16le'));
+      if (found) return found;
+    }
+    return extract(buffer.toString('utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+// 快捷方式自己声明的落点 / 图标位置（.lnk 来自 readShortcutLink，.url 来自 IconFile）
+function declaredIconSource(target) {
+  const lowered = String(target).toLowerCase();
+  if (lowered.endsWith('.lnk')) {
+    const link = readShortcutCached(target);
+    return link ? { target: link.target, icon: link.icon } : null;
+  }
+  if (lowered.endsWith('.url')) return { target: '', icon: iconFileFromUrl(target) };
+  return null;
+}
+
+function iconExists(candidate) {
+  try {
+    return fs.existsSync(candidate);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function electronIcon(target, size) {
+  try {
+    const image = await app.getFileIcon(target, { size: size >= 48 ? 'large' : 'normal' });
+    if (image && !image.isEmpty()) return image.toDataURL();
+  } catch (_) {
+    /* 取不到就走下一个候选来源 */
+  }
+  return '';
+}
+
+// 依次尝试候选来源，第一个拿到图标的即为结果（候选顺序见 shellIcons.iconSources）：
+// 快捷方式先让 Windows shell 解析——Explorer 显示什么就显示什么；Electron 只兜底。
 async function iconFor(target, size = 48) {
   const key = `${size}:${store.pathKey(target)}`;
   if (iconCache.has(key)) return iconCache.get(key);
+  const sources = shellIcons.iconSources(target, declaredIconSource(target), iconExists);
   let dataUrl = '';
-  try {
-    const image = await app.getFileIcon(target, { size: size >= 48 ? 'large' : 'normal' });
-    if (image && !image.isEmpty()) dataUrl = image.toDataURL();
-  } catch (_) {
-    dataUrl = '';
+  for (const source of sources) {
+    dataUrl =
+      source.kind === 'shell'
+        ? await shellIcons.iconDataUrl(source.path, shellIcons.ICON_PX)
+        : await electronIcon(source.path, size);
+    if (dataUrl) break;
   }
   iconCache.set(key, dataUrl);
   return dataUrl;
 }
 
-// ------------------------------------------------------------------ 窗口：筐
-
-function createBasketWindow(basket) {
-  const win = winFactory.createBehaviorWindow(settings.basket_behavior, {
-    glass: winFactory.glassEnabled(settings),
-    width: basket.w,
-    height: basket.h,
-    x: basket.x,
-    y: basket.y,
-    title: `${APP_NAME} · ${basket.name}`,
-    minWidth: basketModel.MIN_WIDTH,
-    minHeight: basketModel.MIN_HEIGHT
-  });
-  attachDiagnostics(win, `basket:${basket.id}`);
-  winFactory.loadPage(win, 'basket.html', { id: basket.id });
-  win.once('ready-to-show', () => {
-    if (basket.visible !== false) win.show();
-  });
-  win.on('closed', () => basketWindows.delete(basket.id));
-  return win;
+// 系统虚拟项（此电脑 / 回收站）的图标与打开方式。它们没有磁盘路径：
+// 图标让 shell 按解析名换成 PIDL 去取（固定 128px，渲染层按需缩放），
+// 打开交给 ShellExecute 的 shell: URI。
+function specialIconFor(id) {
+  const special = specials.findSpecial(id);
+  if (!special) return Promise.resolve('');
+  return shellIcons.parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX);
 }
 
-function syncBasketWindows() {
-  for (const basket of settings.baskets) {
-    if (!basketWindows.has(basket.id)) {
-      basketWindows.set(basket.id, createBasketWindow(basket));
+async function openSpecial(id) {
+  const special = specials.findSpecial(id);
+  if (!special) return { ok: false, error: '未知的系统图标' };
+  // 先用解析名打开（openPath 会回一个错误字符串，能拿到真实成败），失败再试 shell: URI
+  const message = await shell.openPath(special.parsingName);
+  if (!message) return { ok: true, error: '' };
+  try {
+    await shell.openExternal(special.openUri);
+    return { ok: true, error: '' };
+  } catch (error) {
+    return { ok: false, error: String((error && error.message) || error || message) };
+  }
+}
+
+// 点击 Dock 快捷方式时的落点：快捷方式指向文件夹（或拖进来的本来就是文件夹）就弹窗
+function resolveDirTarget(target) {
+  try {
+    if (fs.statSync(target).isDirectory()) return target;
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
+
+function dirTargetForShortcut(target) {
+  const direct = resolveDirTarget(target);
+  if (direct) return direct;
+  const lowered = String(target).toLowerCase();
+  if (lowered.endsWith('.lnk')) {
+    const link = readShortcutCached(target);
+    if (link && link.target) {
+      const resolved = resolveDirTarget(link.target);
+      if (resolved) return resolved;
     }
   }
-  for (const [id, win] of basketWindows) {
-    if (!findBasket(id)) {
-      if (!win.isDestroyed()) win.destroy();
-      basketWindows.delete(id);
-    }
-  }
+  return null;
 }
 
 // ------------------------------------------------------------------ 窗口：Dock
 
 function dockSize() {
-  const count = Math.max(1, settings.dock_items.length);
-  const cell = settings.dock_icon_size + 12;
-  const width = Math.min(
-    Math.max(240, DOCK_BAR_PADDING * 2 + count * cell),
-    Math.floor(screen.getPrimaryDisplay().bounds.width * 0.9)
-  );
-  const height = settings.dock_icon_size + DOCK_HEIGHT_EXTRA + DOCK_BAR_PADDING * 2;
-  return { width, height };
+  const display = screen.getPrimaryDisplay();
+  // Dock 条目 = 系统虚拟项（此电脑/回收站）＋筐（文件夹）＋快捷方式
+  const count =
+    settings.dock_items.length +
+    settings.dock_specials.length +
+    Math.max(1, settings.baskets.length);
+  const layout = dockmodel.dockLayout(count, settings.dock_icon_size, display.bounds.width, DOCK_PADDING);
+  return { width: layout.width, height: layout.height };
 }
 
 function dockTargetGeometry() {
   const display = screen.getPrimaryDisplay();
-  const bounds = display.bounds;
   const size = dockSize();
-  // 固定于桌面底部居中；任务栏自动隐藏时不占用可用区
-  return dockmodel.revealedGeometry(bounds, size, dockmodel.EDGE_BOTTOM, 6);
+  // 紧贴底部：任务栏占位（未自动隐藏）时贴其上沿，否则贴屏幕底边，一点缝都不留
+  const anchor =
+    display.workArea.height < display.bounds.height
+      ? display.workArea.y + display.workArea.height
+      : display.bounds.y + display.bounds.height;
+  return dockmodel.revealedGeometry(display.bounds, size, dockmodel.EDGE_BOTTOM, 0, anchor);
 }
 
 function applyDockGeometry() {
   if (!dockWindow || dockWindow.isDestroyed()) return;
-  const rect = dockTargetGeometry();
-  dockWindow.setBounds(rect);
+  // 收起状态下别把它拽回底边（比如改了图标大小触发几何重算时）
+  const target =
+    !settings.dock_auto_hide || dockRevealed ? dockTargetGeometry() : dockHiddenGeometry();
+  dockWindow.setBounds(target);
+}
+
+// ------------------------------------------------------------------ Dock 自动收起
+//
+// 领导要求 Dock「只在桌面上显示，不浮在其他程序上面」。
+// 真正的"桌面层"（窗口位于壁纸之上、所有应用窗口之下）在这台机器上做不到：
+// 实测四种 SetWindowPos 插入点都会让窗口被壁纸盖住或掉到桌面层之下（"可见但看不见"），
+// 与上一版 BLOCKED.md 里 Qt 的结论一致。
+//
+// 所以改用收放：鼠标不在 Dock 附近时把它滑到屏幕外，需要时碰一下底边就滑出来。
+// 效果上它不会挡着任何窗口，而判定只用屏幕坐标（Electron 自带，不需要任何系统调用）。
+const DOCK_WATCH_MS = 180;
+const DOCK_SLIDE_STEPS = 8;
+const DOCK_SLIDE_STEP_MS = 18;
+const DOCK_PEEK_PX = 1;      // 收起时留一条发丝在屏幕内，避免窗口完全离屏
+const DOCK_HOT_ZONE_PX = 8;  // 底边感应带厚度：太薄不好瞄（任务栏自己也占着底边）
+
+let dockWatchTimer = null;
+let dockSlideTimer = null;
+let dockRevealed = true;
+let dockLeftAt = 0;
+
+function dockHiddenGeometry() {
+  const display = screen.getPrimaryDisplay();
+  return dockmodel.hiddenGeometry(display.bounds, dockSize(), dockmodel.EDGE_BOTTOM, DOCK_PEEK_PX);
+}
+
+// 平滑滑动到目标位置（逐帧改窗口 y，做出"滑出/收起"的手感）
+function slideDockTo(target) {
+  if (!dockWindow || dockWindow.isDestroyed()) return;
+  clearInterval(dockSlideTimer);
+  dockSlideTimer = null;
+  const from = dockWindow.getBounds();
+  if (from.y === target.y && from.x === target.x) return;
+  let step = 0;
+  dockSlideTimer = setInterval(() => {
+    if (!dockWindow || dockWindow.isDestroyed()) {
+      clearInterval(dockSlideTimer);
+      dockSlideTimer = null;
+      return;
+    }
+    step += 1;
+    const t = Math.min(1, step / DOCK_SLIDE_STEPS);
+    const eased = 1 - Math.pow(1 - t, 3);   // 缓出：收尾干脆
+    dockWindow.setBounds({
+      x: target.x,
+      y: Math.round(from.y + (target.y - from.y) * eased),
+      width: target.width,
+      height: target.height
+    });
+    if (step >= DOCK_SLIDE_STEPS) {
+      clearInterval(dockSlideTimer);
+      dockSlideTimer = null;
+    }
+  }, DOCK_SLIDE_STEP_MS);
+}
+
+function cursorNearDock() {
+  if (!dockWindow || dockWindow.isDestroyed()) return false;
+  const display = screen.getPrimaryDisplay();
+  const point = screen.getCursorScreenPoint();
+  return (
+    dockmodel.pointNearBounds(point, dockWindow.getBounds(), 6) ||
+    dockmodel.isHotZone(point, display.bounds, dockmodel.EDGE_BOTTOM, DOCK_HOT_ZONE_PX)
+  );
+}
+
+function tickDockAutoHide() {
+  if (!dockWindow || dockWindow.isDestroyed()) return;
+  if (!settings.dock_enabled) return;
+  if (!settings.dock_auto_hide) {
+    // 常驻显示：一直贴在底边
+    if (!dockRevealed) {
+      dockRevealed = true;
+      slideDockTo(dockTargetGeometry());
+    }
+    return;
+  }
+  if (cursorNearDock()) {
+    dockLeftAt = 0;
+    if (!dockRevealed) {
+      dockRevealed = true;
+      slideDockTo(dockTargetGeometry());
+      // 自动隐藏的任务栏会在光标贴底边时弹出来，并且它自己会重新置顶；
+      // 这里把 Dock 再抬到最前，否则刚滑出来就被任务栏盖住。
+      try {
+        dockWindow.moveTop();
+      } catch (_) {
+        /* 个别平台没有 moveTop：忽略即可 */
+      }
+    }
+    return;
+  }
+  if (!dockRevealed) return;
+  if (!dockLeftAt) {
+    dockLeftAt = Date.now();
+    return;
+  }
+  if (Date.now() - dockLeftAt >= settings.dock_hide_delay_ms) {
+    dockRevealed = false;
+    dockLeftAt = 0;
+    closeFolderPopup();
+    slideDockTo(dockHiddenGeometry());
+  }
+}
+
+function startDockAutoHide() {
+  if (dockWatchTimer) clearInterval(dockWatchTimer);
+  dockWatchTimer = setInterval(tickDockAutoHide, DOCK_WATCH_MS);
 }
 
 function createDockWindow() {
-  const rect = dockTargetGeometry();
-  // Dock：位置与大小锁死（固定于桌面）；常驻显示＝置顶可见，不会被别的窗口盖住
-  const win = winFactory.createBehaviorWindow(
-    settings.dock_always_visible ? 'floating' : 'normal',
-    {
-      ...rect,
-      movable: false,
-      resizable: false,
-      alwaysOnTop: Boolean(settings.dock_always_visible),
-      glass: winFactory.glassEnabled(settings),
-      title: `${APP_NAME} Dock`
-    }
-  );
+  // 自动收起模式下直接建在屏幕外；如果鼠标本来就在底边附近，下一次 tick 会把它滑出来
+  const autoHide = settings.dock_auto_hide;
+  const rect = autoHide ? dockHiddenGeometry() : dockTargetGeometry();
+  dockRevealed = !autoHide;
+  const win = winFactory.createBehaviorWindow('floating', {
+    ...rect,
+    movable: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    // 置顶：收起时不挡任何窗口；滑出时要盖得住自动隐藏的任务栏
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: false,   // 不抢焦点：点图标不打断当前应用的输入
+    glass: false,       // Dock 永远完全透明，不跟随磨砂模式
+    title: `${APP_NAME} Dock`
+  });
   attachDiagnostics(win, 'dock');
   winFactory.loadPage(win, 'dock.html');
   win.once('ready-to-show', () => win.show());
   win.on('closed', () => {
     dockWindow = null;
   });
-  // 行为完全交给 dock_behavior（默认 desktop：不置顶、不可拖、不可缩放）
   return win;
+}
+
+// 预取 Dock 里靠 shell 解析的图标（快捷方式与系统虚拟项）。从这里一次性发起，
+// 避免渲染层逐条请求把同一批拆成好几个 PowerShell 进程——每次都重付一遍编译开销。
+// 已有缓存时整批直接命中，等于空操作。
+function prewarmDockIcons() {
+  const jobs = [];
+  for (const item of settings.dock_items) {
+    if (String(item).toLowerCase().endsWith('.lnk')) {
+      jobs.push(shellIcons.iconDataUrl(item, shellIcons.ICON_PX));
+    }
+  }
+  for (const id of settings.dock_specials) {
+    const special = specials.findSpecial(id);
+    if (special) jobs.push(shellIcons.parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX));
+  }
+  if (jobs.length) Promise.all(jobs).catch(() => {});
 }
 
 function syncDock() {
@@ -256,6 +482,7 @@ function syncDock() {
     }
     return;
   }
+  prewarmDockIcons();
   if (!dockWindow || dockWindow.isDestroyed()) {
     dockWindow = createDockWindow();
     return;
@@ -277,24 +504,166 @@ function syncDockItems() {
   }
 }
 
-// ------------------------------------------------------------------ 窗口：浏览器 / 设置
+// ------------------------------------------------------------------ 窗口：文件夹弹窗（自研磨砂）
 
-function openExplorer(target) {
-  const win = winFactory.createBehaviorWindow('normal', {
-    glass: winFactory.glassEnabled(settings),
-    width: 720,
-    height: 520,
-    title: `${APP_NAME} 浏览`,
-    minWidth: 420,
-    minHeight: 300
+function popupKeyFor(kind, payload = {}) {
+  return kind === 'basket' ? `basket:${payload.id}` : `dir:${store.pathKey(payload.path || '')}`;
+}
+
+function popupDataFor(kind, payload = {}) {
+  if (kind === 'basket') {
+    const basket = findBasket(payload.id);
+    if (!basket) return null;
+    const view = basketView(basket);
+    return { kind, name: basket.name, basketId: basket.id, entries: view.entries };
+  }
+  if (kind === 'dir') {
+    const listing = filebrowse.listEntries(payload.path);
+    if (listing.error) return { kind, name: path.basename(payload.path) || payload.path, path: payload.path, entries: [], error: listing.error };
+    return {
+      kind,
+      name: path.basename(payload.path) || payload.path,
+      path: payload.path,
+      entries: listing.entries
+    };
+  }
+  return null;
+}
+
+// 关文件夹弹窗：先通知渲染层播"收回"动画，动画时长后再销毁窗口。
+// 立刻销毁会看到窗口"啪"地消失，和打开时的抽出动画对不上。
+function closeFolderPopup() {
+  clearTimeout(popupBlurTimer);
+  popupBlurTimer = null;
+  stopPopupAwayWatch();
+  popupPayload = null;
+  popupKey = null;
+  if (!popupWindow || popupWindow.isDestroyed()) return;
+  const win = popupWindow;
+  popupWindow = null;
+  try {
+    win.webContents.send('popup:closing');
+  } catch (_) {
+    /* 页面可能还没就绪：直接销毁即可 */
+  }
+  setTimeout(() => {
+    if (!win.isDestroyed()) win.destroy();
+  }, POPUP_CLOSE_ANIM_MS);
+}
+
+// 鼠标离开自动关的轮询
+function stopPopupAwayWatch() {
+  if (popupHoverTimer) {
+    clearInterval(popupHoverTimer);
+    popupHoverTimer = null;
+  }
+}
+
+function startPopupAwayWatch() {
+  stopPopupAwayWatch();
+  let awayMs = 0;
+  popupHoverTimer = setInterval(() => {
+    if (!popupWindow || popupWindow.isDestroyed()) {
+      stopPopupAwayWatch();
+      return;
+    }
+    const point = screen.getCursorScreenPoint();
+    const popupBounds = popupWindow.getBounds();
+    const dockBounds = dockWindow && !dockWindow.isDestroyed() ? dockWindow.getBounds() : null;
+    // Dock 向下多让一点（图标放大动画向上长，下方余量别误判离开）
+    const near =
+      dockmodel.pointNearBounds(point, popupBounds, 16) ||
+      dockmodel.pointNearBounds(point, dockBounds, 16);
+    if (near) {
+      awayMs = 0;
+      return;
+    }
+    awayMs += POPUP_HOVER_CHECK_MS;
+    if (awayMs >= POPUP_AWAY_CLOSE_MS) closeFolderPopup();
+  }, POPUP_HOVER_CHECK_MS);
+}
+
+function schedulePopupBlurClose() {
+  clearTimeout(popupBlurTimer);
+  popupBlurTimer = setTimeout(() => {
+    popupBlurTimer = null;
+    closeFolderPopup();
+  }, POPUP_BLUR_CLOSE_MS);
+}
+
+function cancelPopupBlurClose() {
+  clearTimeout(popupBlurTimer);
+  popupBlurTimer = null;
+}
+
+// anchor: { centerX } —— Dock 窗口坐标里的图标中心 x（主进程换算到屏幕坐标）
+async function openFolderPopup(kind, payload, anchorXInDock) {
+  const data = popupDataFor(kind, payload);
+  if (!data) return null;
+
+  // 先关旧弹窗：一是不叠窗，二是它不能出现在磨砂背景的截屏里
+  closeFolderPopup();
+
+  const dockBounds = dockWindow && !dockWindow.isDestroyed() ? dockWindow.getContentBounds() : null;
+  const display = screen.getPrimaryDisplay();
+  const rect = dockmodel.popupGeometry(
+    display.workArea,
+    dockBounds,
+    anchorXInDock || 0,
+    { width: POPUP_WIDTH, height: POPUP_HEIGHT },
+    POPUP_EDGE_GAP,
+    POPUP_DOCK_GAP
+  );
+
+  popupKey = popupKeyFor(kind, payload);
+  const win = winFactory.createPopupWindow({ ...rect, title: `${APP_NAME} · ${data.name}` });
+  attachDiagnostics(win, 'popup');
+  popupWindow = win;
+  // 动画原点：被点开的 Dock 图标中心在弹窗里的横向比例（配合底边原点 = 从图标抽出来）
+  const anchorScreenX = (dockBounds ? dockBounds.x : rect.x + rect.width / 2) + (anchorXInDock || 0);
+  const originX = Math.max(0, Math.min(1, (anchorScreenX - rect.x) / rect.width));
+  popupPayload = {
+    ...data,
+    originX,
+    iconSize: settings.icon_size
+  };
+  win.on('closed', () => {
+    if (popupWindow === win) {
+      popupWindow = null;
+      popupPayload = null;
+      popupKey = null;
+    }
   });
-  attachDiagnostics(win, 'explorer');
-  winFactory.loadPage(win, 'explorer.html', { path: target || desktopDir() });
-  win.once('ready-to-show', () => win.show());
-  explorerWindows.add(win);
-  win.on('closed', () => explorerWindows.delete(win));
+  win.on('blur', () => {
+    if (popupWindow !== win) return;
+    // 原生命令菜单弹着的这一小段时间不算"失焦"
+    if (menuOpen) return;
+    schedulePopupBlurClose();
+  });
+  win.on('focus', () => {
+    if (popupWindow === win) cancelPopupBlurClose();
+  });
+  startPopupAwayWatch();
+  winFactory.loadPage(win, 'popup.html', {
+    kind,
+    ...(kind === 'basket' ? { id: payload.id } : { path: payload.path })
+  });
   return win;
 }
+
+async function toggleFolderPopup(kind, payload, anchorXInDock) {
+  cancelPopupBlurClose();
+  const key = popupKeyFor(kind, payload);
+  console.log(`[popup] toggle kind=${kind} key=${key} 现有=${popupKey} 窗口=${Boolean(popupWindow)}`);
+  if (popupWindow && popupKey === key) {
+    closeFolderPopup();
+    return { open: false };
+  }
+  await openFolderPopup(kind, payload, anchorXInDock);
+  return { open: Boolean(popupWindow) };
+}
+
+// ------------------------------------------------------------------ 窗口：设置
 
 function openSettings() {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
@@ -305,7 +674,7 @@ function openSettings() {
   settingsWindow = winFactory.createBehaviorWindow('normal', {
     glass: winFactory.glassEnabled(settings),
     width: 560,
-    height: 640,
+    height: 560,
     title: `${APP_NAME} 设置`
   });
   attachDiagnostics(settingsWindow, 'settings');
@@ -326,8 +695,15 @@ function installTray() {
   tray = new Tray(image);
   tray.setToolTip(APP_NAME);
   const menu = Menu.buildFromTemplate([
-    { label: '显示所有筐', click: showAllBaskets },
-    { label: '新建文件筐', click: () => { basketModel.createBasket(settings.baskets); } },
+    {
+      label: '新建文件夹',
+      click: () => {
+        const created = basketModel.createBasket(settings.baskets);
+        settings.baskets = created.baskets;
+        persist();
+        syncDock();
+      }
+    },
     { type: 'separator' },
     {
       label: '显示 Dock',
@@ -337,15 +713,6 @@ function installTray() {
         settings.dock_enabled = item.checked;
         persist();
         syncDock();
-      }
-    },
-    {
-      label: 'Dock 常驻显示',
-      type: 'checkbox',
-      checked: settings.dock_always_visible,
-      click: (item) => {
-        settings.dock_always_visible = item.checked;
-        persist();
       }
     },
     { label: '设置…', click: () => openSettings() },
@@ -364,38 +731,6 @@ function installTray() {
   ]);
   tray.setContextMenu(menu);
   return tray;
-}
-
-// 磨砂模式切换后重建所有窗口（Electron 的覆盖式参数无法运行时修改）
-function rebuildWindows() {
-  for (const [id, win] of basketWindows) {
-    if (!win.isDestroyed()) win.destroy();
-    basketWindows.delete(id);
-  }
-  if (dockWindow && !dockWindow.isDestroyed()) {
-    dockWindow.destroy();
-    dockWindow = null;
-  }
-  for (const win of explorerWindows) {
-    if (!win.isDestroyed()) win.destroy();
-  }
-  explorerWindows.clear();
-  if (settingsWindow && !settingsWindow.isDestroyed()) {
-    settingsWindow.destroy();
-    settingsWindow = null;
-  }
-  syncBasketWindows();
-  syncDock();
-  openSettings();
-}
-
-function showAllBaskets() {
-  for (const basket of settings.baskets) {
-    basket.visible = true;
-    const win = basketWindows.get(basket.id);
-    if (win && !win.isDestroyed()) win.show();
-  }
-  persist();
 }
 
 // ------------------------------------------------------------------ IPC
@@ -430,6 +765,8 @@ function registerIpc() {
       item.id === merged.id ? merged : item
     );
     persist();
+    // visible 变化会影响 Dock 条目数，窗口尺寸跟着变
+    if (merged.visible !== current.visible) syncDock();
     return merged;
   });
 
@@ -450,20 +787,40 @@ function registerIpc() {
     const created = basketModel.createBasket(settings.baskets, name);
     settings.baskets = created.baskets;
     persist();
-    syncBasketWindows();
+    syncDock();
     return created.basket;
   });
 
   ipcMain.handle('basket:delete', (_event, { basketId }) => {
-    const win = basketWindows.get(basketId);
-    if (win && !win.isDestroyed()) win.destroy();
-    basketWindows.delete(basketId);
+    if (popupWindow && popupKey === `basket:${basketId}`) closeFolderPopup();
     settings.baskets = basketModel.dropBasket(settings.baskets, basketId);
     persist();
+    syncDock();
     return settings.baskets;
   });
 
-  ipcMain.handle('dock:get', () => settings.dock_items);
+  // Dock 条目 = 系统虚拟项（此电脑/回收站）＋筐（文件夹，点击弹文件夹弹窗）＋快捷方式；隐藏的筐不上 Dock
+  ipcMain.handle('dock:get', () => ({
+    specials: settings.dock_specials
+      .map((id) => specials.findSpecial(id))
+      .filter(Boolean)
+      .map((item) => ({ id: item.id, label: item.label })),
+    baskets: settings.baskets
+      .filter((basket) => basket.visible !== false)
+      .map((basket) => ({ id: basket.id, name: basket.name })),
+    shortcuts: settings.dock_items
+  }));
+
+  ipcMain.handle('special:icon', (_event, { id }) => specialIconFor(id));
+
+  ipcMain.handle('special:open', (_event, { id }) => openSpecial(id));
+
+  ipcMain.handle('dock:remove-special', (_event, { id }) => {
+    settings.dock_specials = settings.dock_specials.filter((item) => item !== id);
+    persist();
+    syncDock();
+    return settings.dock_specials;
+  });
 
   ipcMain.handle('dock:add', (_event, { paths }) => {
     let items = settings.dock_items;
@@ -494,6 +851,102 @@ function registerIpc() {
     return settings.dock_items;
   });
 
+  // 点击 Dock 快捷方式：指向文件夹的弹文件夹弹窗（再点一次收起），其余交给系统打开
+  ipcMain.handle('dock:activate', async (_event, { path: target, itemCenterX }) => {
+    cancelPopupBlurClose();
+    const dirTarget = dirTargetForShortcut(target);
+    if (dirTarget) {
+      const result = await toggleFolderPopup('dir', { path: dirTarget }, itemCenterX);
+      return { opened: result.open ? 'popup' : 'none' };
+    }
+    if (popupWindow) closeFolderPopup();
+    const error = await shell.openPath(target);
+    return { opened: 'app', ok: !error, error: error || '' };
+  });
+
+  // 点击 Dock 里的文件夹（筐）：切换对应弹窗
+  ipcMain.handle('folder:toggle', (_event, { kind, id, path: target, itemCenterX }) => {
+    return toggleFolderPopup(
+      kind === 'basket' ? 'basket' : 'dir',
+      kind === 'basket' ? { id } : { path: target },
+      itemCenterX
+    );
+  });
+
+  // 右键菜单：弹原生菜单并等用户选完。原生菜单不受窗口尺寸限制，
+  // 位置、键盘操作、点外面关闭都由系统处理，不会再被 Dock 那种小窗口裁掉。
+  ipcMain.handle('menu:popup', (event, payload = {}) => {
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    const actionable = items.some((item) => !item.separator && item.key);
+    if (!actionable) return null;
+    const template = items.map((item) =>
+      item.separator
+        ? { type: 'separator' }
+        : {
+            label: String(item.label || ''),
+            click: () => {
+              menuPicked = item.key;
+            }
+          }
+    );
+    return new Promise((resolve) => {
+      // 原生命令菜单会短暂夺走前台，弹窗的"失焦即关"要在此期间暂停，
+      // 否则菜单还开着、文件夹窗口先自己关了。
+      menuOpen = true;
+      menuPicked = null;
+      const finish = () => {
+        menuOpen = false;
+        resolve(menuPicked);
+      };
+      try {
+        const menu = Menu.buildFromTemplate(template);
+        const win = BrowserWindow.fromWebContents(event.sender);
+        menu.popup({
+          ...(win && !win.isDestroyed() ? { window: win } : {}),
+          ...(Number.isInteger(payload.x) ? { x: payload.x } : {}),
+          ...(Number.isInteger(payload.y) ? { y: payload.y } : {}),
+          callback: finish
+        });
+      } catch (error) {
+        console.error('[menu] 弹菜单失败', error && error.message);
+        finish();
+      }
+    });
+  });
+
+  ipcMain.handle('popup:ready', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win !== popupWindow || !popupPayload) return null;
+    return popupPayload;
+  });
+
+  ipcMain.handle('popup:present', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    // showInactive：显示但不抢用户当前应用的焦点（Dock 本身也不抢焦点，体验一致）
+    if (win === popupWindow && !win.isDestroyed()) win.showInactive();
+    return true;
+  });
+
+  ipcMain.handle('popup:close', () => {
+    closeFolderPopup();
+    return true;
+  });
+
+  // 弹窗内导航：进入子目录 / 返回上级。窗口不动，磨砂背景也不变。
+  ipcMain.handle('popup:navigate', (event, { path: target }) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win !== popupWindow || !target) return null;
+    const listing = filebrowse.listEntries(target);
+    return {
+      kind: 'dir',
+      name: path.basename(target) || target,
+      path: target,
+      parent: filebrowse.parentOf(target),
+      entries: listing.entries,
+      error: listing.error
+    };
+  });
+
   ipcMain.handle('file:icon', (_event, { path: target, size }) => iconFor(target, size || 48));
 
   ipcMain.handle('file:open', async (_event, { path: target }) => {
@@ -509,11 +962,6 @@ function registerIpc() {
 
   ipcMain.handle('file:list', (_event, { path: target }) => filebrowse.listEntries(target));
 
-  ipcMain.handle('window:explorer', (_event, { path: target }) => {
-    openExplorer(target);
-    return true;
-  });
-
   ipcMain.handle('window:settings', () => {
     openSettings();
     return true;
@@ -525,44 +973,29 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle('window:toggle-maximize', (event) => {
-    const win = BrowserWindow.fromWebContents(event.sender);
-    if (!win || win.isDestroyed()) return false;
-    if (win.isMaximized()) win.unmaximize();
-    else win.maximize();
-    return win.isMaximized();
-  });
-
-  ipcMain.handle('window:geometry', (event, { rect }) => {
-    const win = BrowserWindow.fromWebContents(event.sender);
-    if (!win || win.isDestroyed() || !rect) return false;
-    const basket = settings.baskets.find((item) => {
-      return basketWindows.get(item.id) === win;
-    });
-    if (!basket) return false;
-    basket.x = rect.x;
-    basket.y = rect.y;
-    basket.w = rect.width;
-    basket.h = rect.height;
-    persist();
-    return true;
-  });
-
   ipcMain.handle('settings:update', (_event, { patch }) => {
-    const before = settings.accent_mode;
-    const beforeBehaviors = `${settings.basket_behavior}|${settings.dock_always_visible}`;
+    const before = {
+      dock_enabled: settings.dock_enabled,
+      dock_icon_size: settings.dock_icon_size,
+      dock_magnify: settings.dock_magnify,
+      basket_count: settings.baskets.length
+    };
     settings = store.mergedSettings({ ...settings, ...(patch || {}) });
     persist();
-    const behaviorsChanged =
-      beforeBehaviors !== `${settings.basket_behavior}|${settings.dock_always_visible}`;
-    if (before !== settings.accent_mode || behaviorsChanged) {
-      // transparent / backgroundMaterial 在窗口创建时就锁定了，改模式必须重建窗口
-      rebuildWindows();
-    }
-    syncDock();
-    syncBasketWindows();
-    for (const [, win] of basketWindows) {
-      if (!win.isDestroyed()) win.webContents.send('state:changed', { settings });
+    if (settings.dock_enabled !== before.dock_enabled) syncDock();
+    else if (
+      settings.dock_icon_size !== before.dock_icon_size ||
+      settings.baskets.length !== before.basket_count
+    ) {
+      applyDockGeometry();
+      if (dockWindow && !dockWindow.isDestroyed()) {
+        dockWindow.webContents.send('state:changed', { settings });
+      }
+    } else if (settings.dock_magnify !== before.dock_magnify) {
+      // 放大程度只影响渲染层动画，不用重建窗口
+      if (dockWindow && !dockWindow.isDestroyed()) {
+        dockWindow.webContents.send('state:changed', { settings });
+      }
     }
     return settings;
   });
@@ -579,23 +1012,25 @@ function registerIpc() {
     persist();
     return autostart.isEnabled();
   });
-
-  ipcMain.on('window:drag-start', (event) => {
-    // 普通窗口由系统负责拖动，这里只处理 Dock 的锁定位置，不做任何事
-    void event;
-  });
 }
 
 // ------------------------------------------------------------------ 生命周期
+
+// 命令行开关：`electron . --settings` 直接打开设置窗口（调试与截图核对用；
+// 平时仍从托盘菜单打开）
+function wantsSettingsWindow() {
+  return process.argv.slice(1).includes('--settings');
+}
 
 function bootstrap() {
   settings = store.loadSettings();
   ensureBasket();
   syncDockItems();
-  syncBasketWindows();
   syncDock();
   installTray();
+  startDockAutoHide();
   if (settings.autostart) autostart.sync(true);
+  if (wantsSettingsWindow()) openSettings();
 }
 
 const singleInstance = app.requestSingleInstanceLock();
@@ -605,12 +1040,15 @@ if (!singleInstance) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    showAllBaskets();
     if (dockWindow && !dockWindow.isDestroyed()) dockWindow.show();
   });
 
   app.whenReady().then(() => {
     app.setAppUserModelId('com.cmchen.deskbasket');
+    // 页面配色是深色主题（浅色文字），而系统材质 acrylic 会跟随系统主题渲染：
+    // 系统处于浅色模式时会画出一层浅色磨砂，浅色字压在浅色底上就"几乎看不见"。
+    // 强制深色让系统材质、原生菜单、滚动条都与页面配色一致。
+    nativeTheme.themeSource = 'dark';
     registerIpc();
     bootstrap();
     screen.on('display-metrics-changed', () => {

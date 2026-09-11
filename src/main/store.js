@@ -9,6 +9,7 @@ const os = require('node:os');
 
 const behavior = require('./windowBehavior');
 const path = require('node:path');
+const specials = require('./specials');
 
 const SETTINGS_FILENAME = 'settings.json';
 const APP_DIR_NAME = 'DeskBasket';
@@ -19,10 +20,12 @@ const DEFAULTS = {
   icon_size: 48,
   baskets: [],
   dock_enabled: true,
-  dock_always_visible: true,   // 常驻显示：鼠标移开也不收起
+  dock_auto_hide: true,        // 鼠标离开就收起（贴底边才滑出），这样不会挡着别的窗口
   dock_icon_size: 48,
+  dock_magnify: 50,            // 鼠标靠近时图标放大程度（百分比，0=不放大）
   dock_hide_delay_ms: 400,
   dock_items: [],
+  dock_specials: ['thispc', 'recyclebin'],  // 系统虚拟项：此电脑、回收站
   dock_removed: [],
   // 窗口行为，与 token 的 windowBehavior 同一套：floating / normal / desktop
   basket_behavior: 'normal'    // 文件筐＝普通窗口；Dock 固定于桌面 + 常驻可见由开关决定
@@ -37,6 +40,8 @@ const ACCENT_LABELS = {
 };
 const ICON_SIZE_MIN = 24;
 const ICON_SIZE_MAX = 128;
+const DOCK_MAGNIFY_MIN = 0;    // 不放大
+const DOCK_MAGNIFY_MAX = 100;  // 最大放大一倍
 const DOCK_HIDE_DELAY_MIN = 100;
 const DOCK_HIDE_DELAY_MAX = 3000;
 
@@ -119,12 +124,13 @@ function mergedSettings(raw) {
   out.baskets = require('./baskets').normalizeBaskets(raw.baskets);
   out.dock_enabled =
     typeof raw.dock_enabled === 'boolean' ? raw.dock_enabled : DEFAULTS.dock_enabled;
-  out.dock_always_visible =
-    typeof raw.dock_always_visible === 'boolean'
-      ? raw.dock_always_visible
-      : DEFAULTS.dock_always_visible;
+  out.dock_auto_hide =
+    typeof raw.dock_auto_hide === 'boolean' ? raw.dock_auto_hide : DEFAULTS.dock_auto_hide;
   out.dock_icon_size = clampInt(
     raw.dock_icon_size, DEFAULTS.dock_icon_size, ICON_SIZE_MIN, ICON_SIZE_MAX
+  );
+  out.dock_magnify = clampInt(
+    raw.dock_magnify, DEFAULTS.dock_magnify, DOCK_MAGNIFY_MIN, DOCK_MAGNIFY_MAX
   );
   out.dock_hide_delay_ms = clampInt(
     raw.dock_hide_delay_ms,
@@ -133,6 +139,11 @@ function mergedSettings(raw) {
     DOCK_HIDE_DELAY_MAX
   );
   out.dock_items = normalizePathList(raw.dock_items);
+  // 旧的 dock_always_visible 字段从来没被代码读过，直接用 dock_auto_hide 取代
+  delete out.dock_always_visible;
+  out.dock_specials = specials.normalizeSpecials(
+    'dock_specials' in raw ? raw.dock_specials : DEFAULTS.dock_specials
+  );
   out.dock_removed = normalizePathList(raw.dock_removed);
   out.basket_behavior = behavior.normalizeWindowBehavior(raw.basket_behavior, 'normal');
   return out;
@@ -168,6 +179,8 @@ module.exports = {
   DEFAULTS,
   DOCK_HIDE_DELAY_MAX,
   DOCK_HIDE_DELAY_MIN,
+  DOCK_MAGNIFY_MAX,
+  DOCK_MAGNIFY_MIN,
   ICON_SIZE_MAX,
   ICON_SIZE_MIN,
   loadSettings,

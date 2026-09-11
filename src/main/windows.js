@@ -137,9 +137,50 @@ function listDisplays() {
   }));
 }
 
+// 文件夹弹窗：完全透明窗口（材质由渲染层自研——截屏＋高斯模糊），
+// 置顶可聚焦（聚焦才能在失焦时自动关闭），不进任务栏，大小固定。
+function createPopupWindow(options = {}) {
+  const {
+    width = 480,
+    height = 460,
+    x,
+    y,
+    title = 'DeskBasket 文件夹'
+  } = options;
+  const win = new BrowserWindow({
+    width,
+    height,
+    ...(Number.isInteger(x) ? { x } : {}),
+    ...(Number.isInteger(y) ? { y } : {}),
+    frame: false,
+    show: false,
+    hasShadow: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    movable: false,
+    focusable: true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    title,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  });
+  win.setAlwaysOnTop(true, 'floating');
+  win.setMenuBarVisibility?.(false);
+  return win;
+}
+
 module.exports = {
   GLASS_MATERIAL,
   createBehaviorWindow,
+  createPopupWindow,
   glassEnabled,
   glassOptions,
   listDisplays,

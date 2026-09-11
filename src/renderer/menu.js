@@ -1,78 +1,22 @@
 'use strict';
 
-// 页面内的右键菜单：Electron 的无边框窗口里 window.prompt / window.confirm 不可靠，
-// 所以自己画一个。用法：
+// 页面内右键菜单：不在页面里自绘，而是请主进程弹 **原生菜单**。
+//
+// 以前是在页面里画一个 position:fixed 的 div，问题是它长在窗口内部：
+// Dock 窗口只有 99px 高，菜单有 4~6 项（约 130~160px），必然被窗口裁掉——
+// 表现就是「右键后菜单位置和内容显示不全」。原生菜单不受窗口尺寸限制，
+// 位置、键盘操作、点击外部关闭都由系统处理。
+//
+// 用法不变：
 //   const picked = await showContextMenu([{key:'open', label:'打开'}, ...], event);
 // 返回被选中的 key，取消则返回 null。
 
 (function () {
-  let host = null;
-
-  function ensureHost() {
-    if (host) return host;
-    host = document.createElement('div');
-    host.id = 'ctx-host';
-    host.style.cssText = [
-      'position:fixed',
-      'z-index:9999',
-      'min-width:150px',
-      'padding:4px',
-      'border-radius:9px',
-      'background:rgba(26,28,36,0.97)',
-      'border:1px solid rgba(255,255,255,0.16)',
-      'box-shadow:0 8px 24px rgba(0,0,0,0.45)',
-      'font:12px/1.4 "Microsoft YaHei",system-ui,sans-serif',
-      'color:#eceef3',
-      'display:none'
-    ].join(';');
-    document.body.append(host);
-    return host;
-  }
-
-  function hide() {
-    if (host) host.style.display = 'none';
-  }
-
   window.showContextMenu = function showContextMenu(items, event) {
-    return new Promise((resolve) => {
-      const box = ensureHost();
-      box.innerHTML = '';
-      for (const item of items) {
-        if (item.separator) {
-          const line = document.createElement('div');
-          line.style.cssText = 'height:1px;margin:4px 6px;background:rgba(255,255,255,0.12)';
-          box.append(line);
-          continue;
-        }
-        const row = document.createElement('div');
-        row.textContent = item.label;
-        row.style.cssText = 'padding:5px 10px;border-radius:6px;cursor:pointer;white-space:nowrap';
-        row.addEventListener('mouseenter', () => {
-          row.style.background = 'rgba(255,255,255,0.16)';
-        });
-        row.addEventListener('mouseleave', () => {
-          row.style.background = 'transparent';
-        });
-        row.addEventListener('click', () => {
-          hide();
-          resolve(item.key);
-        });
-        box.append(row);
-      }
-
-      const x = Math.min(event.clientX, window.innerWidth - 170);
-      const y = Math.min(event.clientY, window.innerHeight - 20 - items.length * 26);
-      box.style.left = Math.max(4, x) + 'px';
-      box.style.top = Math.max(4, y) + 'px';
-      box.style.display = 'block';
-
-      const dismiss = (ev) => {
-        if (box.contains(ev.target)) return;
-        hide();
-        document.removeEventListener('mousedown', dismiss, true);
-        resolve(null);
-      };
-      setTimeout(() => document.addEventListener('mousedown', dismiss, true), 0);
-    });
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) return Promise.resolve(null);
+    const x = event && Number.isFinite(event.clientX) ? Math.round(event.clientX) : undefined;
+    const y = event && Number.isFinite(event.clientY) ? Math.round(event.clientY) : undefined;
+    return window.deskbasket.popupMenu(list, x, y);
   };
 })();

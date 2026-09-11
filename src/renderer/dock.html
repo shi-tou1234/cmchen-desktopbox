@@ -7,9 +7,59 @@
 <link rel="stylesheet" href="common.css">
 <script src="menu.js"></script>
 <style>
-  html, body { width: 100%; height: 100%; }
-  /* Dock 固定于桌面：位置由主进程锁死，这里不响应拖动 */
-  .dock { -webkit-app-region: no-drag; }
+  /* overflow 必须是 hidden：悬停放大图标会超出条目框，visible 会让视口长出滚动条 */
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  /* Dock 完全透明：位置由主进程锁死，这里不响应拖动、不铺任何底色 */
+  .dock {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    align-content: flex-end;
+    justify-content: center;
+    column-gap: 12px;   /* 与主进程 dockLayout 的 DOCK_CELL_GAP 对齐 */
+    row-gap: 16px;
+    overflow: visible;
+    -webkit-app-region: no-drag;
+  }
+
+  .dock-item {
+    position: relative;
+    width: var(--icon);
+    height: var(--icon);
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    border-radius: 10px;
+    transform-origin: bottom center;   /* 放大向上生长（Nexus 同款） */
+    will-change: transform;
+  }
+
+  .dock-item img {
+    width: var(--icon);
+    height: var(--icon);
+    object-fit: contain;
+    pointer-events: none;
+    -webkit-user-drag: none;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
+  }
+
+  /* 悬停时图标后面一层淡高亮，和放大动画配合 */
+  .dock-item::after {
+    content: '';
+    position: absolute;
+    inset: -6px -4px 2px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.12);
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: -1;
+  }
+  .dock-item:hover::after { opacity: 1; }
+
+  .dock-item.dragging { opacity: 0.4; }
+  body.dragover { outline: none; }
 </style>
 </head>
 <body>
@@ -18,117 +68,309 @@
   <script>
     const api = window.deskbasket;
     const dockEl = document.getElementById('dock');
-    let items = [];
+
+    // Windows 风格文件夹 SVG（筐没有磁盘路径可问系统要图标，自己画一个）
+    function folderIcon() {
+      const full = [
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">',
+        '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">',
+        '<stop offset="0" stop-color="#ffd77a"/><stop offset="1" stop-color="#f0a83b"/>',
+        '</linearGradient></defs>',
+        '<path d="M4 10a3 3 0 0 1 3-3h11l4 4h16a3 3 0 0 1 3 3v3H4z" fill="#d9a144"/>',
+        '<path d="M4 15h37a3 3 0 0 1 3 3l-2 16a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3z" fill="url(#g)"/>',
+        '</svg>'
+      ].join('');
+      return 'data:image/svg+xml;utf8,' + encodeURIComponent(full);
+    }
+
+    // 图标取不到时的兜底：既不留空白，也不让浏览器画「破图」标记
+    function fallbackIcon() {
+      const full = [
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">',
+        '<path d="M12 4h16l8 8v32a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" fill="#8d93a5"/>',
+        '<path d="M28 4l8 8h-8z" fill="#c3c8d6"/>',
+        '</svg>'
+      ].join('');
+      return 'data:image/svg+xml;utf8,' + encodeURIComponent(full);
+    }
+
     let iconSize = 48;
+    let entries = [];       // { type:'special', id, name } | { type:'basket', id, name } | { type:'shortcut', path }
+    let nodes = [];         // 与 entries 对齐的动画节点
 
     function baseName(target) {
       return String(target).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || target;
     }
 
-    function makeItem(target) {
+    function stripExt(name) {
+      return name.replace(/\.(lnk|url|exe)$/i, '');
+    }
+
+    // 条目对外显示的名字（筐与系统图标自带名字，快捷方式用文件名去掉后缀）
+    function displayName(entry) {
+      if (entry.type === 'shortcut') return stripExt(baseName(entry.path));
+      return entry.name || '';
+    }
+
+    // ---------------------------------------------------------------- 渲染
+
+    function makeNode(entry) {
       const item = document.createElement('div');
       item.className = 'dock-item';
-      item.title = target;
 
       const img = document.createElement('img');
       img.alt = '';
-      img.style.width = iconSize + 'px';
-      img.style.height = iconSize + 'px';
-      api.getIcon(target, iconSize).then((dataUrl) => {
-        if (dataUrl) img.src = dataUrl;
-      });
+      if (entry.type === 'basket') {
+        img.src = folderIcon();
+      } else if (entry.type === 'special') {
+        // 此电脑 / 回收站：图标由 shell 按解析名给（带状态，如回收站空/非空）
+        api
+          .getSpecialIcon(entry.id)
+          .then((dataUrl) => {
+            img.src = dataUrl || fallbackIcon();
+          })
+          .catch(() => {
+            img.src = fallbackIcon();
+          });
+      } else {
+        api
+          .getIcon(entry.path, iconSize)
+          .then((dataUrl) => {
+            img.src = dataUrl || fallbackIcon();
+          })
+          .catch(() => {
+            img.src = fallbackIcon();
+          });
+      }
+      item.append(img);
 
-      const tip = document.createElement('div');
-      tip.className = 'tip';
-      tip.textContent = baseName(target);
+      // 不画悬停名称气泡（领导要求）：视觉名称只留给无障碍用
+      item.setAttribute('aria-label', displayName(entry));
 
-      item.append(img, tip);
-      item.draggable = true;
-
-      item.addEventListener('click', async () => {
-        const result = await api.openPath(target);
-        if (result && result.ok === false) {
-          alert('打不开这一项：\n' + target);
+      item.addEventListener('click', () => {
+        const rect = item.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        if (entry.type === 'basket') {
+          api.toggleFolder({ kind: 'basket', id: entry.id }, centerX);
+        } else if (entry.type === 'special') {
+          api.openSpecial(entry.id).then((result) => {
+            if (result && result.ok === false) alert('打不开「' + entry.name + '」：\n' + result.error);
+          });
+        } else {
+          api.activateDockItem(entry.path, centerX).then((result) => {
+            if (result && result.opened === 'app' && result.ok === false) {
+              alert('打不开这一项：\n' + entry.path);
+            }
+          });
         }
       });
 
-      item.addEventListener('contextmenu', async (event) => {
+      item.addEventListener('contextmenu', (event) => {
         event.preventDefault();
-        const picked = await window.showContextMenu(
-          [
-            { key: 'open', label: '打开' },
-            { key: 'reveal', label: '用系统资源管理器打开所在位置' },
-            { separator: true },
-            { key: 'remove', label: '从 Dock 移除' }
-          ],
-          event
-        );
-        if (picked === 'open') api.openPath(target);
-        else if (picked === 'reveal') api.revealPath(target);
-        else if (picked === 'remove') {
-          await api.removeDockItem(target);
-          await refresh();
+        if (entry.type === 'basket') {
+          window.showContextMenu(
+            [
+              { key: 'open', label: '打开' },
+              { key: 'prune', label: '清理失效项' },
+              { separator: true },
+              { key: 'rename', label: '改名…' },
+              { key: 'delete', label: '删除这个筐' }
+            ],
+            event
+          ).then((picked) => {
+            if (!picked) return;
+            if (picked === 'open') {
+              const rect = item.getBoundingClientRect();
+              api.toggleFolder({ kind: 'basket', id: entry.id }, rect.left + rect.width / 2);
+            } else if (picked === 'prune') {
+              api.pruneMissing(entry.id);
+            } else if (picked === 'rename') {
+              const name = window.prompt('筐的名字：', entry.name);
+              if (name && name.trim()) api.updateBasket({ id: entry.id, name: name.trim().slice(0, 24) });
+            } else if (picked === 'delete') {
+              api.deleteBasket(entry.id);
+            }
+          });
+        } else if (entry.type === 'special') {
+          window.showContextMenu(
+            [
+              { key: 'open', label: '打开' },
+              { separator: true },
+              { key: 'remove', label: '从 Dock 移除' }
+            ],
+            event
+          ).then((picked) => {
+            if (picked === 'open') api.openSpecial(entry.id);
+            else if (picked === 'remove') api.removeDockSpecial(entry.id);
+          });
+        } else {
+          window.showContextMenu(
+            [
+              { key: 'open', label: '打开' },
+              { key: 'reveal', label: '用系统资源管理器打开所在位置' },
+              { separator: true },
+              { key: 'remove', label: '从 Dock 移除' }
+            ],
+            event
+          ).then((picked) => {
+            if (!picked) return;
+            if (picked === 'open') api.openPath(entry.path);
+            else if (picked === 'reveal') api.revealPath(entry.path);
+            else if (picked === 'remove') api.removeDockItem(entry.path);
+          });
         }
       });
 
-      // 拖拽排序
-      item.addEventListener('dragstart', (event) => {
-        event.dataTransfer.setData('text/deskbasket-index', String(items.indexOf(target)));
-        event.dataTransfer.effectAllowed = 'move';
-      });
-      item.addEventListener('dragover', (event) => {
-        if (event.dataTransfer.types.includes('text/deskbasket-index')) {
+      // 拖拽排序（筐固定在最前，只有快捷方式之间可排）
+      if (entry.type === 'shortcut') {
+        item.draggable = true;
+        item.addEventListener('dragstart', (event) => {
+          item.classList.add('dragging');
+          event.dataTransfer.setData('text/deskbasket-index', String(shortcutIndexOf(entry)));
+          event.dataTransfer.effectAllowed = 'move';
+        });
+        item.addEventListener('dragend', () => item.classList.remove('dragging'));
+        item.addEventListener('dragover', (event) => {
+          if (event.dataTransfer.types.includes('text/deskbasket-index')) {
+            event.preventDefault();
+          }
+        });
+        item.addEventListener('drop', async (event) => {
+          const raw = event.dataTransfer.getData('text/deskbasket-index');
+          if (raw === '') return;
           event.preventDefault();
-        }
-      });
-      item.addEventListener('drop', async (event) => {
-        const raw = event.dataTransfer.getData('text/deskbasket-index');
-        if (raw === '') return;
-        event.preventDefault();
-        event.stopPropagation();
-        const from = Number(raw);
-        const to = items.indexOf(target);
-        if (Number.isNaN(from) || from === to) return;
-        const next = [...items];
-        const [moved] = next.splice(from, 1);
-        next.splice(to, 0, moved);
-        await api.reorderDock(next);
-        await refresh();
-      });
+          event.stopPropagation();
+          const from = Number(raw);
+          const to = shortcutIndexOf(entry);
+          if (Number.isNaN(from) || from === to) return;
+          const paths = entries.filter((e) => e.type === 'shortcut').map((e) => e.path);
+          const [moved] = paths.splice(from, 1);
+          paths.splice(to, 0, moved);
+          await api.reorderDock(paths);
+        });
+      }
 
-      return item;
+      return { entry, el: item, influence: 0 };
+    }
+
+    function shortcutIndexOf(entry) {
+      let index = 0;
+      for (const item of entries) {
+        if (item === entry) return index;
+        if (item.type === 'shortcut') index += 1;
+      }
+      return -1;
     }
 
     function render() {
+      document.documentElement.style.setProperty('--icon', iconSize + 'px');
       dockEl.innerHTML = '';
-      for (const target of items) dockEl.append(makeItem(target));
+      nodes = entries.map((entry) => {
+        const node = makeNode(entry);
+        dockEl.append(node.el);
+        return node;
+      });
+      measureNodes();
+    }
+
+    // 测量每个条目的中心点（动画联动按中心距离衰减）
+    function measureNodes() {
+      const base = dockEl.getBoundingClientRect();
+      for (const node of nodes) {
+        const rect = node.el.getBoundingClientRect();
+        node.centerX = rect.left + rect.width / 2 - base.left;
+        node.centerY = rect.top + rect.height / 2 - base.top;
+      }
     }
 
     async function refresh() {
       const state = await api.getState();
       iconSize = state.settings.dock_icon_size || 48;
-      items = await api.getDockItems();
+      // 悬停放大程度由设置决定（百分比 → 比例）
+      const magnify = Number(state.settings.dock_magnify);
+      boostScale = Math.max(0, (Number.isFinite(magnify) ? magnify : 50) / 100);
+      const data = await api.getDockItems();
+      entries = [
+        // 顺序：系统虚拟项（此电脑/回收站）→ 筐 → 快捷方式
+        ...(data.specials || []).map((item) => ({ type: 'special', id: item.id, name: item.label })),
+        ...(data.baskets || []).map((basket) => ({ type: 'basket', id: basket.id, name: basket.name })),
+        ...(data.shortcuts || []).map((item) => ({ type: 'shortcut', path: item }))
+      ];
       render();
     }
 
-    api.onStateChanged(() => {
-      refresh();
+    // ------------------------------------------------ Nexus 式靠近动画
+    //
+    // 鼠标附近的图标放大上浮，两侧邻居按余弦衰减依次变小：
+    //   influence = cos衰减(x) × cos衰减(y)
+    // x 方向影响半径大（左右联动），y 方向陡（只联动本行）。
+    // 每帧向目标值缓动，避免生硬跳变。
+
+    const BOOST_LIFT = 10;     // 中心最大上浮 10px
+    const RANGE_X = 2.2;       // x 影响半径 = 图标尺寸 × 2.2
+    const RANGE_Y = 1.1;       // y 影响半径 = 图标尺寸 × 1.1
+    const EASE = 0.25;         // 每帧缓动系数
+
+    let boostScale = 0.5;      // 中心最大放大比例，由设置 dock_magnify 决定（50 = 放大 50%）
+
+    let pointer = null;        // { x, y } 相对 dock 容器；null = 鼠标不在内
+
+    dockEl.addEventListener('mousemove', (event) => {
+      const base = dockEl.getBoundingClientRect();
+      pointer = { x: event.clientX - base.left, y: event.clientY - base.top };
+    });
+    dockEl.addEventListener('mouseleave', () => {
+      pointer = null;
+    });
+    window.addEventListener('resize', () => {
+      measureNodes();
     });
 
-    // 从桌面拖文件进来
+    function cosineFalloff(distance, range) {
+      if (distance >= range) return 0;
+      return 0.5 + 0.5 * Math.cos((Math.PI * distance) / range);
+    }
+
+    function tick() {
+      for (const node of nodes) {
+        let target = 0;
+        if (pointer) {
+          const dx = Math.abs(pointer.x - node.centerX);
+          const dy = Math.abs(pointer.y - node.centerY);
+          target = cosineFalloff(dx, iconSize * RANGE_X) * cosineFalloff(dy, iconSize * RANGE_Y);
+        }
+        node.influence += (target - node.influence) * EASE;
+        if (Math.abs(target - node.influence) < 0.002) node.influence = target;
+        if (node.influence < 0.001) {
+          node.el.style.transform = '';
+        } else {
+          const scale = 1 + boostScale * node.influence;
+          const lift = BOOST_LIFT * node.influence;
+          node.el.style.transform = `translateY(${-lift.toFixed(2)}px) scale(${scale.toFixed(3)})`;
+        }
+      }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    // ---------------------------------------------------------------- 拖入
+
     document.addEventListener('dragover', (event) => {
+      if (event.dataTransfer.types.includes('text/deskbasket-index')) return;
       event.preventDefault();
-      document.body.classList.add('dragover');
     });
-    document.addEventListener('dragleave', () => document.body.classList.remove('dragover'));
     document.addEventListener('drop', async (event) => {
       if (event.dataTransfer.types.includes('text/deskbasket-index')) return;
       event.preventDefault();
-      document.body.classList.remove('dragover');
       const paths = api.pathsFromFiles(event.dataTransfer.files);
       if (!paths.length) return;
       await api.addDockPaths(paths);
-      await refresh();
+    });
+
+    // ---------------------------------------------------------------- 状态同步
+
+    api.onStateChanged(() => {
+      refresh();
     });
 
     refresh();

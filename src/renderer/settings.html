@@ -7,6 +7,15 @@
 <link rel="stylesheet" href="common.css">
 <style>
   .panel { border-radius: 14px; }
+  input[type="text"] {
+    background: rgba(255, 255, 255, 0.12);
+    color: #edeef2;
+    border: 0;
+    border-radius: 7px;
+    padding: 4px 8px;
+    font-size: 12px;
+    width: 180px;
+  }
 </style>
 </head>
 <body>
@@ -25,19 +34,8 @@
           <select id="accent"></select>
         </div>
         <div class="row">
-          <label for="iconSize">筐内图标大小</label>
+          <label for="iconSize">文件夹弹窗内图标大小</label>
           <input type="number" id="iconSize" min="24" max="128" step="8">
-        </div>
-      </div>
-
-      <div class="group">
-        <h3>窗口行为（与 token 同一套模式）</h3>
-        <div class="row">
-          <label for="basketBehavior">文件筐</label>
-          <select id="basketBehavior"></select>
-        </div>
-        <div class="row">
-          <span class="hint">普通窗口＝可拖动可缩放；固定于桌面＝不置顶、不可拖、不可缩放。Dock 恒为固定于桌面，位置大小锁死。</span>
         </div>
       </div>
 
@@ -48,7 +46,7 @@
           <input type="checkbox" id="dockEnabled">
         </div>
         <div class="row">
-          <label for="dockAlways">常驻显示（鼠标移开也不收起）</label>
+          <label for="dockAlways">常驻显示（关掉后鼠标离开自动收起，不挡其他窗口）</label>
           <input type="checkbox" id="dockAlways">
         </div>
         <div class="row">
@@ -56,8 +54,8 @@
           <input type="number" id="dockIconSize" min="24" max="128" step="8">
         </div>
         <div class="row">
-          <label for="dockDelay">鼠标离开后收起延迟</label>
-          <input type="number" id="dockDelay" min="100" max="3000" step="50">
+          <label for="dockMagnify">鼠标靠近的放大程度（%）</label>
+          <input type="number" id="dockMagnify" min="0" max="100" step="10">
         </div>
         <div class="row">
           <span class="hint" id="dockCount"></span>
@@ -65,13 +63,16 @@
       </div>
 
       <div class="group">
-        <h3>文件筐</h3>
+        <h3>Dock 上的文件夹</h3>
         <div class="basket-list" id="basketList"></div>
+        <div class="row" style="margin-top:6px">
+          <label for="basketName">选中文件夹的名字</label>
+          <input type="text" id="basketName" maxlength="24">
+        </div>
         <div class="row" style="justify-content:flex-start;gap:6px;flex-wrap:wrap">
-          <button class="btn" id="btnRename">改名</button>
-          <button class="btn" id="btnVisible">显示 / 隐藏</button>
+          <button class="btn" id="btnVisible">在 Dock 上显示 / 隐藏</button>
           <button class="btn" id="btnPrune">清理失效项</button>
-          <button class="btn" id="btnNew">新建筐</button>
+          <button class="btn" id="btnNew">新建文件夹</button>
           <button class="btn" id="btnDelete">删除</button>
         </div>
       </div>
@@ -96,11 +97,6 @@
 
   <script>
     const api = window.deskbasket;
-    const BEHAVIOR_LABELS = {
-      normal: '普通窗口（可拖动、可缩放）',
-      desktop: '固定于桌面（不可拖、不置顶）',
-      floating: '浮动置顶（浮在其他窗口上方）'
-    };
     const ACCENT_LABELS = {
       acrylic: '磨砂玻璃（Win11 系统材质，推荐）',
       blur: '轻量模糊',
@@ -123,22 +119,23 @@
       for (const basket of settings.baskets) {
         const row = document.createElement('div');
         row.className = 'basket-row' + (basket.id === selectedBasketId ? ' selected' : '');
-        const missing = '';  // 失效项数量由清理按钮负责展示
         const label = document.createElement('span');
         label.textContent =
-          basket.name + '（' + basket.items.length + ' 项）' + (basket.visible === false ? ' · 已隐藏' : '') + missing;
+          basket.name + '（' + basket.items.length + ' 项）' + (basket.visible === false ? ' · 已隐藏' : '');
         row.append(label);
         row.addEventListener('click', () => {
           selectedBasketId = basket.id;
           renderBaskets();
+          el('basketName').value = basket.name;
         });
         host.append(row);
       }
       if (!settings.baskets.length) {
-        host.textContent = '还没有筐，点「新建筐」建一个';
+        host.textContent = '还没有文件夹，点「新建文件夹」建一个';
       }
       if (!selectedBasketId && settings.baskets.length) {
         selectedBasketId = settings.baskets[0].id;
+        el('basketName').value = settings.baskets[0].name;
       }
     }
 
@@ -152,24 +149,16 @@
         el('accent').append(option);
       }
       el('accent').value = settings.accent_mode;
-      for (const [key, label] of Object.entries(BEHAVIOR_LABELS)) {
-        for (const id of ['basketBehavior']) {
-          if (!el(id).querySelector(`option[value="${key}"]`)) {
-            const option = document.createElement('option');
-            option.value = key;
-            option.textContent = label;
-            el(id).append(option);
-          }
-        }
-      }
-      el('basketBehavior').value = settings.basket_behavior;
       el('iconSize').value = settings.icon_size;
       el('dockEnabled').checked = settings.dock_enabled;
-      el('dockAlways').checked = settings.dock_always_visible;
+      el('dockAlways').checked = !settings.dock_auto_hide;
       el('dockIconSize').value = settings.dock_icon_size;
-      el('dockDelay').value = settings.dock_hide_delay_ms;
+      el('dockMagnify').value = settings.dock_magnify;
       el('dockCount').textContent =
-        'Dock 现有 ' + settings.dock_items.length + ' 项；自动收录桌面的 .lnk / .url / .exe，也可直接拖进去';
+        'Dock 现有 ' + settings.dock_items.length + ' 个快捷方式 ＋ ' +
+        (settings.dock_specials || []).length + ' 个系统图标（此电脑/回收站）＋ ' +
+        settings.baskets.filter((b) => b.visible !== false).length + ' 个文件夹' +
+        '；自动收录桌面的 .lnk / .url / .exe，也可直接拖进去';
       renderBaskets();
       loading = false;
     }
@@ -185,33 +174,33 @@
       push({ accent_mode: event.target.value }, '磨砂模式已切换');
     });
     el('iconSize').addEventListener('change', (event) => {
-      push({ icon_size: Number(event.target.value) }, '筐内图标大小已更新');
-    });
-    el('basketBehavior').addEventListener('change', (event) => {
-      push({ basket_behavior: event.target.value }, '文件筐窗口行为已更新（窗口会重建）');
+      push({ icon_size: Number(event.target.value) }, '文件夹弹窗图标大小已更新');
     });
     el('dockEnabled').addEventListener('change', (event) => {
       push({ dock_enabled: event.target.checked }, event.target.checked ? 'Dock 已显示' : 'Dock 已隐藏');
     });
-    el('dockAlways').addEventListener('change', (event) => {
-      push({ dock_always_visible: event.target.checked }, event.target.checked ? 'Dock 常驻显示' : 'Dock 鼠标离开后收起');
-    });
     el('dockIconSize').addEventListener('change', (event) => {
       push({ dock_icon_size: Number(event.target.value) }, 'Dock 图标大小已更新');
     });
-    el('dockDelay').addEventListener('change', (event) => {
-      push({ dock_hide_delay_ms: Number(event.target.value) }, '收起延迟已更新');
+    el('dockAlways').addEventListener('change', (event) => {
+      push(
+        { dock_auto_hide: !event.target.checked },
+        event.target.checked ? 'Dock 改为常驻显示' : 'Dock 改为自动收起'
+      );
+    });
+    el('dockMagnify').addEventListener('change', (event) => {
+      push({ dock_magnify: Number(event.target.value) }, '悬停放大程度已更新');
     });
 
-    el('btnRename').addEventListener('click', async () => {
+    el('basketName').addEventListener('change', async (event) => {
       const basket = settings.baskets.find((item) => item.id === selectedBasketId);
       if (!basket) return;
-      const name = window.prompt('筐的名字：', basket.name);
-      if (name === null) return;
-      const trimmed = name.trim();
-      if (!trimmed) return;
-      const merged = { ...basket, name: trimmed.slice(0, 24) };
-      settings = await api.updateBasket(merged);
+      const trimmed = event.target.value.trim().slice(0, 24);
+      if (!trimmed || trimmed === basket.name) {
+        event.target.value = basket.name;
+        return;
+      }
+      await api.updateBasket({ id: basket.id, name: trimmed });
       await refresh();
       flash('已改名');
     });
@@ -219,10 +208,10 @@
     el('btnVisible').addEventListener('click', async () => {
       const basket = settings.baskets.find((item) => item.id === selectedBasketId);
       if (!basket) return;
-      const merged = { ...basket, visible: basket.visible === false };
+      const merged = { id: basket.id, visible: basket.visible === false };
       await api.updateBasket(merged);
       await refresh();
-      flash(merged.visible ? '这个筐已显示' : '这个筐已隐藏');
+      flash(merged.visible ? '这个文件夹已显示在 Dock 上' : '这个文件夹已从 Dock 隐藏');
     });
 
     el('btnPrune').addEventListener('click', async () => {
@@ -235,7 +224,7 @@
       const created = await api.createBasket();
       selectedBasketId = created && created.id;
       await refresh();
-      flash('已新建一个筐');
+      flash('已在 Dock 新建一个文件夹');
     });
 
     el('btnDelete').addEventListener('click', async () => {
@@ -244,7 +233,7 @@
       await api.deleteBasket(basket.id);
       selectedBasketId = null;
       await refresh();
-      flash('已删除这个筐的登记，筐里的文件一个都没动');
+      flash('已删除这个文件夹的登记，里面的文件一个都没动');
     });
 
     el('btnReset').addEventListener('click', async () => {
@@ -252,9 +241,7 @@
         accent_mode: 'acrylic',
         icon_size: 48,
         dock_enabled: true,
-        dock_always_visible: true,
-        dock_icon_size: 48,
-        dock_hide_delay_ms: 400
+        dock_icon_size: 48
       });
       render();
       flash('已恢复默认设置');

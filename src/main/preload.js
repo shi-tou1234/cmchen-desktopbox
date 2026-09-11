@@ -36,13 +36,36 @@ contextBridge.exposeInMainWorld('deskbasket', {
   addDockPaths: (paths) => ipcRenderer.invoke('dock:add', { paths }),
   removeDockItem: (itemPath) => ipcRenderer.invoke('dock:remove', { itemPath }),
   reorderDock: (items) => ipcRenderer.invoke('dock:reorder', { items }),
+  // 系统虚拟项（此电脑 / 回收站）
+  getSpecialIcon: (id) => ipcRenderer.invoke('special:icon', { id }),
+  openSpecial: (id) => ipcRenderer.invoke('special:open', { id }),
+  removeDockSpecial: (id) => ipcRenderer.invoke('dock:remove-special', { id }),
+  // 点击 Dock 条目：指向文件夹的弹文件夹弹窗（再点一次收起），其余交给系统打开
+  activateDockItem: (itemPath, itemCenterX) =>
+    ipcRenderer.invoke('dock:activate', { path: itemPath, itemCenterX }),
+  // 点击 Dock 里的筐（文件夹）：切换对应弹窗
+  toggleFolder: (payload, itemCenterX) =>
+    ipcRenderer.invoke('folder:toggle', { ...payload, itemCenterX }),
 
   // 文件
   getIcon: (target, size) => ipcRenderer.invoke('file:icon', { path: target, size }),
   openPath: (target) => ipcRenderer.invoke('file:open', { path: target }),
   revealPath: (target) => ipcRenderer.invoke('file:reveal', { path: target }),
   listDir: (target) => ipcRenderer.invoke('file:list', { path: target }),
-  openExplorer: (target) => ipcRenderer.invoke('window:explorer', { path: target }),
+
+  // 文件夹弹窗（自研磨砂）
+  popupReady: () => ipcRenderer.invoke('popup:ready'),
+  popupPresent: () => ipcRenderer.invoke('popup:present'),
+  popupClose: () => ipcRenderer.invoke('popup:close'),
+  popupNavigate: (target) => ipcRenderer.invoke('popup:navigate', { path: target }),
+  // 主进程要收窗口时先通知渲染层播"收回"动画
+  onPopupClosing: (handler) => {
+    const listener = () => handler();
+    ipcRenderer.on('popup:closing', listener);
+    return () => ipcRenderer.removeListener('popup:closing', listener);
+  },
+  // 弹窗里把文件拖到筐外/Dock 的场景不需要；反向（往筐里加）走 basket:add
+  addPathsToBasket: (basketId, paths) => ipcRenderer.invoke('basket:add', { basketId, paths }),
 
   // 设置
   openSettings: () => ipcRenderer.invoke('window:settings'),
@@ -55,6 +78,9 @@ contextBridge.exposeInMainWorld('deskbasket', {
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   saveGeometry: (rect) => ipcRenderer.invoke('window:geometry', { rect }),
   startDrag: (offset) => ipcRenderer.send('window:drag-start', offset),
+
+  // 页面内右键菜单：交给主进程弹原生菜单，避免被小窗口裁掉
+  popupMenu: (items, x, y) => ipcRenderer.invoke('menu:popup', { items, x, y }),
 
   // 拖放：把 DataTransfer 里的文件转成本地路径
   pathsFromFiles: (files) =>

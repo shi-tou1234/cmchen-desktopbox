@@ -99,6 +99,51 @@ function revealedGeometry(screen, dockSize, edge = EDGE_BOTTOM, margin = 0, anch
   return { x, y: screen.y + margin, width: dockSize.width, height: dockSize.height };
 }
 
+// 多行布局：条目放不进一行时按行折返，保证全部可见。
+// 返回 { width, height, rows, perRow }，尺寸已含内边距与顶部余量
+// （顶部余量给放大后的图标向上生长用，靠上的行会被悬停图标盖住，这是 Nexus 同款行为）。
+const DOCK_CELL_GAP = 12;      // 单元间距（含图标间隙）
+const DOCK_ROW_PITCH = 16;     // 行距：图标尺寸 + 每行余量
+const DOCK_HEADROOM = 0.55;    // 顶部余量 = 图标尺寸 × 系数
+const DOCK_WIDTH_RATIO = 0.96; // 最大占屏宽
+
+function dockLayout(itemCount, iconSize, screenWidth, padding = 8) {
+  const count = Math.max(1, itemCount);
+  const cell = iconSize + DOCK_CELL_GAP;
+  const maxW = Math.max(240, Math.floor(screenWidth * DOCK_WIDTH_RATIO));
+  const perRow = Math.max(1, Math.floor((maxW - padding * 2) / cell));
+  const rows = Math.max(1, Math.ceil(count / perRow));
+  const inRow = Math.min(count, perRow);
+  const width = padding * 2 + inRow * cell;
+  const height =
+    Math.ceil(iconSize * DOCK_HEADROOM) + rows * (iconSize + DOCK_ROW_PITCH) + padding;
+  return { width, height, rows, perRow };
+}
+
+// 文件夹弹窗的位置：锚在 Dock 图标中心上方，左右不出屏，顶部至少留边。
+// dockBounds 为空时（Dock 不在）退化为工作区底部居中。
+function popupGeometry(area, dockBounds, anchorCenterX, popupSize, edgeGap = 8, dockGap = 10) {
+  if (!area || !popupSize) return null;
+  const centerX = dockBounds ? dockBounds.x + anchorCenterX : area.x + area.width / 2;
+  const dockTop = dockBounds ? dockBounds.y : area.y + area.height;
+  let x = Math.round(centerX - popupSize.width / 2);
+  x = Math.max(area.x + edgeGap, Math.min(x, area.x + area.width - popupSize.width - edgeGap));
+  let y = Math.round(dockTop - popupSize.height - dockGap);
+  if (y < area.y + edgeGap) y = area.y + edgeGap;
+  return { x, y, width: popupSize.width, height: popupSize.height };
+}
+
+// 鼠标是否落在 bounds（含 pad 余量）内——弹窗「离开即关」的判定基础
+function pointNearBounds(point, bounds, pad = 0) {
+  if (!bounds || !point) return false;
+  return (
+    point.x >= bounds.x - pad &&
+    point.x <= bounds.x + bounds.width + pad &&
+    point.y >= bounds.y - pad &&
+    point.y <= bounds.y + bounds.height + pad
+  );
+}
+
 function hiddenGeometry(screen, dockSize, edge = EDGE_BOTTOM, peek = 0) {
   const x = screen.x + Math.max(0, Math.floor((screen.width - dockSize.width) / 2));
   if (edge === EDGE_BOTTOM) {
@@ -166,11 +211,16 @@ module.exports = {
   ACTION_NONE,
   ACTION_SHOW,
   COLLECT_SUFFIXES,
+  DOCK_CELL_GAP,
+  DOCK_HEADROOM,
+  DOCK_ROW_PITCH,
+  DOCK_WIDTH_RATIO,
   EDGE_BOTTOM,
   HIDE_DELAY_MS,
   HOT_ZONE_THICKNESS,
   SHELL_WINDOW_CLASSES,
   addItem,
+  dockLayout,
   findIndex,
   foregroundBlocksDock,
   hiddenGeometry,
@@ -180,6 +230,8 @@ module.exports = {
   isShellWindow,
   monitorGeometry,
   moveItem,
+  pointNearBounds,
+  popupGeometry,
   removeItem,
   revealedGeometry,
   shouldHide,

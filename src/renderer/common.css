@@ -122,81 +122,10 @@ html, body {
 .cell.missing .name { text-decoration: line-through; }
 
 /* ---------------- Dock ---------------- */
+/* Dock 的样式在 dock.html 里内联：布局、余弦联动动画都由页面自己管理。 */
 
-.dock {
-  position: absolute;
-  inset: 0;
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  background: transparent;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 2px;
-  padding: 8px 6px;
-  overflow: visible;
-}
-
-.dock-item {
-  position: relative;
-  width: 56px;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 3px;
-  border-radius: 10px;
-  transition: transform 0.12s ease-out;
-  transform-origin: bottom center;
-}
-.dock-item:hover { background: rgba(255, 255, 255, 0.10); }
-
-.dock-item img {
-  width: 48px;
-  height: 48px;
-  object-fit: contain;
-  pointer-events: none;
-  -webkit-user-drag: none;
-  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
-}
-
-.dock-item .cap {
-  font-size: 11px;
-  line-height: 13px;
-  max-width: 54px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: 0;
-  transition: opacity 0.12s;
-}
-
-/* 悬停放大：Nexus 的做法，名称只在该项出现 */
-.dock:hover .dock-item { transform: scale(1.0); }
-.dock-item:hover { transform: scale(1.28) translateY(-6px); }
-.dock-item:hover .cap { opacity: 1; }
-
-/* 名称气泡：悬停时浮在图标上方 */
-.dock-item .tip {
-  position: absolute;
-  bottom: calc(100% + 2px);
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 4px 10px;
-  border-radius: 7px;
-  background: rgba(12, 14, 20, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  font-size: 12px;
-  white-space: nowrap;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s;
-}
-.dock-item:hover .tip { opacity: 1; }
+/* ---------------- 文件夹弹窗 ---------------- */
+/* 弹窗的磨砂材质、网格样式在 popup.html 里内联。 */
 
 /* ---------------- 浏览器窗口 ---------------- */
 
@@ -311,8 +240,7 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: #5b8def; }
 .footer .status-text { flex: 1 1 auto; font-size: 11px; color: #9a9ba4; }
 
 /* 拖入提示：拖到窗口上时给一圈高亮 */
-body.dragover .panel,
-body.dragover .dock {
+body.dragover .panel {
   border-color: rgba(140, 190, 255, 0.85);
   background: rgba(40, 70, 120, 0.22);
 }
