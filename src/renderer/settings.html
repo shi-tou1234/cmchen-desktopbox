@@ -37,11 +37,7 @@
           <select id="basketBehavior"></select>
         </div>
         <div class="row">
-          <label for="dockBehavior">Dock</label>
-          <select id="dockBehavior"></select>
-        </div>
-        <div class="row">
-          <span class="hint">普通窗口＝可拖动可缩放；固定于桌面＝不置顶、不可拖、不可缩放；浮动置顶＝浮在其他窗口上方</span>
+          <span class="hint">普通窗口＝可拖动可缩放；固定于桌面＝不置顶、不可拖、不可缩放。Dock 恒为固定于桌面，位置大小锁死。</span>
         </div>
       </div>
 
@@ -157,7 +153,7 @@
       }
       el('accent').value = settings.accent_mode;
       for (const [key, label] of Object.entries(BEHAVIOR_LABELS)) {
-        for (const id of ['basketBehavior', 'dockBehavior']) {
+        for (const id of ['basketBehavior']) {
           if (!el(id).querySelector(`option[value="${key}"]`)) {
             const option = document.createElement('option');
             option.value = key;
@@ -167,7 +163,6 @@
         }
       }
       el('basketBehavior').value = settings.basket_behavior;
-      el('dockBehavior').value = settings.dock_behavior;
       el('iconSize').value = settings.icon_size;
       el('dockEnabled').checked = settings.dock_enabled;
       el('dockAlways').checked = settings.dock_always_visible;
@@ -194,9 +189,6 @@
     });
     el('basketBehavior').addEventListener('change', (event) => {
       push({ basket_behavior: event.target.value }, '文件筐窗口行为已更新（窗口会重建）');
-    });
-    el('dockBehavior').addEventListener('change', (event) => {
-      push({ dock_behavior: event.target.value }, 'Dock 窗口行为已更新（窗口会重建）');
     });
     el('dockEnabled').addEventListener('change', (event) => {
       push({ dock_enabled: event.target.checked }, event.target.checked ? 'Dock 已显示' : 'Dock 已隐藏');

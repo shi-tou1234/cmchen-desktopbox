@@ -99,23 +99,24 @@ function createBehaviorWindow(behaviorName, options = {}) {
   const profile = behavior.WINDOW_BEHAVIOR_PROFILES[
     behavior.normalizeWindowBehavior(behaviorName, 'normal')
   ];
-  const win = new BrowserWindow(
-    baseOptions({
-      focusable: profile.focusable,
-      skipTaskbar: false,
-      resizable: profile.resizable,
-      movable: profile.draggable,
-      minimizable: profile.mode !== 'desktop',
-      maximizable: profile.mode !== 'desktop',
-      alwaysOnTop: profile.alwaysOnTop,
-      ...options
-    })
-  );
+  // 显式传入的选项优先于 profile：Dock 需要"常驻可见 + 锁死位置大小"这个组合，
+  // 它不是 token 三个 profile 里的任何一个，只能靠覆盖实现。
+  const resolved = {
+    focusable: profile.focusable,
+    skipTaskbar: false,
+    resizable: profile.resizable,
+    movable: profile.draggable,
+    minimizable: profile.mode !== 'desktop',
+    maximizable: profile.mode !== 'desktop',
+    alwaysOnTop: profile.alwaysOnTop,
+    ...options
+  };
+  const win = new BrowserWindow(baseOptions(resolved));
   if (typeof win.setAlwaysOnTop === 'function') {
-    win.setAlwaysOnTop(profile.alwaysOnTop, 'floating');
+    win.setAlwaysOnTop(Boolean(resolved.alwaysOnTop), 'floating');
   }
-  if (typeof win.setMovable === 'function') win.setMovable(profile.draggable);
-  if (typeof win.setResizable === 'function') win.setResizable(profile.resizable);
+  if (typeof win.setMovable === 'function') win.setMovable(Boolean(resolved.movable));
+  if (typeof win.setResizable === 'function') win.setResizable(Boolean(resolved.resizable));
   win.__behavior = profile.mode;
   win.setMenuBarVisibility?.(false);
   return win;

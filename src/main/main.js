@@ -226,11 +226,18 @@ function applyDockGeometry() {
 
 function createDockWindow() {
   const rect = dockTargetGeometry();
-  const win = winFactory.createBehaviorWindow(settings.dock_behavior, {
-    ...rect,
-    glass: winFactory.glassEnabled(settings),
-    title: `${APP_NAME} Dock`
-  });
+  // Dock：位置与大小锁死（固定于桌面）；常驻显示＝置顶可见，不会被别的窗口盖住
+  const win = winFactory.createBehaviorWindow(
+    settings.dock_always_visible ? 'floating' : 'normal',
+    {
+      ...rect,
+      movable: false,
+      resizable: false,
+      alwaysOnTop: Boolean(settings.dock_always_visible),
+      glass: winFactory.glassEnabled(settings),
+      title: `${APP_NAME} Dock`
+    }
+  );
   attachDiagnostics(win, 'dock');
   winFactory.loadPage(win, 'dock.html');
   win.once('ready-to-show', () => win.show());
@@ -543,11 +550,11 @@ function registerIpc() {
 
   ipcMain.handle('settings:update', (_event, { patch }) => {
     const before = settings.accent_mode;
-    const beforeBehaviors = `${settings.basket_behavior}|${settings.dock_behavior}`;
+    const beforeBehaviors = `${settings.basket_behavior}|${settings.dock_always_visible}`;
     settings = store.mergedSettings({ ...settings, ...(patch || {}) });
     persist();
     const behaviorsChanged =
-      beforeBehaviors !== `${settings.basket_behavior}|${settings.dock_behavior}`;
+      beforeBehaviors !== `${settings.basket_behavior}|${settings.dock_always_visible}`;
     if (before !== settings.accent_mode || behaviorsChanged) {
       // transparent / backgroundMaterial 在窗口创建时就锁定了，改模式必须重建窗口
       rebuildWindows();
@@ -593,6 +600,8 @@ function bootstrap() {
 
 const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) {
+  // 静默退出会让"程序没反应"变得无法排查，这里必须留一条日志
+  console.log('已有实例在运行（单实例锁被占用），本次启动退出');
   app.quit();
 } else {
   app.on('second-instance', () => {

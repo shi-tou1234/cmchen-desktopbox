@@ -54,9 +54,9 @@ test('默认配置：完全透明 ＋ Dock 常驻', () => {
   assert.strictEqual(store.DEFAULTS.dock_enabled, true);
 });
 
-test('默认窗口行为：文件筐＝普通窗口，Dock＝固定于桌面', () => {
+test('默认窗口行为：文件筐＝普通窗口；Dock 由常驻开关控制', () => {
   assert.strictEqual(store.DEFAULTS.basket_behavior, 'normal');
-  assert.strictEqual(store.DEFAULTS.dock_behavior, 'desktop');
+  assert.strictEqual(store.DEFAULTS.dock_always_visible, true);
 });
 
 test('窗口行为三个 profile 与 token 一致', () => {
