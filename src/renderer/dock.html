@@ -27,10 +27,12 @@
   .dock-item {
     position: relative;
     width: var(--icon);
-    height: var(--icon);
+    /* 图标 + 名字行；15px 与主进程 dockmodel.DOCK_CAPTION_H 对齐 */
+    height: calc(var(--icon) + 15px);
     display: flex;
-    align-items: flex-end;
-    justify-content: center;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
     border-radius: 10px;
     transform-origin: bottom center;   /* 放大向上生长（Nexus 同款） */
     will-change: transform;
@@ -45,11 +47,29 @@
     filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
   }
 
+  /* 文件夹筐的名字：小小一行贴在图标下面。别的条目这一格留空（保持图标对齐） */
+  .dock-caption {
+    height: 15px;
+    max-width: calc(var(--icon) + 12px);
+    font-size: 10px;
+    line-height: 15px;
+    color: #eef0f6;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+  }
+  .dock-caption.flash { color: #9fd0ff; font-weight: 600; }
+
   /* 悬停不给底色：只在 ::after 时代的那圈灰被去掉了（领导说丑），
      反馈只靠放大动画 + 图标自带的投影。 */
 
   .dock-item.dragging { opacity: 0.4; }
   body.dragover { outline: none; }
+
+  /* 拖文件悬停在文件夹筐上：给一圈高亮，表示"松手会放进这个筐" */
+  .dock-item.droptarget { outline: 2px solid rgba(140, 190, 255, 0.85); outline-offset: 2px; }
 
   /* 被移除/删掉的条目：留在原位缩小淡出，别"啪"一下就没了 */
   .dock-item.leaving {
@@ -165,6 +185,13 @@
       }
       item.append(img);
 
+      // 图标下面那行小字：只有文件夹筐写名字（其余条目留空，位置保持对齐）
+      const caption = document.createElement('div');
+      caption.className = 'dock-caption';
+      caption.textContent = entry.type === 'basket' ? displayName(entry) : '';
+      item.append(caption);
+      node.caption = caption;
+
       // 不画悬停名称气泡（领导要求）：视觉名称只留给无障碍用
       item.setAttribute('aria-label', displayName(entry));
 
@@ -172,6 +199,7 @@
       item.addEventListener('pointerdown', (event) => {
         if (event.button !== 0) return;
         node.pressTarget = 1;
+        ensureTick();
       });
       const releasePress = () => {
         node.pressTarget = 0;
@@ -183,6 +211,7 @@
 
       item.addEventListener('click', () => {
         node.hopAt = performance.now();
+        ensureTick();
         const rect = item.getBoundingClientRect();
         const centerX = rect.left + rect.width / 2;
         if (entry.type === 'basket') {
@@ -363,6 +392,7 @@
         requestAnimationFrame(() => ghost.classList.add('gone'));
         setTimeout(() => ghost.remove(), 260);
       }
+      ensureTick();
     }
 
     // 测量每个条目的中心点（动画联动按中心距离衰减）
@@ -414,6 +444,7 @@
     dockEl.addEventListener('mousemove', (event) => {
       const base = dockEl.getBoundingClientRect();
       pointer = { x: event.clientX - base.left, y: event.clientY - base.top };
+      ensureTick();
     });
     dockEl.addEventListener('mouseleave', () => {
       pointer = null;
@@ -435,8 +466,11 @@
     const ENTER_DECAY = 0.84;   // 进场每帧衰减：约 180ms 落位
     const SLIDE_DECAY = 0.80;   // 位移每帧衰减：约 200ms 滑到位
 
+    let ticking = false;        // 动画循环是否在跑（静止时会停掉，见 tick 末尾）
+
     function tick() {
       const now = performance.now();
+      let busy = false;
       for (const node of nodes) {
         // 悬停联动
         let target = 0;
@@ -482,6 +516,7 @@
           node.el.style.opacity = '';
           continue;
         }
+        busy = true;
         const scale =
           (1 + boostScale * node.influence) *
           (1 - PRESS_SCALE * node.press + HOP_SCALE * hop) *
@@ -491,22 +526,75 @@
           `translate(${node.dx.toFixed(2)}px, ${(-lift + node.dy).toFixed(2)}px) scale(${scale.toFixed(3)})`;
         node.el.style.opacity = node.enter ? (1 - 0.8 * node.enter).toFixed(3) : '';
       }
+      // 全部静止且鼠标不在 Dock 上就停掉循环，等下次交互再唤醒。
+      // 常驻 60fps 空转会把合成器一直占着，别的动画（弹窗、菜单）容易被挤得一顿一顿。
+      if (busy || pointer) {
+        requestAnimationFrame(tick);
+      } else {
+        ticking = false;
+      }
+    }
+
+    function ensureTick() {
+      if (ticking) return;
+      ticking = true;
       requestAnimationFrame(tick);
     }
-    requestAnimationFrame(tick);
+
+    ensureTick();
 
     // ---------------------------------------------------------------- 拖入
+    //
+    // 拖到**文件夹筐**图标上 = 放进那个筐；拖到 Dock 其它地方 = 加到 Dock 上。
+    // （领导问过"新建文件夹后怎么往里面添加东西"，这是最顺手的那个入口。）
+
+    function basketUnderPointer(target) {
+      const el = target && target.closest ? target.closest('.dock-item') : null;
+      if (!el) return null;
+      return nodes.find((node) => node.el === el && node.entry.type === 'basket') || null;
+    }
+
+    function markDropTarget(basket) {
+      for (const node of nodes) node.el.classList.toggle('droptarget', node === basket);
+    }
+
+    // 往筐里放完东西后，在名字那一行闪一下「＋N」当作回执
+    function flashCaption(node, text) {
+      if (!node || !node.caption) return;
+      const cap = node.caption;
+      cap.textContent = text;
+      cap.classList.add('flash');
+      clearTimeout(node.flashTimer);
+      node.flashTimer = setTimeout(() => {
+        cap.textContent = displayName(node.entry);
+        cap.classList.remove('flash');
+      }, 1200);
+    }
 
     document.addEventListener('dragover', (event) => {
       if (event.dataTransfer.types.includes('text/deskbasket-index')) return;
       event.preventDefault();
+      markDropTarget(basketUnderPointer(event.target));
+    });
+    document.addEventListener('dragleave', (event) => {
+      // 只有真的离开窗口才取消高亮（在条目之间移动也会触发 dragleave）
+      if (!event.relatedTarget) markDropTarget(null);
     });
     document.addEventListener('drop', async (event) => {
       if (event.dataTransfer.types.includes('text/deskbasket-index')) return;
       event.preventDefault();
+      const basket = basketUnderPointer(event.target);
+      markDropTarget(null);
       const paths = api.pathsFromFiles(event.dataTransfer.files);
       if (!paths.length) return;
-      await api.addDockPaths(paths);
+      if (!basket) {
+        await api.addDockPaths(paths);
+        return;
+      }
+      const result = await api.addPathsToBasket(basket.entry.id, paths);
+      if (!result) return;
+      flashCaption(basket, '＋' + result.added);
+      basket.hopAt = performance.now();
     });
 
     // ---------------------------------------------------------------- 状态同步

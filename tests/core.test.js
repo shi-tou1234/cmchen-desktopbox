@@ -307,13 +307,25 @@ test('多行布局：单行时不加宽，放不下自动折行', () => {
   const multi = dockmodel.dockLayout(45, 48, screen.width, 8);
   assert.strictEqual(multi.rows, 2);
   assert.ok(multi.width <= 1920 * dockmodel.DOCK_WIDTH_RATIO + 1);
-  // 高度必须给两行留足空间，且顶部有余量（放大动画向上生长）
+  // 高度必须给两行留足空间（含图标下面那行名字），且顶部有余量（放大动画向上生长）
   assert.strictEqual(
     multi.height,
     Math.ceil(48 * dockmodel.DOCK_HEADROOM) +
-      2 * (48 + dockmodel.DOCK_ROW_PITCH) +
+      2 * (48 + dockmodel.DOCK_CAPTION_H + dockmodel.DOCK_ROW_PITCH) +
       8
   );
+});
+
+test('布局：图标下面留了一行名字的高度（只有文件夹筐会写名字）', () => {
+  const layout = dockmodel.dockLayout(3, 48, 1920, 8);
+  assert.strictEqual(
+    layout.height,
+    Math.ceil(48 * dockmodel.DOCK_HEADROOM) +
+      (48 + dockmodel.DOCK_CAPTION_H + dockmodel.DOCK_ROW_PITCH) +
+      8
+  );
+  // 名字那一行确实占地方：比不留给它的时候高 15
+  assert.ok(layout.height > Math.ceil(48 * dockmodel.DOCK_HEADROOM) + (48 + 16) + 8);
 });
 
 test('多行布局：图标大过半屏也保证至少一项一行', () => {

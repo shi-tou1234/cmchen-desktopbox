@@ -23,12 +23,18 @@
     pointer-events: none;
   }
 
+  /* 有文件拖到弹窗上：给一圈高亮，表示"松手会加进这个筐" */
+  body.dragover .popup-edge { border-color: rgba(140, 190, 255, 0.9); }
+
   /* 打开/收起动画：整块内容从图标位置"抽"出来再缩回去（macOS 的文件夹堆栈那种感觉）。
      变换原点落在 Dock 图标中心（--origin-x 由主进程按锚点算好），底边贴齐。 */
   .popup-frame {
     position: absolute;
     inset: 0;
     transform-origin: var(--origin-x, 50%) 100%;
+    /* 交给合成器单独一层：缩放/淡入就只是图层变换，不会每帧重画整块内容
+       （弹窗是大窗口，重画很容易掉帧，看着就是"一卡一卡"） */
+    will-change: transform, opacity;
     /* 打开：末尾带一点回弹，像真的从图标里"抽"出来 */
     transition:
       transform 260ms cubic-bezier(0.34, 1.28, 0.5, 1),
@@ -122,6 +128,7 @@
         <button class="nav-btn wide" id="btnHome" title="回到文件夹">⌂</button>
         <button class="nav-btn" id="btnUp" title="上一级">↑</button>
         <span class="popup-title" id="title"></span>
+        <button class="nav-btn wide" id="btnAdd" title="往这个筐里添加文件（也可以直接把文件拖进来）">＋</button>
         <button class="nav-btn" id="btnClose" title="关闭">✕</button>
       </div>
       <div class="popup-grid" id="grid"></div>
@@ -167,14 +174,19 @@
       cell.title = entry.path;
 
       const img = document.createElement('img');
-      api
-        .getIcon(entry.path, iconSize)
-        .then((dataUrl) => {
-          img.src = dataUrl || fallbackIcon();
-        })
-        .catch(() => {
-          img.src = fallbackIcon();
-        });
+      if (entry.iconUrl) {
+        // 主进程已经把图标算好塞进载荷了：直接画，不用再等一次 IPC 和图片解码
+        img.src = entry.iconUrl;
+      } else {
+        // 载荷里没有（算图标超时了）：退回异步取，先用兜底图标垫着
+        img.src = fallbackIcon();
+        api
+          .getIcon(entry.path, iconSize)
+          .then((dataUrl) => {
+            if (dataUrl) img.src = dataUrl;
+          })
+          .catch(() => {});
+      }
 
       const name = document.createElement('div');
       name.className = 'name';
@@ -246,6 +258,7 @@
       el('btnHome').textContent = hasHome ? '⌂ ' + homeView.name : '';
       el('btnUp').disabled = !(view.kind === 'dir' && view.parent);
       el('btnUp').style.display = view.kind === 'dir' ? '' : 'none';
+      el('btnAdd').style.display = view.kind === 'basket' ? '' : 'none';
 
       if (view.error) {
         setStatus(view.error, true);
@@ -254,7 +267,9 @@
       }
       el('emptyTip').style.display = entries.length ? 'none' : '';
       el('emptyTip').textContent =
-        view.kind === 'basket' ? '这个筐是空的：把桌面文件拖到 Dock 的文件夹上就能登记' : '这个文件夹是空的';
+        view.kind === 'basket'
+          ? '这个筐还是空的：点上面的「＋」添加文件，或者把文件直接拖进来 / 拖到 Dock 的文件夹图标上'
+          : '这个文件夹是空的';
       setStatus(entries.length ? entries.length + ' 项' : '');
     }
 
@@ -288,9 +303,42 @@
         render();
       }
     });
+    // 「＋」：往这个筐里添加文件（可多选）。文件夹可以从设置面板加，或者直接拖进来
+    el('btnAdd').addEventListener('click', async () => {
+      if (!view || view.kind !== 'basket') return;
+      const result = await api.pickBasketFiles(view.basketId, 'files');
+      if (!result) return;
+      if (!result.added) {
+        setStatus('没有新增（已在这个筐里的会跳过）');
+        return;
+      }
+      await reloadHome();
+      setStatus('已加入 ' + result.added + ' 项，筐里共 ' + result.total + ' 项');
+    });
     el('btnClose').addEventListener('click', () => api.popupClose());
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') api.popupClose();
+    });
+
+    // 把文件直接拖进弹窗 = 加到这个筐里（拖动时给一圈高亮）
+    document.addEventListener('dragover', (event) => {
+      if (!view || view.kind !== 'basket') return;
+      event.preventDefault();
+      document.body.classList.add('dragover');
+    });
+    document.addEventListener('dragleave', (event) => {
+      // 拖到窗口外才取消高亮（子元素之间移动也会触发 dragleave）
+      if (event.relatedTarget === null) document.body.classList.remove('dragover');
+    });
+    document.addEventListener('drop', async (event) => {
+      if (!view || view.kind !== 'basket') return;
+      event.preventDefault();
+      document.body.classList.remove('dragover');
+      const paths = api.pathsFromFiles(event.dataTransfer.files);
+      if (!paths.length) return;
+      const result = await api.addPaths(view.basketId, paths);
+      await reloadHome();
+      if (result) setStatus('已加入 ' + result.added + ' 项，筐里共 ' + result.total + ' 项');
     });
 
     // 点击弹窗本身保持主进程的聚焦状态（失焦自动关的定时器会被取消）
@@ -319,8 +367,11 @@
       if (api.onPopupClosing) api.onPopupClosing(() => document.body.classList.add('collapsed'));
       // 数据就绪后显示窗口（showInactive：不抢用户当前应用的焦点）
       api.popupPresent();
-      // 窗口显示后再展开，否则第一帧就是终态、动画看不出来
-      setTimeout(() => document.body.classList.remove('collapsed'), 30);
+      // 等这一帧真的画完再展开：图标已在载荷里、没有待解码的图片和待排的版，
+      // 动画就不会被挤得一顿一顿（以前是固定 30ms，常常赶在图片解码中间）
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => document.body.classList.remove('collapsed'));
+      });
     })();
   </script>
 </body>

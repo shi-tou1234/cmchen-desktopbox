@@ -107,6 +107,9 @@ const DOCK_CELL_GAP = 12;      // 单元间距（含图标间隙）
 const DOCK_ROW_PITCH = 16;     // 行距：图标尺寸 + 每行余量
 const DOCK_HEADROOM = 0.55;    // 顶部余量 = 图标尺寸 × 系数
 const DOCK_WIDTH_RATIO = 0.96; // 最大占屏宽
+// 图标下面那行小名字的高度（只有文件夹筐会写名字）。所有条目都留出这一格，
+// 否则带名字的条目会把它的图标顶高、和邻居对不齐。dock.html 里的 CSS 必须与之对齐。
+const DOCK_CAPTION_H = 15;
 
 function dockLayout(itemCount, iconSize, screenWidth, padding = 8) {
   const count = Math.max(1, itemCount);
@@ -117,7 +120,9 @@ function dockLayout(itemCount, iconSize, screenWidth, padding = 8) {
   const inRow = Math.min(count, perRow);
   const width = padding * 2 + inRow * cell;
   const height =
-    Math.ceil(iconSize * DOCK_HEADROOM) + rows * (iconSize + DOCK_ROW_PITCH) + padding;
+    Math.ceil(iconSize * DOCK_HEADROOM) +
+    rows * (iconSize + DOCK_CAPTION_H + DOCK_ROW_PITCH) +
+    padding;
   return { width, height, rows, perRow };
 }
 
@@ -289,6 +294,7 @@ module.exports = {
   ACTION_NONE,
   ACTION_SHOW,
   COLLECT_SUFFIXES,
+  DOCK_CAPTION_H,
   DOCK_CELL_GAP,
   DOCK_HEADROOM,
   DOCK_ROW_PITCH,

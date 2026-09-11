@@ -105,6 +105,8 @@
         </div>
         <div class="row" style="justify-content:flex-start;gap:6px;flex-wrap:wrap">
           <button class="btn" id="btnVisible">在 Dock 上显示 / 隐藏</button>
+          <button class="btn" id="btnAddFiles">添加文件…</button>
+          <button class="btn" id="btnAddDirs">添加文件夹…</button>
           <button class="btn" id="btnPrune">清理失效项</button>
           <button class="btn" id="btnNew">新建文件夹</button>
           <button class="btn" id="btnDelete">删除</button>
@@ -326,6 +328,21 @@
       await refresh();
       flash(merged.visible ? '这个文件夹已显示在 Dock 上' : '这个文件夹已从 Dock 隐藏');
     });
+
+    el('btnAddFiles').addEventListener('click', () => addToBasket('files'));
+    el('btnAddDirs').addEventListener('click', () => addToBasket('dirs'));
+
+    async function addToBasket(mode) {
+      if (!selectedBasketId) return;
+      const result = await api.pickBasketFiles(selectedBasketId, mode);
+      if (!result) return;
+      await refresh();
+      flash(
+        result.added
+          ? '已加入 ' + result.added + ' 项，共 ' + result.total + ' 项（磁盘文件未动）'
+          : '没有新增（已在这个筐里的会跳过）'
+      );
+    }
 
     el('btnPrune').addEventListener('click', async () => {
       const result = await api.pruneMissing(selectedBasketId);

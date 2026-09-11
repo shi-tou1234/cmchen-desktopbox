@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('deskbasket', {
   // 筐
   basketGet: (basketId) => ipcRenderer.invoke('basket:get', { basketId }),
   addPaths: (basketId, paths) => ipcRenderer.invoke('basket:add', { basketId, paths }),
+  pickBasketFiles: (basketId, mode) => ipcRenderer.invoke('basket:pick-add', { basketId, mode }),
   removeItem: (basketId, itemPath) => ipcRenderer.invoke('basket:remove', { basketId, itemPath }),
   updateBasket: (basket) => ipcRenderer.invoke('basket:update', { basket }),
   pruneMissing: (basketId) => ipcRenderer.invoke('basket:prune', { basketId }),

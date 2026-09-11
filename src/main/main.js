@@ -538,6 +538,49 @@ function prewarmDockIcons() {
   if (jobs.length) Promise.all(jobs).catch(() => {});
 }
 
+// 预热所有筐里条目的图标：这样第一次打开某个筐的弹窗时图标已经在缓存里，
+// 窗口一出来就是齐的（不然图标会在展开动画播到一半时才开始解码，看着一顿一顿）。
+// 与 Dock 那批一样一次性批量发起，命中缓存时等于空操作。
+function prewarmBasketIcons() {
+  const size = settings.icon_size;
+  const jobs = [];
+  const seen = new Set();
+  for (const basket of settings.baskets) {
+    for (const item of basket.items || []) {
+      const key = `${size}:${store.pathKey(item)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      jobs.push(shellIcons.iconDataUrl(item, size));
+    }
+  }
+  if (jobs.length) Promise.all(jobs).catch(() => {});
+}
+
+// 给弹窗载荷补上图标（dataURL）：渲染层拿到就直接塞进 img，不再逐格 IPC。
+// 超过 POPUP_ICON_WAIT_MS 就先开窗，剩下的由渲染层自己补（走同一条缓存链路）。
+const POPUP_ICON_WAIT_MS = 400;
+
+async function withEntryIcons(payload) {
+  const entries = (payload && payload.entries) || [];
+  if (!entries.length) return payload;
+  const size = payload.iconSize || settings.icon_size;
+  const jobs = entries.map((entry) =>
+    shellIcons.iconDataUrl(entry.path, size).then(
+      (url) => [entry.path, url || ''],
+      () => [entry.path, '']
+    )
+  );
+  const icons = await Promise.race([
+    Promise.all(jobs).then((pairs) => new Map(pairs)),
+    new Promise((resolve) => setTimeout(() => resolve(null), POPUP_ICON_WAIT_MS))
+  ]);
+  if (!icons) return payload;
+  return {
+    ...payload,
+    entries: entries.map((entry) => ({ ...entry, iconUrl: icons.get(entry.path) || '' }))
+  };
+}
+
 function syncDock() {
   if (!settings.dock_enabled) {
     if (dockWindow && !dockWindow.isDestroyed()) {
@@ -667,10 +710,12 @@ function startPopupAwayWatch() {
     const point = screen.getCursorScreenPoint();
     const popupBounds = popupWindow.getBounds();
     const dockBounds = dockWindow && !dockWindow.isDestroyed() ? dockWindow.getBounds() : null;
-    // Dock 向下多让一点（图标放大动画向上长，下方余量别误判离开）
+    // Dock 四周多让一点：上方给图标的放大动画，下方把"Dock 与屏幕底边之间的那条缝"也包进来
+    // （Dock 抬起来之后鼠标从底边往上移到图标要经过那条缝，不能算离开）
+    const dockPad = 16 + Math.max(0, settings.dock_bottom_gap || 0);
     const near =
       dockmodel.pointNearBounds(point, popupBounds, 16) ||
-      dockmodel.pointNearBounds(point, dockBounds, 16);
+      dockmodel.pointNearBounds(point, dockBounds, dockPad);
     if (near) {
       awayMs = 0;
       return;
@@ -745,7 +790,8 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
   win.on('focus', () => {
     if (popupWindow === win) cancelPopupBlurClose();
   });
-  startPopupAwayWatch();
+  // 「鼠标离开就关」的轮询放到窗口真的显示出来之后（popup:present）再开：
+  // 弹窗要等图标算好才开始显示，趁它还没露面就计时会让它刚出来就被收掉。
   winFactory.loadPage(win, 'popup.html', {
     kind,
     ...(kind === 'basket' ? { id: payload.id } : { path: payload.path })
@@ -1013,15 +1059,54 @@ function registerIpc() {
 
   ipcMain.handle('basket:get', (_event, { basketId } = {}) => basketView(findBasket(basketId)));
 
-  ipcMain.handle('basket:add', (_event, { basketId, paths }) => {
+  // 往筐里登记文件。三条入口共用：拖到 Dock 的文件夹图标上、拖进文件夹弹窗、
+  // 弹窗/设置面板里的「添加文件…」。返回 { added, total } 让渲染层能给出"＋N"的回执。
+  ipcMain.handle('basket:add', (event, { basketId, paths } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return null;
     let next = basket;
+    let added = 0;
     for (const item of paths || []) {
       const result = basketModel.addItem(next, item);
-      if (result.result === 'added') next = result.basket;
+      if (result.result === 'added') {
+        next = result.basket;
+        added += 1;
+      }
     }
-    return replaceBasket(next);
+    const saved = replaceBasket(next);
+    console.log(`[basket] 加入 ${added} 条（来源 ${pageTag(event)}）→ 现有 ${saved.items.length} 条`);
+    syncDock();
+    prewarmBasketIcons();
+    return { added, total: saved.items.length };
+  });
+
+  // 「添加文件…」/「添加文件夹…」：选完直接登记进筐。
+  // 注意 Windows 上 openFile 与 openDirectory **不能同时传**——同时传时对话框只剩选文件夹
+  // （标签都变成「文件夹:」），那就没法加文件了。所以分成两个入口。
+  ipcMain.handle('basket:pick-add', async (_event, { basketId, mode } = {}) => {
+    const basket = findBasket(basketId);
+    if (!basket) return null;
+    const wantsDirs = mode === 'dirs';
+    const picked = await dialog.showOpenDialog({
+      title: (wantsDirs ? '往「' : '把文件加进「') + basket.name + '」',
+      buttonLabel: '添加',
+      properties: wantsDirs ? ['openDirectory', 'multiSelections'] : ['openFile', 'multiSelections']
+    });
+    if (picked.canceled || !picked.filePaths.length) return { added: 0, total: basket.items.length };
+    let next = basket;
+    let added = 0;
+    for (const item of picked.filePaths) {
+      const result = basketModel.addItem(next, item);
+      if (result.result === 'added') {
+        next = result.basket;
+        added += 1;
+      }
+    }
+    const saved = replaceBasket(next);
+    console.log(`[basket] 从对话框加入 ${added} 条（${wantsDirs ? '文件夹' : '文件'}）→ 现有 ${saved.items.length} 条`);
+    syncDock();
+    prewarmBasketIcons();
+    return { added, total: saved.items.length };
   });
 
   ipcMain.handle('basket:remove', (_event, { basketId, itemPath }) => {
@@ -1198,10 +1283,10 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle('popup:ready', (event) => {
+  ipcMain.handle('popup:ready', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win !== popupWindow || !popupPayload) return null;
-    return popupPayload;
+    return withEntryIcons(popupPayload);
   });
 
   ipcMain.handle('popup:present', (event) => {
@@ -1210,6 +1295,7 @@ function registerIpc() {
     if (win === popupWindow && !win.isDestroyed()) {
       fadeWindow(win, 0, 1);
       win.showInactive();
+      startPopupAwayWatch();
     }
     return true;
   });
@@ -1220,18 +1306,19 @@ function registerIpc() {
   });
 
   // 弹窗内导航：进入子目录 / 返回上级。窗口不动，磨砂背景也不变。
-  ipcMain.handle('popup:navigate', (event, { path: target }) => {
+  ipcMain.handle('popup:navigate', async (event, { path: target }) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win !== popupWindow || !target) return null;
     const listing = filebrowse.listEntries(target);
-    return {
+    return withEntryIcons({
       kind: 'dir',
       name: path.basename(target) || target,
       path: target,
       parent: filebrowse.parentOf(target),
       entries: listing.entries,
-      error: listing.error
-    };
+      error: listing.error,
+      iconSize: settings.icon_size
+    });
   });
 
   ipcMain.handle('file:icon', (_event, { path: target, size }) => iconFor(target, size || 48));
@@ -1367,6 +1454,8 @@ function bootstrap() {
   syncDock();
   installTray();
   startDockAutoHide();
+  // 后台把筐里条目的图标热进缓存：启动后第一次点开文件夹弹窗不该等图标
+  prewarmBasketIcons();
   if (settings.autostart) autostart.sync(true);
   if (wantsSettingsWindow()) openSettings();
 }
