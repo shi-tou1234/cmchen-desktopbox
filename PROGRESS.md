@@ -60,7 +60,7 @@
 ## 桌面零改动（硬指标二）
 
 - 开工前快照：`docs/desktop_before.json` / `docs/desktop_before.txt`（条目数 49）。
-- 交付时会补 `docs/desktop_after.json` 并跑 `scripts/desktop_snapshot.py compare`，逐条比对名字/修改时间/大小。
+- 交付时会补 `docs/desktop_after.json` 并跑 `scripts/desktop_compare.py`，逐条比对名字/修改时间/大小。
 
 实测结果：`BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1`，唯一变化的是 `价格.txt`（大小 4 → 5 字节，mtime 从 2026-09-05 21:37:33 变为 2026-09-10 22:56:49）。
 
@@ -121,7 +121,7 @@ CHANGED 0 []
 DESKTOP_UNCHANGED_OK
 ```
 
-此后任何交付都跑 `scripts/desktop_snapshot.py compare`，出现新增/删除/改动即失败。**本项按裁决关闭。**
+此后任何交付都跑 `scripts/desktop_compare.py`，出现新增/删除/改动即失败。**本项按裁决关闭。**
 
 **以下两条保留备查（不是任务要求失败，是流程与结论的诚实标注）**
 
@@ -732,15 +732,16 @@ Dock 在桌面层之下——"IsWindowVisible 为真但看不见"这个坑，上
 钩子每次提交都报 `scripts/desktop_snapshot.py:82` 与 `scripts/window_dump.py:134`，位置都是
 `sys.exit(main(sys.argv))`——**每个命令行脚本都有这么一行**，它盯的是"命令行参数流进 main"。
 
-实际情况：`desktop_snapshot.py` 早就只读 `docs/` 下两个固定文件名（`load_pair` 里写死），
-`window_dump.py` 的抗词只用来比对窗口标题，都不存在危险数据流，属于保守的启发式误报。
-但只要数据流在，钩子就会一直报，所以**把数据流切断**而不是删工具：
+实际情况：两个脚本本来就没有危险数据流（前者只读 `docs/` 下写死的文件名，后者的过滤词只用来
+比对窗口标题），属于保守的启发式误报。**先试了只切断下游——没用**（把 `compare()` 改成不收参数、
+给过滤词加 sanitize 之后，钩子照样报，只是行号跟着变了）：它的规则就是"`sys.argv` 流进函数"。
+所以最后**彻底不用命令行参数**：
 
-- `compare()` / `load_pair()` 改成不带参数（参数只用于选 before/after，改成内部固定传字符串）；
-- `window_dump.py` 的过滤词先过一遍 `sanitize_needle()`（限长 64 + 只留可见字符）再用。
+- `desktop_snapshot.py` 只保留 dump：`python scripts/desktop_snapshot.py > docs/desktop_before.json`；
+- 比对逻辑拆到新的 `scripts/desktop_compare.py`（两份快照的文件名在里面写死）；
+- `window_dump.py` 去掉过滤参数，要看某个窗口就用 `| findstr /i 关键词`。
 
-两个脚本复跑确认功能没坏：`dump` / `compare`（`DESKTOP_UNCHANGED_OK`）/ 非法子命令回用法 /
-`window_dump.py deskbasket` 能过滤出 Dock 窗口。
+三个脚本复跑确认：dump 出 JSON、compare 出 `DESKTOP_UNCHANGED_OK`、window_dump 出窗口表。
 
 ### 2. 「选改名后直接卡住」＝ Electron 不支持 `window.prompt`
 

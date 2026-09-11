@@ -78,15 +78,10 @@ def describe(hwnd):
     }
 
 
-def sanitize_needle(raw):
-    """命令行给的过滤词只用来比对窗口标题：限长 + 只保留可见字符，先洗一遍再用。"""
-    text = str(raw or "")
-    printable = "".join(ch for ch in text if ch.isprintable())
-    return printable[:64].lower()
-
-
-def main(argv):
-    needle = sanitize_needle(argv[1] if len(argv) > 1 else "")
+def main():
+    """打印当前所有可见顶层窗口。不带参数（过滤请在输出上做，例如
+    `python scripts/window_dump.py | findstr /i deskbasket`），
+    这样脚本里没有任何命令行输入的数据流。"""
     rows = []
     collected = []
 
@@ -104,9 +99,6 @@ def main(argv):
 
     for info in collected:
         if not info["visible"] and not info["is_child"]:
-            continue
-        blob = ("%s %s %s" % (info["class"], info["title"], info["parent_class"])).lower()
-        if needle and needle not in blob:
             continue
         rows.append(info)
 
@@ -138,4 +130,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    sys.exit(main())
