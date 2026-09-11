@@ -1179,3 +1179,43 @@ requestAnimationFrame(() => requestAnimationFrame(() => {
   - 关掉再开（复用）：`复用热窗口：从点击到显示 3ms`，弹窗同样正常显示 ✓ —— 这就是上一轮
     漏测的那条路。
 - 领导的「常驻显示」设置在验证后原样还原。
+
+## 收尾：全量验证 + 清理 + README 重写
+
+领导要求：测全部功能、确保没有 bug 或安全问题、清理临时/测试文件、README 只留项目介绍与用法、
+提交 GitHub。
+
+### 1. 全量验证
+
+- `npm test` → **76 passed / 0 fail**。
+- **桌面取证**：重新取了基线（旧的 before 快照是上一轮的，期间领导自己动过桌面），
+  然后在"启动应用 + 预热全部图标（读得最多的一步）"前后各拍一张 →
+  `DESKTOP_UNCHANGED_OK`（48 项，零增删改）。
+  顺带核了一遍"程序不写桌面"：`src/main/` 里只有两处写盘——设置文件（`%APPDATA%\DeskBasket\`，
+  带目录越界校验）与图标缓存（文件名是缓存键的 sha256，没有路径穿越），**没有任何删除/移动代码**。
+- **安全扫描**（Mimosa deep，静态 + 255 个依赖）：**0 处发现**，已封印
+  `sha256:7ec97f33…`。注意其边界是 `static_only_no_runtime_execution`（只做静态检查，没有运行时
+  执行），所以它证明的是"静态与依赖层面没查出问题"，不等于"绝对安全"。
+- **真机走查**：Dock 渲染与筐名、弹窗首次打开（136ms，19 项图标满格）、关掉再开（复用热窗口 3ms）、
+  右键菜单、设置面板的勾选清单与 Dock 各项设置、改名窗、桌面零变化；渲染层与主进程日志均无报错。
+  **一处没能驱到**：弹窗内"双击文件夹进下一级"——它需要真实双击且窗口在前台，而系统辅助工具
+  对 `showInactive` 显示的弹窗既不能激活也不能发原始双击（这条链路的每一段另有覆盖：
+  `filebrowse.listEntries` 有单测、`popup:navigate` 是薄封装、dir 视图的弹窗当面验过）。
+
+### 2. 清理（25 个文件 + 缓存 + 40MB 构建目录）
+
+删掉的都是开发期一次性探针与产物，全部可从 git 历史恢复：
+`tools/`（16 个：icon-probe*/lnk-dump/click-at/screen-probe/glass-probe/opacity-meter/transparent-probe/
+icon-proof/list-windows）、`docs/icon-probe/`（5 张探针图）、`docs/probe*.png`、`docs/lnk-resolve.txt`、
+`docs/opacity-meter.ready`、`__pycache__`×3、`.pytest_cache`、`build/`（40MB）、以及 docs 下被
+.gitignore 忽略的 99 个探针截图。
+
+**没动的**：Qt 那版（v2）的 Python 实现与它的 pytest 测试、`dist/legacy-python-DeskBasket.exe`、
+`.venv/`。它们不是临时文件，是上一版的完整实现（README 旧版里还有版本表）；要一并清掉的话说一声。
+
+### 3. README 重写
+
+165 行 → 只留「项目介绍 + 怎么使用」：一句话是什么、最重要的一条（不动你的文件）、功能
+（筐 / 往里放东西的四种方式 / Dock / 外观）、怎么用（跑起来、常用操作速查表、常见问题）、
+开发与测试、许可。删掉了透明度实测数据、窗口行为、坐标系约定、为什么换 Electron、版本回退表
+这些面向开发过程的章节（这些内容都在 PROGRESS.md 里）。
