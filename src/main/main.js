@@ -32,6 +32,7 @@ const dockmodel = require('./dockmodel');
 const filebrowse = require('./filebrowse');
 const shellIcons = require('./shellIcons');
 const specials = require('./specials');
+const windowLayer = require('./windowLayer');
 const winFactory = require('./windows');
 const autostart = require('./autostart');
 
@@ -430,6 +431,30 @@ function startDockAutoHide() {
   dockWatchTimer = setInterval(tickDockAutoHide, DOCK_WATCH_MS);
 }
 
+// 「常驻显示」＝放到桌面层：可见、但不压在其他程序上面（见 windowLayer）。
+// 「自动收起」＝置顶，这样滑出来时盖得住同样贴着底边的任务栏。
+function applyDockLayerMode() {
+  if (!dockWindow || dockWindow.isDestroyed()) return;
+  const topmost = Boolean(settings.dock_auto_hide);
+  try {
+    dockWindow.setAlwaysOnTop(topmost, 'floating');
+  } catch (_) {
+    /* 个别平台没有这个能力：忽略 */
+  }
+  if (!topmost) placeDockOnDesktopLayer(dockWindow);
+}
+
+function placeDockOnDesktopLayer(win) {
+  windowLayer
+    .placeOnDesktopLayer(win)
+    .then((result) => {
+      if (win.isDestroyed()) return;
+      // 结果形如 'ABOVE_DESKTOP steps=...'；不是到位就把轨迹打出来，便于排查
+      console.log(`[dock] 桌面层放置：${result || '（没做成）'}`);
+    })
+    .catch(() => {});
+}
+
 function createDockWindow() {
   // 自动收起模式下直接建在屏幕外；如果鼠标本来就在底边附近，下一次 tick 会把它滑出来
   const autoHide = settings.dock_auto_hide;
@@ -441,8 +466,8 @@ function createDockWindow() {
     resizable: false,
     minimizable: false,
     maximizable: false,
-    // 置顶：收起时不挡任何窗口；滑出时要盖得住自动隐藏的任务栏
-    alwaysOnTop: true,
+    // 常驻模式下不能置顶，否则会压在其他程序上面；它会被放到桌面层去
+    alwaysOnTop: autoHide,
     skipTaskbar: true,
     focusable: false,   // 不抢焦点：点图标不打断当前应用的输入
     glass: false,       // Dock 永远完全透明，不跟随磨砂模式
@@ -450,7 +475,10 @@ function createDockWindow() {
   });
   attachDiagnostics(win, 'dock');
   winFactory.loadPage(win, 'dock.html');
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => {
+    win.show();
+    if (!autoHide) placeDockOnDesktopLayer(win);
+  });
   win.on('closed', () => {
     dockWindow = null;
   });
@@ -976,6 +1004,7 @@ function registerIpc() {
   ipcMain.handle('settings:update', (_event, { patch }) => {
     const before = {
       dock_enabled: settings.dock_enabled,
+      dock_auto_hide: settings.dock_auto_hide,
       dock_icon_size: settings.dock_icon_size,
       dock_magnify: settings.dock_magnify,
       basket_count: settings.baskets.length
@@ -983,7 +1012,10 @@ function registerIpc() {
     settings = store.mergedSettings({ ...settings, ...(patch || {}) });
     persist();
     if (settings.dock_enabled !== before.dock_enabled) syncDock();
-    else if (
+    else if (settings.dock_auto_hide !== before.dock_auto_hide) {
+      // 常驻 ⇄ 自动收起：切换置顶，常驻时重新放到桌面层
+      applyDockLayerMode();
+    } else if (
       settings.dock_icon_size !== before.dock_icon_size ||
       settings.baskets.length !== before.basket_count
     ) {

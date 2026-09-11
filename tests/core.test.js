@@ -641,3 +641,41 @@ test('自动收起：收起位置在屏幕外，滑出位置贴屏幕底边', ()
   assert.strictEqual(shown.y + shown.height, 1080, '滑出时底边贴屏幕下沿');
   assert.strictEqual(hidden.x, shown.x, '只上下移动，水平居中不变');
 });
+
+// ---------------------------------------------------------------- Dock 桌面层
+
+const windowLayer = require('../src/main/windowLayer');
+
+test('桌面层：判据用的类名必须都在 dockmodel 的桌面外壳类里', () => {
+  // PowerShell 脚本里那份类名是硬编码的（跨进程），这里把它钉在 dockmodel 的集合上
+  assert.ok(windowLayer.DESKTOP_CLASSES.length > 0);
+  for (const cls of windowLayer.DESKTOP_CLASSES) {
+    assert.ok(
+      dockmodel.SHELL_WINDOW_CLASSES.has(cls),
+      `${cls} 必须属于 SHELL_WINDOW_CLASSES`
+    );
+  }
+});
+
+test('桌面层：窗口句柄按小端读出，拿不到回 "0" 不抛异常', () => {
+  assert.strictEqual(
+    windowLayer.handleOf({ getNativeWindowHandle: () => Buffer.from([0x78, 0x56, 0x34, 0x12]) }),
+    String(0x12345678)
+  );
+  assert.strictEqual(
+    windowLayer.handleOf({
+      getNativeWindowHandle: () => Buffer.from([0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0])
+    }),
+    String(0x12345678)
+  );
+  assert.strictEqual(windowLayer.handleOf(null), '0');
+  assert.strictEqual(windowLayer.handleOf({}), '0');
+  assert.strictEqual(
+    windowLayer.handleOf({
+      getNativeWindowHandle: () => {
+        throw new Error('窗口已销毁');
+      }
+    }),
+    '0'
+  );
+});
