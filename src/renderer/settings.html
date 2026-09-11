@@ -37,6 +37,7 @@
   .shortcut-row img { width: 18px; height: 18px; object-fit: contain; }
   .shortcut-row .name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .shortcut-row .state { font-size: 11px; color: #9a9ba4; flex: 0 0 auto; }
+  .shortcut-row .btn { padding: 2px 8px; font-size: 11px; flex: 0 0 auto; }
 </style>
 </head>
 <body>
@@ -169,17 +170,6 @@
       }
     }
 
-    // Dock 右键「改名…」会带 basketId 打开这里：选中那个筐并聚焦名字输入框
-    function selectBasket(basketId) {
-      const basket = settings.baskets.find((item) => item.id === basketId);
-      if (!basket) return;
-      selectedBasketId = basket.id;
-      renderBaskets();
-      el('basketName').value = basket.name;
-      el('basketName').focus();
-      el('basketName').select();
-    }
-
     function render() {
       loading = true;
       el('accent').innerHTML = '';
@@ -242,13 +232,33 @@
 
         const name = document.createElement('span');
         name.className = 'name';
-        name.textContent = row.name.replace(/\.(lnk|url)$/i, '');
+        const alias = (settings.dock_aliases || {})[row.path] || '';
+        const fileLabel = row.name.replace(/\.(lnk|url)$/i, '');
+        name.textContent = alias || fileLabel;
+        if (alias) name.title = fileLabel + '（显示名：' + alias + '）';
 
         const state = document.createElement('span');
         state.className = 'state';
         state.textContent = row.onDock ? '在 Dock 上' : '';
 
-        line.append(box, icon, name, state);
+        line.append(box, icon, name);
+
+        // 在 Dock 上的条目才能改名：改的是显示名（别名），磁盘上的文件名一个字都不动
+        if (row.onDock) {
+          const rename = document.createElement('button');
+          rename.className = 'btn';
+          rename.type = 'button';
+          rename.textContent = '改名';
+          rename.addEventListener('click', (event) => {
+            // 这行是个 <label>：不拦下来，点「改名」会连带把复选框也切换了
+            event.preventDefault();
+            event.stopPropagation();
+            api.openRename({ kind: 'shortcut', path: row.path });
+          });
+          line.append(rename);
+        }
+
+        line.append(state);
         host.append(line);
       }
     }
@@ -369,8 +379,6 @@
       settings = payload.settings;
       render();
     });
-    // Dock 右键「改名…」→ 主进程打开本窗口并点名要改哪个筐
-    if (api.onSelectBasket) api.onSelectBasket((basketId) => selectBasket(basketId));
 
     (async () => {
       await refresh();

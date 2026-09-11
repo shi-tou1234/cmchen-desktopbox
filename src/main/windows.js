@@ -178,10 +178,45 @@ function createPopupWindow(options = {}) {
   return win;
 }
 
+// 改名输入窗：Electron 没有 window.prompt（调用会抛异常、把渲染进程卡住），
+// Dock 窗口又不可聚焦、收不到键盘，所以改名用一个钉在 Dock 上方的可聚焦小窗。
+// 不显示 name 之外的任何字段，输入完回车即提交。
+function createRenameWindow(options = {}) {
+  const { width = 320, height = 132, x, y, glass = true, title = 'DeskBasket 改名' } = options;
+  const win = new BrowserWindow({
+    width,
+    height,
+    ...(Number.isInteger(x) ? { x } : {}),
+    ...(Number.isInteger(y) ? { y } : {}),
+    frame: false,
+    show: false,
+    hasShadow: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    movable: true,
+    focusable: true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    title,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    },
+    ...glassOptions(glass)
+  });
+  win.setAlwaysOnTop(true, 'floating');
+  win.setMenuBarVisibility?.(false);
+  return win;
+}
+
 module.exports = {
   GLASS_MATERIAL,
   createBehaviorWindow,
   createPopupWindow,
+  createRenameWindow,
   glassEnabled,
   glassOptions,
   listDisplays,

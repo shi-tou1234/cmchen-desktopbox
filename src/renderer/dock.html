@@ -96,9 +96,9 @@
       return name.replace(/\.(lnk|url|exe)$/i, '');
     }
 
-    // 条目对外显示的名字（筐与系统图标自带名字，快捷方式用文件名去掉后缀）
+    // 条目对外显示的名字（主进程已经算好：快捷方式是"别名优先，其次文件名去后缀"）
     function displayName(entry) {
-      if (entry.type === 'shortcut') return stripExt(baseName(entry.path));
+      if (entry.type === 'shortcut') return entry.name || stripExt(baseName(entry.path));
       return entry.name || '';
     }
 
@@ -177,10 +177,15 @@
             } else if (picked === 'prune') {
               api.pruneMissing(entry.id);
             } else if (picked === 'rename') {
-              // 不能在 Dock 里弹输入框：Electron 不支持 window.prompt（调用会阻塞渲染
-              // 进程，Dock 看起来就像卡死），而且 Dock 窗口本身不可聚焦、收不了键盘。
-              // 所以交给设置面板里那个改名输入框，并让它选好这个筐。
-              api.openSettings(entry.id);
+              // 不能在 Dock 里弹输入框：Electron 不支持 window.prompt（调用会抛异常、
+              // 渲染进程就像卡死），而且 Dock 窗口本身不可聚焦、收不了键盘。
+              // 所以让主进程在图标上方开一个可聚焦的小输入窗。
+              const rect = item.getBoundingClientRect();
+              api.openRename({
+                kind: 'basket',
+                id: entry.id,
+                anchorX: rect.left + rect.width / 2
+              });
             } else if (picked === 'delete') {
               api.deleteBasket(entry.id);
             }
@@ -203,6 +208,7 @@
               { key: 'open', label: '打开' },
               { key: 'reveal', label: '用系统资源管理器打开所在位置' },
               { separator: true },
+              { key: 'rename', label: '改名…' },
               { key: 'remove', label: '从 Dock 移除' }
             ],
             event
@@ -210,7 +216,15 @@
             if (!picked) return;
             if (picked === 'open') api.openPath(entry.path);
             else if (picked === 'reveal') api.revealPath(entry.path);
-            else if (picked === 'remove') api.removeDockItem(entry.path);
+            else if (picked === 'rename') {
+              // 改的是 Dock 上的显示名（别名），磁盘上的文件名一个字都不动
+              const rect = item.getBoundingClientRect();
+              api.openRename({
+                kind: 'shortcut',
+                path: entry.path,
+                anchorX: rect.left + rect.width / 2
+              });
+            } else if (picked === 'remove') api.removeDockItem(entry.path);
           });
         }
       });
@@ -288,7 +302,11 @@
         // 顺序：系统虚拟项（此电脑/回收站）→ 筐 → 快捷方式
         ...(data.specials || []).map((item) => ({ type: 'special', id: item.id, name: item.label })),
         ...(data.baskets || []).map((basket) => ({ type: 'basket', id: basket.id, name: basket.name })),
-        ...(data.shortcuts || []).map((item) => ({ type: 'shortcut', path: item }))
+        ...(data.shortcuts || []).map((item) => ({
+          type: 'shortcut',
+          path: item.path,
+          name: item.name
+        }))
       ];
       render();
     }

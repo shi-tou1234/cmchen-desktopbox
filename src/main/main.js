@@ -58,6 +58,8 @@ let settings = null;
 let tray = null;
 let dockWindow = null;
 let settingsWindow = null;
+let renameWindow = null;       // 改名输入窗（钉在 Dock 上方）
+let renameTarget = null;       // { kind:'basket', id } | { kind:'shortcut', path }
 
 let popupWindow = null;        // 当前文件夹弹窗
 let popupKey = null;           // 'basket:b1' 或 'dir:C:\\xx'，用于点同一个文件夹时切换关闭
@@ -761,9 +763,8 @@ async function toggleFolderPopup(kind, payload, anchorXInDock) {
 
 // ------------------------------------------------------------------ 窗口：设置
 
-// 打开设置窗口；带 basketId 时顺便让面板选中那个筐（Dock 右键「改名…」走这条路——
-// Electron 不支持 window.prompt，调用它会阻塞渲染进程，Dock 看起来就像卡死了）。
-function openSettings(basketId) {
+// 打开设置窗口
+function openSettings() {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.show();
     settingsWindow.focus();
@@ -781,20 +782,75 @@ function openSettings(basketId) {
       settingsWindow = null;
     });
   }
-  if (basketId) {
-    // 页面可能还没加载完：等它就绪再发（loadFile 完成前 send 会丢）
-    const announce = () => {
-      if (settingsWindow && !settingsWindow.isDestroyed()) {
-        settingsWindow.webContents.send('settings:select-basket', basketId);
-      }
-    };
-    if (settingsWindow.webContents.isLoading()) {
-      settingsWindow.webContents.once('did-finish-load', announce);
-    } else {
-      announce();
-    }
-  }
   return settingsWindow;
+}
+
+// ------------------------------------------------------------------ 窗口：改名
+
+// Electron 里没有 window.prompt（调用直接抛异常，渲染进程看着就像卡死），Dock 窗口又
+// 不可聚焦、收不到键盘。所以改名单独开一个可聚焦的小输入窗，钉在 Dock 上方。
+// 快捷方式改的是「别名」：只写进设置，磁盘上的 .lnk 一个字都不动（项目对桌面的承诺）。
+const RENAME_WIDTH = 320;
+const RENAME_HEIGHT = 132;
+const RENAME_DOCK_GAP = 12;
+
+function renamePosition(anchorX) {
+  const area = winFactory.primaryWorkArea();
+  const dockTop = dockTargetGeometry().y;
+  const wanted = Number.isFinite(anchorX)
+    ? Math.round(anchorX - RENAME_WIDTH / 2)
+    : Math.round(area.x + (area.width - RENAME_WIDTH) / 2);
+  const x = Math.min(
+    Math.max(wanted, area.x + POPUP_EDGE_GAP),
+    area.x + area.width - RENAME_WIDTH - POPUP_EDGE_GAP
+  );
+  const y = Math.max(area.y + POPUP_EDGE_GAP, Math.round(dockTop - RENAME_HEIGHT - RENAME_DOCK_GAP));
+  return { x, y };
+}
+
+function closeRenameWindow() {
+  if (renameWindow && !renameWindow.isDestroyed()) renameWindow.destroy();
+  renameWindow = null;
+  renameTarget = null;
+}
+
+function openRenameWindow(payload = {}) {
+  let pending = null;
+  let current = '';
+  if (payload.kind === 'basket') {
+    const basket = findBasket(payload.id);
+    if (!basket) return false;
+    pending = { kind: 'basket', id: basket.id };
+    current = basket.name;
+  } else {
+    const target = store.normalizePath(payload.path);
+    if (!target) return false;
+    pending = { kind: 'shortcut', path: target };
+    current = dockmodel.displayName(target, settings.dock_aliases);
+  }
+  closeRenameWindow();     // 连点两次右键时，先收掉上一个
+  renameTarget = pending;
+  const spot = renamePosition(Number(payload.anchorX));
+  renameWindow = winFactory.createRenameWindow({
+    ...spot,
+    glass: winFactory.glassEnabled(settings),
+    title: `${APP_NAME} 改名`
+  });
+  attachDiagnostics(renameWindow, 'rename');
+  winFactory.loadPage(renameWindow, 'rename.html', { value: current, kind: pending.kind });
+  const win = renameWindow;
+  win.once('ready-to-show', () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.focus();
+  });
+  // 只有"当前这个窗口"关闭时才清状态：连点两次右键时，旧窗口的 closed 不能把新目标抹掉
+  win.on('closed', () => {
+    if (renameWindow !== win) return;
+    renameWindow = null;
+    renameTarget = null;
+  });
+  return true;
 }
 
 // ------------------------------------------------------------------ 托盘
@@ -876,8 +932,8 @@ function registerIpc() {
       item.id === merged.id ? merged : item
     );
     persist();
-    // visible 变化会影响 Dock 条目数，窗口尺寸跟着变
-    if (merged.visible !== current.visible) syncDock();
+    // 改名与显隐都会影响 Dock：名字变了要刷新标签，visible 变了要重算窗口尺寸
+    syncDock();
     return merged;
   });
 
@@ -911,6 +967,7 @@ function registerIpc() {
   });
 
   // Dock 条目 = 系统虚拟项（此电脑/回收站）＋筐（文件夹，点击弹文件夹弹窗）＋快捷方式；隐藏的筐不上 Dock
+  // 快捷方式的名字在这里就定好（别名优先），渲染层只管画
   ipcMain.handle('dock:get', () => ({
     specials: settings.dock_specials
       .map((id) => specials.findSpecial(id))
@@ -919,7 +976,10 @@ function registerIpc() {
     baskets: settings.baskets
       .filter((basket) => basket.visible !== false)
       .map((basket) => ({ id: basket.id, name: basket.name })),
-    shortcuts: settings.dock_items
+    shortcuts: settings.dock_items.map((item) => ({
+      path: item,
+      name: dockmodel.displayName(item, settings.dock_aliases)
+    }))
   }));
 
   ipcMain.handle('special:icon', (_event, { id }) => specialIconFor(id));
@@ -964,6 +1024,13 @@ function registerIpc() {
     settings.dock_items = dockmodel.removeItem(settings.dock_items, itemPath);
     const blocked = dockmodel.addItem(settings.dock_removed, itemPath);
     settings.dock_removed = blocked.items;
+    // 别名跟着条目一起清掉，不然配置里会留一条指向"已不在 Dock 上"的路径的名字
+    const key = store.pathKey(itemPath || '');
+    const kept = {};
+    for (const [target, alias] of Object.entries(settings.dock_aliases || {})) {
+      if (store.pathKey(target) !== key) kept[target] = alias;
+    }
+    settings.dock_aliases = kept;
     // 记录来源页：条目被"莫名移除"时，这条日志能指出是谁干的
     console.log(
       `[dock] 移除条目（来源 ${pageTag(event)}）${path.basename(String(itemPath || ''))} → 现有 ${settings.dock_items.length} 条`
@@ -1101,8 +1168,39 @@ function registerIpc() {
 
   ipcMain.handle('file:list', (_event, { path: target }) => filebrowse.listEntries(target));
 
-  ipcMain.handle('window:settings', (_event, payload = {}) => {
-    openSettings(payload && payload.basketId);
+  ipcMain.handle('window:settings', () => {
+    openSettings();
+    return true;
+  });
+
+  // 改名：Dock 右键「改名…」与设置面板里的「改名」都走这里
+  ipcMain.handle('rename:open', (_event, payload = {}) => openRenameWindow(payload));
+
+  ipcMain.handle('rename:commit', (_event, payload = {}) => {
+    const target = renameTarget;
+    if (!target) return false;
+    const alias = store.normalizeAlias(payload.value);
+    if (target.kind === 'basket') {
+      const basket = findBasket(target.id);
+      closeRenameWindow();
+      if (!basket || !alias || alias === basket.name) return false;
+      replaceBasket({ ...basket, name: alias });
+    } else {
+      const next = { ...settings.dock_aliases };
+      // 输入的就是文件名本身 → 等于没改名，把别名删掉，免得配置里留一条无意义的记录
+      if (!alias || alias === dockmodel.displayName(target.path, {})) delete next[target.path];
+      else next[target.path] = alias;
+      settings.dock_aliases = next;
+      closeRenameWindow();
+      persist();
+    }
+    syncDock();
+    broadcastState();
+    return true;
+  });
+
+  ipcMain.handle('rename:cancel', () => {
+    closeRenameWindow();
     return true;
   });
 

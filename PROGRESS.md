@@ -830,3 +830,74 @@ Electron 里 `window.prompt` 没有实现，调用**直接抛异常**：菜单�
 - `npm test` → **66 passed / 0 fail**。
 - README 大段按当前实现重写（原来还在描述已删除的"文件筐窗口""内置文件浏览器""自研磨砂"，
   以及托盘的旧菜单项、31 条测试等）。
+
+## Dock 条目改名：从"绕去设置面板"改成就地改名
+
+领导问「那个项目重命名怎么解决」。上一轮的处置是**把右键「改名…」转发到设置面板**里那个
+已存在的改名输入框——能用，但这是绕路；而且**快捷方式根本改不了名**：Dock 上显示的是
+文件名（去掉 `.lnk`），想换成别的字，只能在磁盘上真的重命名那个 `.lnk`——这与项目
+「不动桌面上任何文件」的承诺直接冲突。
+
+这一轮把它做成正经功能：
+
+### 1. 改名窗口（`src/renderer/rename.html`）
+
+`window.prompt` 在 Electron 里没有实现（调用抛异常、渲染进程看着像卡死），Dock 窗口本身
+`focusable:false`、收不到键盘，所以只能**另开一个可聚焦的小窗**：320×132，钉在 Dock 图标
+上方（按右键那个图标的横向中心对齐，贴屏幕边时自动收进来），预填当前名字并全选，
+**回车提交、Esc 取消**，底部一行小字说明改的是哪一层名字。
+
+右键「改名…」与设置面板里的「改名」按钮都调到同一个 `rename:open`，所以只有一处实现。
+
+### 2. 快捷方式改的是「别名」，磁盘不动
+
+- 新增配置字段 `dock_aliases`：`{ "C:\...\哔哩哔哩.lnk": "B站" }`，键是规范化后的绝对路径。
+- `store.normalizeAlias` 折叠空白、去首尾空格、截到 24 字；`store.normalizeAliases` 把键
+  按 `normalizePath` 规范化，空名/非字符串丢掉（老配置没有这个字段就补空表）。
+- `dockmodel.displayName(path, aliases)`：有别名用别名，否则文件名去掉 `.lnk/.url/.exe`；
+  查别名走 `pathKey`，所以大小写不同也认得出；输入的名字**恰好等于文件名时就把别名删掉**
+  （等于"恢复默认"），不留无意义的记录。
+- 移除 Dock 条目时顺手清掉它的别名，配置里不留指向"已不在 Dock 上"的路径的名字。
+- Dock 显示名改由主进程算好（`dock:get` 返回 `[{path, name}]`），渲染层只管画。
+
+### 3. 改名窗口的样式被 CSP 拦住了（真机才看得见）
+
+`rename.html` 第一版照抄了个 `style-src 'unsafe-inline'`，结果 `common.css` 被 CSP 拒载：
+窗口能开、能输入、能提交，只是**完全没有样式**——单测和代码走查都发现不了。日志里那句
+
+```
+[rename] 渲染层报错: Loading the stylesheet '...common.css' violates the following
+Content Security Policy directive: "style-src 'unsafe-inline'"
+```
+
+就是证据。改成和另外三个页面一致的 `style-src 'self' 'unsafe-inline'` 后正常。
+
+### 4. 顺带修掉一个连带问题
+
+设置面板里改文件夹名字（`basket:update`）以前只在 `visible` 变化时才 `syncDock()`，
+所以**改完名字 Dock 上的标签还是旧的**。现在改名与显隐都同步。
+
+### 5. 清掉的死链路
+
+改名不再经过设置面板，于是 `settings:select-basket` 这条通道（主进程 send、preload
+`onSelectBasket`、settings.html 的 `selectBasket()`）全部没有调用方了，一并删除。
+新增的通道 `rename:open` / `rename:commit` / `rename:cancel` 三处对称（主进程注册、
+preload 暴露、渲染层调用）。
+
+### 验收
+
+- `npm test` → **70 passed / 0 fail**（新增 4 条：别名清洗、别名表规范化、读旧配置补空表、
+  显示名规则）。
+- 真机（Electron 43 / Win11）：
+  - 设置面板「哔哩哔哩」那一行出现新的「改名」按钮 → 点击后**图标上方弹出改名窗口**，
+    预填「哔哩哔哩」，提示"只改 Dock 上的显示名，文件名不动" ✓
+  - 输入「B站」回车 → `%APPDATA%\DeskBasket\settings.json` 里出现
+    `dock_aliases: {"C:\Users\24256\Desktop\哔哩哔哩.lnk": "B站"}`，
+    **磁盘上的 `.lnk` 文件名仍是「哔哩哔哩.lnk」** ✓
+  - Dock 的无障碍名从「哔哩哔哩」变成「B站」，设置面板那一行也跟着显示「B站」 ✓
+  - 再开一次改名窗按 Esc → 窗口关闭、配置没有任何变化 ✓
+  - 改名窗口加载 `common.css` 不再报 CSP 错 ✓
+- **没当面验到的一处（如实记录）**：Dock 图标上的右键菜单这一轮没能再点一次——
+  桌面被浏览器全屏盖住，而 Dock 在桌面层（要露出桌面才点得到），我的右键落在了任务栏上。
+  这条链路里"菜单项能点中、能进到 `picked === 'rename'` 分支"是上一轮当面验过的，
+  这轮改的只是该分支调用的那一个 API——而 `rename:open` 已从设置面板端到端验通。

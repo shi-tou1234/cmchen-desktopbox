@@ -207,6 +207,22 @@ function findIndex(items, rawPath) {
   return items.findIndex((item) => pathKey(item) === key);
 }
 
+// Dock 上显示的名字：有别名用别名，没有就用文件名（去掉 .lnk / .url / .exe 后缀）。
+// 别名只存在设置里——改显示名不动磁盘上的文件（项目对桌面的承诺）。
+function displayName(rawPath, aliases) {
+  const value = normalizePath(rawPath);
+  if (!value) return '';
+  const key = pathKey(value);
+  for (const [target, alias] of Object.entries(aliases || {})) {
+    if (pathKey(target) === key) {
+      const text = typeof alias === 'string' ? alias.trim() : '';
+      if (text) return text;
+    }
+  }
+  const base = path.basename(value);
+  return base.replace(/\.(lnk|url|exe)$/i, '');
+}
+
 // 设置面板里"逐个添加"用的候选清单：桌面上可收录的条目 ＋ 是否已经在 Dock 上。
 // 排序按名称（中文按拼音顺序），返回 [{ path, name, onDock }]。
 function shortcutCandidates(desktopPaths, items) {
@@ -240,6 +256,7 @@ module.exports = {
   SHELL_WINDOW_CLASSES,
   addItem,
   dockLayout,
+  displayName,
   findIndex,
   foregroundBlocksDock,
   hiddenGeometry,

@@ -24,6 +24,7 @@ const DEFAULTS = {
   dock_magnify: 50,            // 鼠标靠近时图标放大程度（百分比，0=不放大）
   dock_hide_delay_ms: 400,
   dock_items: [],
+  dock_aliases: {},            // 快捷方式在 Dock 上的显示名：只存设置，绝不动磁盘上的文件名
   dock_specials: ['thispc', 'recyclebin'],  // 系统虚拟项：此电脑、回收站
   dock_removed: []
 };
@@ -103,6 +104,28 @@ function normalizePathList(raw) {
   return out;
 }
 
+// Dock 快捷方式的「别名」：显示用的另一个名字。
+// 项目承诺不动桌面上任何文件，所以改名不改磁盘上的 .lnk，只在这里存一个显示名。
+// 键是规范化后的绝对路径（与 dock_items 同一种写法），这样能按路径直接取到。
+const ALIAS_MAX = 24;
+
+function normalizeAlias(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw.replace(/\s+/g, ' ').trim().slice(0, ALIAS_MAX);
+}
+
+function normalizeAliases(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    const target = normalizePath(key);
+    const alias = normalizeAlias(value);
+    if (!target || !alias) continue;
+    out[target] = alias;
+  }
+  return out;
+}
+
 function clampInt(value, fallback, low, high) {
   if (typeof value !== 'number' || !Number.isInteger(value)) return fallback;
   if (value < low || value > high) return fallback;
@@ -139,6 +162,7 @@ function mergedSettings(raw) {
     DOCK_HIDE_DELAY_MAX
   );
   out.dock_items = normalizePathList(raw.dock_items);
+  out.dock_aliases = normalizeAliases(raw.dock_aliases);
   out.dock_specials = specials.normalizeSpecials(
     'dock_specials' in raw ? raw.dock_specials : DEFAULTS.dock_specials
   );
@@ -174,6 +198,7 @@ module.exports = {
   __setRootForTests,
   ACCENT_LABELS,
   ACCENT_MODES,
+  ALIAS_MAX,
   DEFAULTS,
   DOCK_HIDE_DELAY_MAX,
   DOCK_HIDE_DELAY_MIN,
@@ -183,6 +208,8 @@ module.exports = {
   ICON_SIZE_MIN,
   loadSettings,
   mergedSettings,
+  normalizeAlias,
+  normalizeAliases,
   normalizePath,
   normalizePathList,
   pathKey,

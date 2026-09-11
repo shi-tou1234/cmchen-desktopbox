@@ -599,6 +599,54 @@ test('快捷方式候选：只列可收录的、去重、标出是否已在 Dock
   assert.deepStrictEqual(dockmodel.shortcutCandidates(null, null), []);
 });
 
+// 改名：快捷方式改的是「别名」，只写进设置，磁盘上的文件名一个字都不动
+test('别名：空白折叠、首尾去空格、超长截断到 24 字', () => {
+  assert.strictEqual(store.normalizeAlias('  哔哩哔哩  '), '哔哩哔哩');
+  assert.strictEqual(store.normalizeAlias('哔哩\n哔哩\tB站'), '哔哩 哔哩 B站');
+  assert.strictEqual(store.normalizeAlias('一'.repeat(50)).length, store.ALIAS_MAX);
+  assert.strictEqual(store.normalizeAlias('   '), '');
+  assert.strictEqual(store.normalizeAlias(42), '');
+  assert.strictEqual(store.normalizeAlias(null), '');
+});
+
+test('别名表：键按绝对路径规范化，空名与非字符串丢掉', () => {
+  const aliases = store.normalizeAliases({
+    'C:\\Users\\me\\Desktop\\bilibili.lnk': '哔哩哔哩',
+    'C:\\Users\\me\\Desktop\\empty.lnk': '   ',
+    'C:\\Users\\me\\Desktop\\num.lnk': 7
+  });
+  assert.deepStrictEqual(Object.values(aliases), ['哔哩哔哩']);
+  assert.strictEqual(aliases[path.normalize('C:\\Users\\me\\Desktop\\bilibili.lnk')], '哔哩哔哩');
+  // 脏输入不抛，回空表
+  assert.deepStrictEqual(store.normalizeAliases(null), {});
+  assert.deepStrictEqual(store.normalizeAliases(['x']), {});
+});
+
+test('别名：读旧配置时补上空表，写回后仍在', () => {
+  assert.deepStrictEqual(store.DEFAULTS.dock_aliases, {});
+  assert.deepStrictEqual(store.mergedSettings({}).dock_aliases, {});
+  const merged = store.mergedSettings({
+    dock_aliases: { 'C:\\Users\\me\\Desktop\\bilibili.lnk': 'B站' }
+  });
+  assert.deepStrictEqual(Object.values(merged.dock_aliases), ['B站']);
+});
+
+test('显示名：有别名用别名，没有就用文件名去后缀，大小写不敏感', () => {
+  const target = 'C:\\Users\\me\\Desktop\\bilibili.lnk';
+  assert.strictEqual(dockmodel.displayName(target, {}), 'bilibili');
+  assert.strictEqual(dockmodel.displayName(target, { [target]: '哔哩哔哩' }), '哔哩哔哩');
+  // 键的大小写不同也要认出来（Windows 路径本来就大小写不敏感）
+  assert.strictEqual(
+    dockmodel.displayName(target, { 'C:\\Users\\me\\Desktop\\BiliBili.lnk': '哔哩哔哩' }),
+    '哔哩哔哩'
+  );
+  assert.strictEqual(dockmodel.displayName('C:\\d\\学习通.url', {}), '学习通');
+  assert.strictEqual(dockmodel.displayName('C:\\d\\万用表.exe', {}), '万用表');
+  assert.strictEqual(dockmodel.displayName('C:\\d\\价格.txt', {}), '价格.txt');
+  assert.strictEqual(dockmodel.displayName('', {}), '');
+  assert.strictEqual(dockmodel.displayName(null, null), '');
+});
+
 test('虚拟项：不认识的 id 丢掉、重复去重、顺序保持', () => {
   assert.deepStrictEqual(
     specials.normalizeSpecials(['recyclebin', '不存在', 'thispc', 'recyclebin', 42, null]),
