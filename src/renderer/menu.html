@@ -119,8 +119,11 @@
         hot = 0;
         paint();
       }
-      // 下一帧再加 ready，让淡入/展开的 transition 真的跑起来
+      // 下一帧再加 ready，让淡入/展开的 transition 真的跑起来。
+      // 兜底那一下是防"窗口还没显示时 rAF 不回调"——那样菜单会一直停在 opacity:0，
+      // 看着就是"右键没反应"。
       requestAnimationFrame(() => document.body.classList.add('ready'));
+      setTimeout(() => document.body.classList.add('ready'), 80);
     })();
 
     document.addEventListener('keydown', (event) => {

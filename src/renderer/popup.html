@@ -375,16 +375,19 @@
       if (Number.isFinite(payload.originX)) {
         document.documentElement.style.setProperty('--origin-x', payload.originX * 100 + '%');
       }
-      document.body.classList.add('collapsed');   // 先回到"收起"态，再从那里展开
+      // 先回到"收起"态再铺内容：收起态是完全透明的，所以此时窗口里既看不见旧内容、
+      // 也看不见新内容，什么时候显示都不会闪。
+      document.body.classList.add('collapsed');
       render();
-      // 等这一帧真的画出来（新内容也画好了）再让主进程显示窗口——复用热窗口时尤其重要，
-      // 不然窗口会先亮出上一次的旧内容，看着就是"闪一下"。显示之后再开始展开。
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          api.popupPresent().then(() => {
-            requestAnimationFrame(() => document.body.classList.remove('collapsed'));
-          });
-        });
+      // **不能等 requestAnimationFrame 再显示窗口**：隐藏中的窗口 Chromium 不跑 rAF，
+      // 复用热窗口时（窗口是隐藏的）会一直等不到回调 —— 表现就是"文件夹打不开"。
+      // 所以这里直接显示：新建窗口由主进程等 ready-to-show（页面首帧）把关；
+      // 复用窗口里显示的也是"透明的内容"，不会露出旧画面。
+      api.popupPresent().then(() => {
+        const expand = () => document.body.classList.remove('collapsed');
+        requestAnimationFrame(() => requestAnimationFrame(expand));
+        // 兜底：窗口刚显示时合成器可能还没开始出帧，别让内容一直缩着不动
+        setTimeout(expand, 120);
       });
     }
 
