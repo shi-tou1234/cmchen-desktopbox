@@ -1219,3 +1219,24 @@ icon-proof/list-windows）、`docs/icon-probe/`（5 张探针图）、`docs/prob
 （筐 / 往里放东西的四种方式 / Dock / 外观）、怎么用（跑起来、常用操作速查表、常见问题）、
 开发与测试、许可。删掉了透明度实测数据、窗口行为、坐标系约定、为什么换 Electron、版本回退表
 这些面向开发过程的章节（这些内容都在 PROGRESS.md 里）。
+
+## 按领导要求删除 Qt 那版（v2）的整套 Python 实现
+
+领导确认「删除」后清掉：
+
+- 根目录 16 个 `.py`（main / baskets / dockmodel / dock_window / basket_window / explorer_window /
+  icongrid / filebrowse / fileicons / dropfiles / frosted_window / acrylic / desktoplayer /
+  settings / settings_window / autostart）
+- 构建与依赖：`DeskBasket.spec`、`build.ps1`、`requirements.txt`、`pytest.ini`
+- pytest 测试 11 个文件 + `tests/data/`（只留下 `tests/core.test.js`，Electron 版的 76 条单测）
+- `dist/legacy-python-DeskBasket.exe`（37MB）
+- `.venv/`（257MB）
+
+**保留**：`BLOCKED.md`（它记的是"贴桌面层做不到"的实测结论，Electron 版的设计也引用了它）、
+`scripts/desktop_*.py`（"不动桌面"的只读取证，服务的是当前版本）、`scripts/gen_icon.py`
+（生成当前版用的 `assets/icon.ico`）、`assets/`。
+
+顺手改掉三处"与 Python 版 X.py 同语义"的注释（指向的文件已经不存在了）。
+
+验证：`node --check` 全过、`npm test` 76 passed / 0 fail、应用重启正常（Dock/设置面板都起来了）。
+要找回旧版：`git show <本次提交>^:main.py` 或 `git switch --detach v2.2.0-python`。

@@ -1,7 +1,6 @@
 'use strict';
 
 // 配置持久化：%APPDATA%\DeskBasket\settings.json
-// 与 Python 版保持同一份 schema，所以已有的配置能直接读；
 // 不认识的字段原样保留，读写往返不丢东西。
 
 const fs = require('node:fs');

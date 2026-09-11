@@ -1,7 +1,6 @@
 'use strict';
 
-// 筐数据模型：只登记路径，绝不移动/删除/改名/改属性磁盘上的文件。
-// 与 Python 版 baskets.py 同语义，纯函数、可单测。
+// 筐数据模型：只登记路径，绝不移动/删除/改名/改属性磁盘上的文件。纯函数、可单测。
 
 const { normalizePath, pathKey } = require('./store');
 

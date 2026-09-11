@@ -1,7 +1,7 @@
 'use strict';
 
 // 开机自启：Windows 写 HKCU\Software\Microsoft\Windows\CurrentVersion\Run（登录静默启动）。
-// 与 Python 版 autostart.py 同语义：写入目标固定、幂等、开关可查。
+// 写入目标固定、幂等、开关可查。
 
 const { execFileSync } = require('node:child_process');
 

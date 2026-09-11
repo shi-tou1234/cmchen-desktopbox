@@ -1,7 +1,7 @@
 'use strict';
 
 // Dock 的纯逻辑：热区、全屏判定、显隐决策、位置计算、收录与排序。
-// 与 Python 版 dockmodel.py 同语义，不依赖 Electron，可直接 node --test。
+// 不依赖 Electron，可直接 node --test。
 //
 // 坐标一律用「屏幕逻辑像素」的 {x, y, width, height}。
 
