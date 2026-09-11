@@ -13,6 +13,7 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
+const { execFileSync } = require('node:child_process');
 
 const {
   app,
@@ -36,15 +37,16 @@ const specials = require('./specials');
 const windowLayer = require('./windowLayer');
 const winFactory = require('./windows');
 const autostart = require('./autostart');
+const theme = require('./theme');
 
 const APP_NAME = 'DeskBasket';
 const DOCK_PADDING = 8;
 
-// 文件夹弹窗：位置在 Dock 上方，大小固定
-const POPUP_WIDTH = 480;
-const POPUP_HEIGHT = 460;
+// 文件夹弹窗：位置在 Dock 上方；大小由设置 popup_width/height 决定（可在右下角拖着改，见 persistPopupSize）
 const POPUP_EDGE_GAP = 8;    // 弹窗与屏幕左右/上边的最小距离
 const POPUP_DOCK_GAP = 10;   // 弹窗与 Dock 上沿的间距
+// 拖完右下角之后的落盘防抖：拖边时每帧都发 resize，攒一下再写设置
+const POPUP_RESIZE_SAVE_MS = 350;
 const POPUP_BLUR_CLOSE_MS = 220; // 失焦后多久关（留出"点击 Dock 图标切换"的时间）
 const POPUP_CLOSE_ANIM_MS = 210; // 收起动画时长：先让渲染层缩回去，再隐藏窗口
 // 磨砂模式的收起更短：内容淡掉就可以收，别让一块空的材质底多晾着（那看着就是"闪一下"）
@@ -58,6 +60,8 @@ const POPUP_HOVER_CHECK_MS = 250;
 const POPUP_AWAY_CLOSE_MS = 900;
 
 let settings = null;
+let resolvedTheme = 'dark';    // theme_mode=auto 时按壁纸亮度算出来的实际深浅色（dark/light），广播给各页
+let wallpaperCache = { key: '', luminance: null };  // 壁纸路径:修改时间 → 亮度（避免每次 tick 都重读+解码）
 let tray = null;
 let dockWindow = null;
 let settingsWindow = null;
@@ -139,7 +143,7 @@ function attachDiagnostics(win, tag) {
 }
 
 function broadcastState() {
-  const payload = { settings };
+  const payload = { settings, theme: resolvedTheme, displays: displaySummaries() };
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send('state:changed', payload);
   }
@@ -181,6 +185,117 @@ function ensureBasket() {
   settings.baskets = created.baskets;
   persist();
   return settings;
+}
+
+// ------------------------------------------------------------------ 深浅色主题（#1）
+//
+// 页面配色按深色主题写；完全透明模式下，浅色壁纸上压浅色字会看不清。
+// theme_mode=auto 时读桌面壁纸算平均亮度来决定深浅；也可在设置里手动固定 dark/light。
+//
+// 只读取，绝不写：壁纸路径从注册表读，用 nativeImage 解码后缩到很小算亮度，缓存到
+// 路径+修改时间，避免每次轮询都重新解码。取不到壁纸就退回深色（与历史行为一致）。
+
+// Windows 壁纸文件路径。slideshow（多张）会带多个 NUL 分隔，只取第一张；非 Windows 返回 null。
+// reg.exe 的输出编码跟着控制台代码页走（zh-CN 是 GBK），直接按 utf8 解会把中文路径读成乱码——
+// 所以两种解码都试，取**文件真的存在**的那一份：乱码解出来的路径必然 existsSync 失败，不会误伤。
+function wallpaperPath() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const out = execFileSync(
+      'reg',
+      ['query', 'HKCU\\Control Panel\\Desktop', '/v', 'Wallpaper'],
+      { stdio: ['ignore', 'pipe', 'ignore'] }
+    );
+    const texts = [];
+    try {
+      texts.push(out.toString('utf8'));
+    } catch (_) {
+      /* 解码失败：跳过这一种 */
+    }
+    try {
+      texts.push(new TextDecoder('gbk').decode(out));
+    } catch (_) {
+      /* 没有 GBK 支持（非中文机器/精简 ICU）：跳过 */
+    }
+    for (const text of texts) {
+      const match = /Wallpaper\s+REG_SZ\s+(.+?)(?:\r?\n|$)/i.exec(text);
+      if (!match) continue;
+      const first = match[1].split('\0')[0].trim();
+      if (first && fs.existsSync(first)) return first;
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function wallpaperLuminance() {
+  const file = wallpaperPath();
+  if (!file) return null;
+  let stamp = '';
+  try {
+    stamp = String(fs.statSync(file).mtimeMs);
+  } catch (_) {
+    return null;
+  }
+  const cacheKey = `${file}|${stamp}`;
+  if (wallpaperCache.key === cacheKey) return wallpaperCache.luminance;
+  let luminance = null;
+  try {
+    const image = nativeImage.createFromPath(file);
+    if (!image.isEmpty()) {
+      const small = image.resize({ width: 32, height: 32 });   // 缩到 32×32 足够估平均亮度
+      const size = small.getSize();
+      luminance = theme.luminanceFromRgba(small.toBitmap(), size.width, size.height);
+    }
+  } catch (_) {
+    luminance = null;
+  }
+  wallpaperCache = { key: cacheKey, luminance };
+  return luminance;
+}
+
+// 解析并应用主题：设置 nativeTheme.themeSource（让系统材质/滚动条/原生菜单跟着变），
+// 更新 resolvedTheme。返回是否发生变化（变了才需要广播）。
+function applyTheme() {
+  const next = theme.resolveTheme(settings.theme_mode, wallpaperLuminance());
+  if (nativeTheme.themeSource !== next) {
+    try {
+      nativeTheme.themeSource = next;
+    } catch (_) {
+      /* 个别平台/版本不支持：resolvedTheme 仍会广播，页面配色不受影响 */
+    }
+  }
+  const changed = resolvedTheme !== next;
+  resolvedTheme = next;
+  return changed;
+}
+
+// ------------------------------------------------------------------ 多显示器（#9）
+//
+// 默认 primary：Dock/弹窗/改名窗都落在主屏（与旧行为一致）。
+// 可设 mouse（光标所在屏）或按 getAllDisplays 下标的整数。单屏机器上三者等价。
+
+function displaySummaries() {
+  const primaryId = screen.getPrimaryDisplay().id;
+  return screen.getAllDisplays().map((display, index) => ({
+    index,
+    id: display.id,
+    bounds: display.bounds,
+    label: `${display.bounds.width}×${display.bounds.height}`,
+    primary: display.id === primaryId
+  }));
+}
+
+// 当前 Dock 该用的那块屏（一个真实 Electron Display 对象，含 bounds/workArea）。
+function activeDisplay() {
+  const primaryId = screen.getPrimaryDisplay().id;
+  const list = screen.getAllDisplays().map((display) => ({
+    ...display,
+    primary: display.id === primaryId
+  }));
+  const chosen = dockmodel.pickDisplay(list, settings.dock_display, screen.getCursorScreenPoint());
+  return chosen || screen.getPrimaryDisplay();
 }
 
 // ------------------------------------------------------------------ 快捷方式解析与图标
@@ -318,7 +433,7 @@ function dirTargetForShortcut(target) {
 // ------------------------------------------------------------------ 窗口：Dock
 
 function dockSize() {
-  const display = screen.getPrimaryDisplay();
+  const display = activeDisplay();
   // Dock 条目 = 系统虚拟项（此电脑/回收站）＋筐（文件夹）＋快捷方式
   const count =
     settings.dock_items.length +
@@ -329,7 +444,7 @@ function dockSize() {
 }
 
 function dockTargetGeometry() {
-  const display = screen.getPrimaryDisplay();
+  const display = activeDisplay();
   const size = dockSize();
   // 贴任务栏上沿，再往上抬 dock_bottom_gap：贴死底边时自动隐藏的任务栏一冒头就盖住图标
   const anchor = dockmodel.bottomAnchor(
@@ -370,17 +485,31 @@ let dockRevealed = true;
 let dockLeftAt = 0;
 
 function dockHiddenGeometry() {
-  const display = screen.getPrimaryDisplay();
+  const display = activeDisplay();
   return dockmodel.hiddenGeometry(display.bounds, dockSize(), dockmodel.EDGE_BOTTOM, DOCK_PEEK_PX);
 }
 
 // 平滑滑动到目标位置（逐帧改窗口 y，做出"滑出/收起"的手感）
+//
+// 滑出（往屏内、y 变小）用 easeOutBack：中段它会大于 1，位置先冲过目标一点点再收回，
+// "啪"地弹到位。但 easeOutBack 的标准过冲约是距离的 10%——Dock 滑出距离 130~200px，
+// 就是 13~20px，太夸张；所以按 REVEAL_OVERSHOOT_DAMP 打折，只留 ~4%（5~8px）的一下。
+// 收起（往屏外）仍用纯缓出：收尾干脆，不弹。reduce_motion 开着直接一步到位。
+const DOCK_SLIDE_STEPS_BACK = 12;       // 带过冲要多给几帧才看得出"冲过头再收回"
+const REVEAL_OVERSHOOT_DAMP = 0.4;      // 过冲幅度打折：eased 超过 1 的那部分 × 0.4
+
 function slideDockTo(target) {
   if (!dockWindow || dockWindow.isDestroyed()) return;
   clearInterval(dockSlideTimer);
   dockSlideTimer = null;
   const from = dockWindow.getBounds();
   if (from.y === target.y && from.x === target.x) return;
+  if (settings.reduce_motion) {
+    dockWindow.setBounds(target);
+    return;
+  }
+  const revealing = target.y < from.y;   // 从屏幕外往回滑出
+  const steps = revealing ? DOCK_SLIDE_STEPS_BACK : DOCK_SLIDE_STEPS;
   let step = 0;
   dockSlideTimer = setInterval(() => {
     if (!dockWindow || dockWindow.isDestroyed()) {
@@ -389,15 +518,22 @@ function slideDockTo(target) {
       return;
     }
     step += 1;
-    const t = Math.min(1, step / DOCK_SLIDE_STEPS);
-    const eased = 1 - Math.pow(1 - t, 3);   // 缓出：收尾干脆
+    const t = Math.min(1, step / steps);
+    let eased;
+    if (revealing) {
+      const raw = dockmodel.easeOutBack(t);
+      eased = raw > 1 ? 1 + (raw - 1) * REVEAL_OVERSHOOT_DAMP : raw;
+    } else {
+      eased = 1 - Math.pow(1 - t, 3);   // 缓出：收尾干脆
+    }
+    const y = t >= 1 ? target.y : from.y + (target.y - from.y) * eased;   // 末态必须精确落在目标上
     dockWindow.setBounds({
       x: target.x,
-      y: Math.round(from.y + (target.y - from.y) * eased),
+      y: Math.round(y),
       width: target.width,
       height: target.height
     });
-    if (step >= DOCK_SLIDE_STEPS) {
+    if (step >= steps) {
       clearInterval(dockSlideTimer);
       dockSlideTimer = null;
     }
@@ -406,7 +542,7 @@ function slideDockTo(target) {
 
 function cursorNearDock() {
   if (!dockWindow || dockWindow.isDestroyed()) return false;
-  const display = screen.getPrimaryDisplay();
+  const display = activeDisplay();
   const point = screen.getCursorScreenPoint();
   // 抬起来之后，Dock 底边与屏幕底边之间那条缝也算"在附近"：鼠标从底边往上移过去时
   // 不能中途判定成"离开"而收起来
@@ -733,6 +869,36 @@ function schedulePopupBlurClose() {
   }, POPUP_BLUR_CLOSE_MS);
 }
 
+// 弹窗尺寸持久化（#3）：用户拖右下角改大小 → 防抖落盘到 popup_width/height。
+// 主进程自己 setBounds（锚位、复用换尺寸）不算用户操作：用一次性标志跳过，
+// 而且落盘前比对当前值，漏网的程序性 resize 也只会写成和设置一样的值。
+let popupProgrammaticResize = false;
+let popupResizeSaveTimer = null;
+
+function setPopupBounds(win, rect) {
+  popupProgrammaticResize = true;
+  win.setBounds(rect);
+  setTimeout(() => {
+    popupProgrammaticResize = false;
+  }, 120);
+}
+
+function onPopupResized() {
+  if (popupProgrammaticResize) return;
+  if (!popupWindow || popupWindow.isDestroyed()) return;
+  const [width, height] = popupWindow.getContentSize();
+  if (width === settings.popup_width && height === settings.popup_height) return;
+  clearTimeout(popupResizeSaveTimer);
+  popupResizeSaveTimer = setTimeout(() => {
+    if (!popupWindow || popupWindow.isDestroyed()) return;
+    const [w, h] = popupWindow.getContentSize();
+    settings.popup_width = w;
+    settings.popup_height = h;
+    persist();   // mergedSettings 会夹到合法范围，广播让设置面板与下次开窗都用新尺寸
+    console.log(`[popup] 尺寸记住为 ${w}×${h}`);
+  }, POPUP_RESIZE_SAVE_MS);
+}
+
 function cancelPopupBlurClose() {
   clearTimeout(popupBlurTimer);
   popupBlurTimer = null;
@@ -748,12 +914,13 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
   closeFolderPopup();
 
   const dockBounds = dockWindow && !dockWindow.isDestroyed() ? dockWindow.getContentBounds() : null;
-  const display = screen.getPrimaryDisplay();
+  const display = activeDisplay();
+  const popupSize = { width: settings.popup_width, height: settings.popup_height };
   const rect = dockmodel.popupGeometry(
     display.workArea,
     dockBounds,
     anchorXInDock || 0,
-    { width: POPUP_WIDTH, height: POPUP_HEIGHT },
+    popupSize,
     POPUP_EDGE_GAP,
     POPUP_DOCK_GAP
   );
@@ -768,7 +935,10 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
     originX,
     iconSize: settings.icon_size,
     // 页面按这个挑动画：磨砂模式窗口底是整块材质，内容不能缩得太小（见 popup.html）
-    glass: winFactory.glassEnabled(settings)
+    glass: winFactory.glassEnabled(settings),
+    // 主题与减弱动画开关也塞进载荷：弹窗打开这一帧就要用，不等 state:changed
+    theme: resolvedTheme,
+    reduceMotion: Boolean(settings.reduce_motion)
   };
 
   // 复用上一个热窗口：渲染进程、页面、图片解码缓存都是现成的，展开动画从第一帧就顺。
@@ -779,7 +949,7 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
     popupHideTimer = null;
     const win = popupWindow;
     win.setTitle(`${APP_NAME} · ${data.name}`);
-    win.setBounds(rect);
+    setPopupBounds(win, rect);
     popupOpenedAt = t0;
     popupOpenMode = '复用热窗口';
     withEntryIcons(popupPayload).then((full) => {
@@ -833,6 +1003,7 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
   win.on('focus', () => {
     if (popupWindow === win) cancelPopupBlurClose();
   });
+  win.on('resized', () => onPopupResized());
   // 「鼠标离开就关」的轮询放到窗口真的显示出来之后（popup:present）再开：
   // 弹窗要等图标算好才开始显示，趁它还没露面就计时会让它刚出来就被收掉。
   winFactory.loadPage(win, 'popup.html', {
@@ -870,7 +1041,8 @@ let menuResolve = null;
 let menuFocused = false;     // 已经拿到过焦点才认「失焦即关」，否则刚开就被自己的 blur 关掉
 
 function menuPosition(ownerBounds, clickX, clickY, size) {
-  const area = winFactory.primaryWorkArea();
+  // 菜单贴着点击它的窗口/图标，锚定在 Dock 所在的那块屏（#9）
+  const area = activeDisplay().workArea;
   const baseX = ownerBounds ? ownerBounds.x : area.x;
   const baseY = ownerBounds ? ownerBounds.y : area.y;
   const pointX = baseX + (Number.isFinite(clickX) ? clickX : 0);
@@ -926,7 +1098,7 @@ function openMenuWindow(event, payload = {}) {
     });
     menuWindow = win;
     attachDiagnostics(win, 'menu');
-    winFactory.loadPage(win, 'menu.html');
+    winFactory.loadPage(win, 'menu.html', settings.reduce_motion ? { rm: 1 } : undefined);
     win.once('ready-to-show', () => {
       if (win.isDestroyed()) return;
       win.show();
@@ -984,7 +1156,7 @@ const RENAME_HEIGHT = 132;
 const RENAME_DOCK_GAP = 12;
 
 function renamePosition(anchorScreenX) {
-  const area = winFactory.primaryWorkArea();
+  const area = activeDisplay().workArea;   // 改名窗钉在 Dock 上方，跟着 Dock 那块屏（#9）
   const dockTop = dockTargetGeometry().y;
   const wanted = Number.isFinite(anchorScreenX)
     ? Math.round(anchorScreenX - RENAME_WIDTH / 2)
@@ -1098,7 +1270,12 @@ function installTray() {
 // ------------------------------------------------------------------ IPC
 
 function registerIpc() {
-  ipcMain.handle('state:get', () => ({ settings, desktop: desktopDir() }));
+  ipcMain.handle('state:get', () => ({
+    settings,
+    desktop: desktopDir(),
+    theme: resolvedTheme,
+    displays: displaySummaries()
+  }));
 
   ipcMain.handle('basket:get', (_event, { basketId } = {}) => basketView(findBasket(basketId)));
 
@@ -1219,7 +1396,7 @@ function registerIpc() {
       .map((item) => ({ id: item.id, label: item.label })),
     baskets: settings.baskets
       .filter((basket) => basket.visible !== false)
-      .map((basket) => ({ id: basket.id, name: basket.name })),
+      .map((basket) => ({ id: basket.id, name: basket.name, color: basket.color })),
     shortcuts: settings.dock_items.map((item) => ({
       path: item,
       name: dockmodel.displayName(item, settings.dock_aliases)
@@ -1399,6 +1576,24 @@ function registerIpc() {
     );
   });
 
+  // 拖右下角把手改弹窗尺寸（#3）：夹到合法范围与所在屏工作区内，再 setBounds，
+  // 触发的 resized 会被防抖落盘。返回 false 表示这个窗口已经不算数了（被顶掉/销毁）。
+  ipcMain.handle('popup:resize', (event, { width, height } = {}) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win !== popupWindow || !win || win.isDestroyed()) return false;
+    let w = Math.round(Number(width));
+    let h = Math.round(Number(height));
+    if (!Number.isFinite(w) || !Number.isFinite(h)) return false;
+    w = Math.max(store.POPUP_WIDTH_MIN, Math.min(store.POPUP_WIDTH_MAX, w));
+    h = Math.max(store.POPUP_HEIGHT_MIN, Math.min(store.POPUP_HEIGHT_MAX, h));
+    const area = activeDisplay().workArea;
+    w = Math.min(w, area.width - POPUP_EDGE_GAP * 2);
+    h = Math.min(h, area.height - POPUP_EDGE_GAP * 2);
+    const bounds = win.getBounds();
+    win.setBounds({ x: bounds.x, y: bounds.y, width: w, height: h });
+    return true;
+  });
+
   ipcMain.handle('file:icon', (_event, { path: target, size }) => iconFor(target, size || 48));
 
   ipcMain.handle('file:open', async (_event, { path: target }) => {
@@ -1477,9 +1672,13 @@ function registerIpc() {
       dock_icon_size: settings.dock_icon_size,
       dock_magnify: settings.dock_magnify,
       dock_bottom_gap: settings.dock_bottom_gap,
+      dock_display: settings.dock_display,
+      theme_mode: settings.theme_mode,
       basket_count: settings.baskets.length
     };
     settings = store.mergedSettings({ ...settings, ...(patch || {}) });
+    // 主题要在 persist（=广播）之前解析好，payload 里才带得出新深浅色
+    if (settings.theme_mode !== before.theme_mode) applyTheme();
     persist();
     if (settings.dock_enabled !== before.dock_enabled) syncDock();
     else if (settings.dock_auto_hide !== before.dock_auto_hide) {
@@ -1488,8 +1687,10 @@ function registerIpc() {
     } else if (
       settings.dock_icon_size !== before.dock_icon_size ||
       settings.dock_bottom_gap !== before.dock_bottom_gap ||
+      settings.dock_display !== before.dock_display ||
       settings.baskets.length !== before.basket_count
     ) {
+      // 换屏（primary ⇄ mouse ⇄ 下标）要重算底边锚点与居中，跟改尺寸/抬起同一套处理
       applyDockGeometry();
       if (dockWindow && !dockWindow.isDestroyed()) {
         dockWindow.webContents.send('state:changed', { settings });
@@ -1528,6 +1729,10 @@ function wantsSettingsWindow() {
 function bootstrap() {
   settings = store.loadSettings();
   ensureBasket();
+  // 启动时落一次盘：把 normalizeBaskets 给缺色筐补出来的主色固定下来。
+  // 颜色本就按 id 稳定分配，但存一次能保证即使日后色板扩容或删筐，老筐的颜色也不会漂。
+  persist();
+  applyTheme();   // 解析深浅色（theme_mode + 壁纸亮度），设 nativeTheme，更新 resolvedTheme
   syncDockItems();
   syncDock();
   installTray();
@@ -1550,14 +1755,16 @@ if (!singleInstance) {
 
   app.whenReady().then(() => {
     app.setAppUserModelId('com.cmchen.deskbasket');
-    // 页面配色是深色主题（浅色文字），而系统材质 acrylic 会跟随系统主题渲染：
-    // 系统处于浅色模式时会画出一层浅色磨砂，浅色字压在浅色底上就"几乎看不见"。
-    // 强制深色让系统材质、原生菜单、滚动条都与页面配色一致。
+    // 深浅色在 bootstrap 里按 theme_mode + 壁纸亮度解析（applyTheme 会设 nativeTheme.themeSource，
+    // 让系统材质/滚动条/原生菜单与页面配色一致）。先兜个深色，万一主题解析出问题页面也不至于白底。
     nativeTheme.themeSource = 'dark';
     registerIpc();
     bootstrap();
     screen.on('display-metrics-changed', () => {
       applyDockGeometry();
+      // 显示器增减：下拉列表（displays）与选屏结果都可能变，重解析并广播
+      applyTheme();
+      broadcastState();
     });
   });
 

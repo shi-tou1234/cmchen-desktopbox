@@ -10,10 +10,13 @@ const path = require('node:path');
 const specials = require('./specials');
 
 const SETTINGS_FILENAME = 'settings.json';
+const SETTINGS_BACKUP_SUFFIX = '.bak';
 const APP_DIR_NAME = 'DeskBasket';
 
 const DEFAULTS = {
   accent_mode: 'off',          // off=完全透明（默认，领导指定）／acrylic=系统磨砂玻璃／blur=轻量模糊
+  theme_mode: 'auto',          // auto=按壁纸亮度切深浅色／dark／light（见 theme.js）
+  reduce_motion: false,        // 减弱动画：关掉入场/翻页/弹跳等装饰动画（保留悬停放大——它用 dock_magnify 单独控制）
   autostart: false,
   icon_size: 48,
   baskets: [],
@@ -23,6 +26,9 @@ const DEFAULTS = {
   dock_magnify: 50,            // 鼠标靠近时图标放大程度（百分比，0=不放大）
   dock_hide_delay_ms: 400,
   dock_bottom_gap: 48,         // Dock 底边离屏幕底边的距离（px）：高过自动隐藏的任务栏，不被它盖住
+  dock_display: 'primary',     // Dock 在哪块屏：'primary'／'mouse'（光标所在屏）／非负整数（按 getAllDisplays 下标）
+  popup_width: 480,            // 文件夹弹窗的尺寸：可在弹窗右下角拖着改，拖完记住
+  popup_height: 460,
   dock_items: [],
   dock_aliases: {},            // 快捷方式在 Dock 上的显示名：只存设置，绝不动磁盘上的文件名
   dock_specials: ['thispc', 'recyclebin'],  // 系统虚拟项：此电脑、回收站
@@ -47,6 +53,11 @@ const DOCK_HIDE_DELAY_MIN = 100;
 const DOCK_HIDE_DELAY_MAX = 3000;
 const DOCK_BOTTOM_GAP_MIN = 0;
 const DOCK_BOTTOM_GAP_MAX = 200;
+// 文件夹弹窗尺寸的可拖范围（像素）。下限保证标题栏＋至少一行图标，上限不至于盖满整屏。
+const POPUP_WIDTH_MIN = 260;
+const POPUP_WIDTH_MAX = 900;
+const POPUP_HEIGHT_MIN = 200;
+const POPUP_HEIGHT_MAX = 900;
 
 // 存储根目录。生产环境固定为 %APPDATA%\DeskBasket —— **对外 API 不接受任何路径参数**，
 // 从结构上就没有路径穿越入口。测试用 __setRootForTests 注入临时目录（同样做绝对路径校验）。
@@ -134,6 +145,21 @@ function clampInt(value, fallback, low, high) {
   return value;
 }
 
+// 弹窗尺寸：非法值（非整数/越界）回落到默认；合法值原样保留（含 0 之外的正常整数）。
+function clampOr(value, fallback, low, high) {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return fallback;
+  if (value < low) return low;
+  if (value > high) return high;
+  return value;
+}
+
+// Dock 在哪块屏：'primary' / 'mouse' 直接认，非负整数（按显示器下标）也认，其余回 primary。
+function normalizeDockDisplay(raw) {
+  if (raw === 'primary' || raw === 'mouse') return raw;
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0) return raw;
+  return 'primary';
+}
+
 function mergedSettings(raw) {
   const out = { ...DEFAULTS };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
@@ -144,6 +170,11 @@ function mergedSettings(raw) {
   out.accent_mode = ACCENT_MODES.includes(raw.accent_mode)
     ? raw.accent_mode
     : DEFAULTS.accent_mode;
+  out.theme_mode = require('./theme').THEME_MODES.includes(raw.theme_mode)
+    ? raw.theme_mode
+    : DEFAULTS.theme_mode;
+  out.reduce_motion =
+    typeof raw.reduce_motion === 'boolean' ? raw.reduce_motion : DEFAULTS.reduce_motion;
   out.autostart = typeof raw.autostart === 'boolean' ? raw.autostart : DEFAULTS.autostart;
   out.icon_size = clampInt(raw.icon_size, DEFAULTS.icon_size, ICON_SIZE_MIN, ICON_SIZE_MAX);
   out.baskets = require('./baskets').normalizeBaskets(raw.baskets);
@@ -170,6 +201,19 @@ function mergedSettings(raw) {
     DOCK_BOTTOM_GAP_MIN,
     DOCK_BOTTOM_GAP_MAX
   );
+  out.dock_display = normalizeDockDisplay(raw.dock_display);
+  out.popup_width = clampOr(
+    raw.popup_width,
+    DEFAULTS.popup_width,
+    POPUP_WIDTH_MIN,
+    POPUP_WIDTH_MAX
+  );
+  out.popup_height = clampOr(
+    raw.popup_height,
+    DEFAULTS.popup_height,
+    POPUP_HEIGHT_MIN,
+    POPUP_HEIGHT_MAX
+  );
   out.dock_aliases = normalizeAliases(raw.dock_aliases);
   out.dock_specials = specials.normalizeSpecials(
     'dock_specials' in raw ? raw.dock_specials : DEFAULTS.dock_specials
@@ -179,13 +223,33 @@ function mergedSettings(raw) {
   return out;
 }
 
-function loadSettings() {
+// 备份文件路径：与设置文件同目录、后缀是常量，同样做越界校验。
+// 它存的是「上一次成功保存」的配置。设置全在 %APPDATA%，坏掉等于所有筐与别名丢失，
+// 代价高、防护便宜——所以每次成功保存前，先把当前这份好文件留一个 .bak。
+function backupPath() {
+  const root = settingsDir();
+  const target = path.resolve(root, SETTINGS_FILENAME + SETTINGS_BACKUP_SUFFIX);
+  if (path.dirname(target) !== root) throw new Error('备份文件路径越界');
+  return target;
+}
+
+// 读一份并解析成合法配置；文件缺失/坏 JSON/解析异常都返回 null（不是默认值，交给调用方决定回退哪一层）
+function tryLoadFile(file) {
   try {
-    const text = fs.readFileSync(settingsPath(), 'utf8');
-    return mergedSettings(JSON.parse(text));
+    return mergedSettings(JSON.parse(fs.readFileSync(file, 'utf8')));
   } catch (_) {
-    return { ...DEFAULTS };
+    return null;
   }
+}
+
+function loadSettings() {
+  const primary = tryLoadFile(settingsPath());
+  if (primary) return primary;
+  // 主文件坏了（磁盘异常、手改坏 JSON、写一半断电）：回退到上一次成功保存的备份。
+  // 备份也读不出来（没有、或同样坏）才退回默认——绝不拿默认值覆盖磁盘，交给下次 saveSettings 重写。
+  const backup = tryLoadFile(backupPath());
+  if (backup) return backup;
+  return { ...DEFAULTS };
 }
 
 function saveSettings(settings) {
@@ -198,6 +262,17 @@ function saveSettings(settings) {
   const tmp = path.resolve(root, `.settings-${process.pid}.tmp`);
   if (path.dirname(tmp) !== root) throw new Error('临时文件路径越界');
   fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf8');
+  // 覆盖主文件之前，把「当前这份还能读出来的主文件」留一份 .bak（loadSettings 认的就是这份好文件）。
+  // 备份失败不影响主写入——它只是多加一道保险，主文件已经原子落盘了。
+  const backup = backupPath();
+  const currentGood = tryLoadFile(target);
+  if (currentGood) {
+    try {
+      fs.writeFileSync(backup, fs.readFileSync(target, 'utf8'), 'utf8');
+    } catch (_) {
+      /* 备份写不下去（磁盘满等）：不阻断主保存 */
+    }
+  }
   fs.renameSync(tmp, target);
   return merged;
 }
@@ -216,7 +291,14 @@ module.exports = {
   DOCK_MAGNIFY_MIN,
   ICON_SIZE_MAX,
   ICON_SIZE_MIN,
+  POPUP_WIDTH_MIN,
+  POPUP_WIDTH_MAX,
+  POPUP_HEIGHT_MIN,
+  POPUP_HEIGHT_MAX,
+  SETTINGS_BACKUP_SUFFIX,
+  backupPath,
   loadSettings,
+  normalizeDockDisplay,
   mergedSettings,
   normalizeAlias,
   normalizeAliases,

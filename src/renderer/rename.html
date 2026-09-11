@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; img-src 'self' data: file:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'" />
+        content="default-src 'self'; img-src 'self' data: file:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
   <title>改名</title>
   <link rel="stylesheet" href="common.css" />
   <style>
@@ -11,15 +11,15 @@
     .panel { padding: 12px 14px; gap: 8px; }
     .rename-head {
       font-size: 12px;
-      color: #b6b8c2;
+      color: var(--text-dim);
       flex: 0 0 auto;
     }
     #renameInput {
       width: 100%;
       flex: 0 0 auto;
-      background: rgba(255, 255, 255, 0.14);
-      color: #f4f4f8;
-      border: 1px solid rgba(255, 255, 255, 0.28);
+      background: var(--field-bg);
+      color: var(--field-fg);
+      border: 1px solid var(--border);
       border-radius: 8px;
       padding: 6px 10px;
       font: inherit;
@@ -27,6 +27,7 @@
       outline: none;
       user-select: text;
       cursor: text;
+      text-shadow: none;
     }
     #renameInput:focus { border-color: rgba(140, 190, 255, 0.9); }
     .rename-foot {
@@ -35,7 +36,7 @@
       gap: 8px;
       flex: 1 1 auto;
     }
-    .rename-hint { flex: 1 1 auto; font-size: 11px; color: #9a9ba4; line-height: 1.35; }
+    .rename-hint { flex: 1 1 auto; font-size: 11px; color: var(--text-faint); line-height: 1.35; }
   </style>
 </head>
 <body>
@@ -49,49 +50,6 @@
     </div>
   </div>
 
-  <script>
-    const api = window.deskbasket;
-    const params = new URLSearchParams(location.search);
-    const input = document.getElementById('renameInput');
-    const hint = document.getElementById('renameHint');
-    let done = false;
-
-    input.value = params.get('value') || '';
-    // 快捷方式改的是"别名"，磁盘上的文件名一个字都不动；筐本来就没有对应的磁盘名字
-    hint.textContent =
-      params.get('kind') === 'basket' ? '只改这个筐的名字，桌面文件不动' : '只改 Dock 上的显示名，文件名不动';
-
-    async function commit() {
-      if (done) return;
-      done = true;
-      await api.commitRename(input.value.trim());
-    }
-
-    async function cancel() {
-      if (done) return;
-      done = true;
-      await api.cancelRename();
-    }
-
-    document.getElementById('btnOk').addEventListener('click', commit);
-    document.getElementById('btnCancel').addEventListener('click', cancel);
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        commit();
-      } else if (event.key === 'Escape') {
-        event.preventDefault();
-        cancel();
-      }
-    });
-
-    // 窗口显示出来再聚焦，否则焦点会被别处抢走
-    window.addEventListener('focus', () => {
-      input.focus();
-      input.select();
-    });
-    input.focus();
-    input.select();
-  </script>
+  <script src="rename.js"></script>
 </body>
 </html>

@@ -64,6 +64,8 @@ contextBridge.exposeInMainWorld('deskbasket', {
   popupPresent: () => ipcRenderer.invoke('popup:present'),
   popupClose: () => ipcRenderer.invoke('popup:close'),
   popupNavigate: (target) => ipcRenderer.invoke('popup:navigate', { path: target }),
+  // 拖右下角改弹窗大小：主进程负责夹范围并落到该屏工作区内，尺寸随后被记住（#3）
+  resizePopup: (width, height) => ipcRenderer.invoke('popup:resize', { width, height }),
   // 主进程要收窗口时先通知渲染层播"收回"动画
   onPopupClosing: (handler) => {
     const listener = () => handler();

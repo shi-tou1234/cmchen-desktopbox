@@ -12,6 +12,7 @@ const { BrowserWindow, screen } = require('electron');
 const path = require('node:path');
 
 const behavior = require('./windowBehavior');
+const storeConstants = require('./store');
 
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
 
@@ -138,7 +139,7 @@ function listDisplays() {
 }
 
 // 文件夹弹窗：跟随「磨砂模式」设置——完全透明模式就是全透明，磨砂模式挂系统材质。
-// 置顶可聚焦（聚焦才能在失焦时自动关闭），不进任务栏，大小固定。
+// 置顶可聚焦（聚焦才能在失焦时自动关闭），不进任务栏，大小可调（右下角拖边缩放，主进程记住）。
 // 材质和 transparent 在窗口创建时锁定，所以改了模式要重新开一次弹窗才生效（本来就是每次点开重建）。
 function createPopupWindow(options = {}) {
   const {
@@ -157,9 +158,12 @@ function createPopupWindow(options = {}) {
     frame: false,
     show: false,
     hasShadow: false,
-    resizable: false,
-    minimizable: false,
+    // 可缩放但不可移动：右下角边缘能拖大拖小，位置仍锚在 Dock 图标上方由主进程摆
+    resizable: true,
+    minWidth: storeConstants.POPUP_WIDTH_MIN,
+    minHeight: storeConstants.POPUP_HEIGHT_MIN,
     maximizable: false,
+    minimizable: false,
     movable: false,
     focusable: true,
     skipTaskbar: true,

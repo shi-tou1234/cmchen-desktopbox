@@ -6,6 +6,49 @@ const { normalizePath, pathKey } = require('./store');
 
 const BASKET_NAME_MAX = 24;
 const NAME_FALLBACK = '新筐';
+
+// 每个筐一个主色：Dock 上多个文件夹筐共用同一张文件夹图时一眼分不清是谁，
+// 给图标渐变和下面的筐名都染上这个颜色就能区分。按 id 稳定分配（见 assignColor），
+// 删掉一个筐不会让其它筐的颜色跟着变。
+const BASKET_PALETTE = [
+  '#e8973a', // 琥珀（默认，最接近原来那张金色文件夹）
+  '#4c8dff', // 蓝
+  '#38b48b', // 青绿
+  '#d05c7a', // 玫红
+  '#9b6cd6', // 紫
+  '#c9a227', // 金
+  '#4bb0c4', // 天青
+  '#e0714f'  // 珊瑚
+];
+const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+// 64 位 FNV-1a 风格散列（够用即可，只为把 id 均匀映射到色板下标）。
+function hashId(text) {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+// 给定 id 和「这一批里已经用掉的颜色」，选一个：散列命中就用它，撞色就顺延到色板里第一个没用的。
+// 纯函数，不依赖 id 顺序以外的东西，所以删筐不会改变留下来的筐的颜色。
+function assignColor(id, taken) {
+  const list = BASKET_PALETTE;
+  const start = hashId(String(id)) % list.length;
+  if (!taken.has(list[start])) return list[start];
+  for (let step = 1; step < list.length; step += 1) {
+    const candidate = list[(start + step) % list.length];
+    if (!taken.has(candidate)) return candidate;
+  }
+  return list[start];
+}
+
+function isValidColor(raw) {
+  return typeof raw === 'string' && COLOR_RE.test(raw) ? raw.toLowerCase() : null;
+}
+
 const DEFAULT_WIDTH = 420;
 const DEFAULT_HEIGHT = 300;
 const MIN_WIDTH = 200;
@@ -58,6 +101,8 @@ function normalizeBasket(raw, fallbackId = 'b1') {
     w: coerceDimension(raw.w, DEFAULT_WIDTH, MIN_WIDTH),
     h: coerceDimension(raw.h, DEFAULT_HEIGHT, MIN_HEIGHT),
     visible: typeof raw.visible === 'boolean' ? raw.visible : true,
+    // 颜色先保留用户已有的合法值；缺失/非法时置 null，交给 normalizeBaskets 统一分配
+    color: isValidColor(raw.color),
     items
   };
 }
@@ -79,6 +124,14 @@ function normalizeBaskets(raw) {
     used.add(candidate);
     out.push(basket);
   });
+  // 补齐颜色：已有的合法颜色不动（保住用户看到的稳定色），缺色的按 id 从色板取一个没被占用的。
+  // 先扫一遍收集已用色，保证同一批里不重色。
+  const taken = new Set(out.map((basket) => basket.color).filter(Boolean));
+  for (const basket of out) {
+    if (basket.color) continue;
+    basket.color = assignColor(basket.id, taken);
+    taken.add(basket.color);
+  }
   return out;
 }
 
@@ -109,16 +162,19 @@ function updateItems(basket, items) {
 }
 
 function createBasket(baskets, name, x = 80, y = 80) {
-  const existing = new Set((baskets || []).map((basket) => basket.id));
+  const list = baskets || [];
+  const existing = new Set(list.map((basket) => basket.id));
   let index = 1;
   while (existing.has(`b${index}`)) index += 1;
+  const taken = new Set(list.map((basket) => basket.color).filter(Boolean));
   const basket = normalizeBasket({
     id: `b${index}`,
     name: name || `文件筐 ${index}`,
     x,
     y
   });
-  return { baskets: [...(baskets || []), basket], basket };
+  basket.color = assignColor(basket.id, taken);
+  return { baskets: [...list, basket], basket };
 }
 
 function dropBasket(baskets, id) {
@@ -127,6 +183,8 @@ function dropBasket(baskets, id) {
 
 module.exports = {
   BASKET_NAME_MAX,
+  BASKET_PALETTE,
+  COLOR_RE,
   DEFAULT_HEIGHT,
   DEFAULT_WIDTH,
   ITEM_MISSING,
@@ -136,9 +194,11 @@ module.exports = {
   MIN_WIDTH,
   NAME_FALLBACK,
   addItem,
+  assignColor,
   createBasket,
   dropBasket,
   findBasket,
+  isValidColor,
   normalizeBasket,
   normalizeBaskets,
   normalizeName,

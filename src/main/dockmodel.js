@@ -91,6 +91,37 @@ function monitorGeometry(displays, preferred = 'primary') {
   return primary ? primary.bounds : displays[0].bounds;
 }
 
+// Dock（以及锚在它上面的弹窗 / 改名窗）该落在哪块屏。displays 每项形如
+// { bounds, primary }（与 winFactory.listDisplays() 一致）。
+//   mode='mouse'   → 光标所在的那块屏；光标不在任何屏内（罕见）退回主屏
+//   mode=非负整数  → 按下标取那块屏；越界退回主屏
+//   其它（primary）→ 主屏，没有主屏就取第一块
+// 单显示器机器上三种结果一样，所以默认 primary 与旧行为完全一致。
+function pickDisplay(displays, mode, cursorPoint) {
+  if (!Array.isArray(displays) || displays.length === 0) return null;
+  const primary = displays.find((display) => display.primary) || displays[0];
+  if (mode === 'mouse' && cursorPoint) {
+    const hit = displays.find((display) => pointNearBounds(cursorPoint, display.bounds, 0));
+    if (hit) return hit;
+  }
+  if (typeof mode === 'number' && Number.isInteger(mode) && mode >= 0 && mode < displays.length) {
+    return displays[mode];
+  }
+  return primary;
+}
+
+// 滑入用的一点回弹（easeOutBack）：末段先冲过目标再收回来，做出"啪地弹到位"的手感。
+// 只在 Dock 往外滑出时用；收起方向不弹（弹一下反而拖沓）。c1/c3 是常见的 overshoot 常量。
+const OVERSHOOT = 1.70158;
+function easeOutBack(t) {
+  // 端点钉死：动画第 0 帧必须在起点、最后一帧必须精确落在终点（浮点算式会差 1e-16 级别，
+  // 用在逐帧位移上就是最后一帧停不到目标位的 bug）
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  const x = t - 1;
+  return 1 + x * x * ((OVERSHOOT + 1) * x + OVERSHOOT);
+}
+
 function revealedGeometry(screen, dockSize, edge = EDGE_BOTTOM, margin = 0, anchor = null) {
   const x = screen.x + Math.max(0, Math.floor((screen.width - dockSize.width) / 2));
   if (edge === EDGE_BOTTOM) {
@@ -323,12 +354,14 @@ module.exports = {
   MENU_ITEM_H,
   MENU_PADDING_Y,
   MENU_SEPARATOR_H,
+  OVERSHOOT,
   SHELL_WINDOW_CLASSES,
   addItem,
   basketCandidates,
   bottomAnchor,
   dockLayout,
   displayName,
+  easeOutBack,
   findIndex,
   foregroundBlocksDock,
   hiddenGeometry,
@@ -339,6 +372,7 @@ module.exports = {
   menuLayout,
   monitorGeometry,
   moveItem,
+  pickDisplay,
   pointNearBounds,
   popupGeometry,
   removeItem,
