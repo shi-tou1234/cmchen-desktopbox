@@ -144,12 +144,14 @@
           api.toggleFolder({ kind: 'basket', id: entry.id }, centerX);
         } else if (entry.type === 'special') {
           api.openSpecial(entry.id).then((result) => {
-            if (result && result.ok === false) alert('打不开「' + entry.name + '」：\n' + result.error);
+            if (result && result.ok === false) {
+              api.alertMessage('打不开「' + entry.name + '」：\n' + result.error);
+            }
           });
         } else {
           api.activateDockItem(entry.path, centerX).then((result) => {
             if (result && result.opened === 'app' && result.ok === false) {
-              alert('打不开这一项：\n' + entry.path);
+              api.alertMessage('打不开这一项：\n' + entry.path);
             }
           });
         }

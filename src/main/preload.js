@@ -84,9 +84,10 @@ contextBridge.exposeInMainWorld('deskbasket', {
 
   // 窗口自身的动作
   closeWindow: () => ipcRenderer.invoke('window:close'),
-  toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
-  saveGeometry: (rect) => ipcRenderer.invoke('window:geometry', { rect }),
   startDrag: (offset) => ipcRenderer.send('window:drag-start', offset),
+
+  // 提示框交给主进程弹：Dock 窗口不可聚焦，页内 alert 会阻塞渲染进程（和 window.prompt 同一类问题）
+  alertMessage: (text) => ipcRenderer.invoke('ui:alert', { text: String(text || '') }),
 
   // 页面内右键菜单：交给主进程弹原生菜单，避免被小窗口裁掉
   popupMenu: (items, x, y) => ipcRenderer.invoke('menu:popup', { items, x, y }),

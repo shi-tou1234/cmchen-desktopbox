@@ -54,9 +54,22 @@ test('默认配置：完全透明 ＋ Dock 开着且自动收起', () => {
   assert.strictEqual(store.DEFAULTS.dock_auto_hide, true);
 });
 
-test('默认窗口行为：文件筐＝普通窗口；Dock 的显隐由自动收起开关控制', () => {
-  assert.strictEqual(store.DEFAULTS.basket_behavior, 'normal');
-  assert.strictEqual(store.DEFAULTS.dock_auto_hide, true);
+test('退休字段：读到旧配置里的 basket_behavior / dock_behavior 会被清掉', () => {
+  // 这两个字段已经没有任何代码读取，留着会让人以为"能调但没效果"
+  const merged = store.mergedSettings({
+    basket_behavior: 'floating',
+    dock_behavior: 'desktop',
+    dock_always_visible: true,
+    dock_auto_hide: false
+  });
+  assert.ok(!('basket_behavior' in merged));
+  assert.ok(!('dock_behavior' in merged));
+  assert.ok(!('dock_always_visible' in merged));
+  assert.strictEqual(merged.dock_auto_hide, false);
+});
+
+test('未知字段仍然原样保留（版本间往返不丢）', () => {
+  assert.strictEqual(store.mergedSettings({ 未来字段: 42 }).未来字段, 42);
 });
 
 test('窗口行为三个 profile 与 token 一致', () => {

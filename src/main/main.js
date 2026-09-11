@@ -93,6 +93,17 @@ function persist() {
   return settings;
 }
 
+// 渲染层来源页（日志里用来指出"谁干的"）：dock.html / settings.html / popup.html
+function pageTag(event) {
+  try {
+    const url = event && event.sender ? String(event.sender.getURL() || '') : '';
+    const file = url.split('/').pop() || '';
+    return file.split('?')[0] || 'unknown';
+  } catch (_) {
+    return 'unknown';
+  }
+}
+
 // 出问题要看得见：页面加载失败、渲染进程抛错都转发到主进程 stderr
 function attachDiagnostics(win, tag) {
   win.webContents.on('did-fail-load', (_event, code, description, url) => {
@@ -490,7 +501,7 @@ function createDockWindow() {
 
 // 把若干路径加进 Dock：重复的跳过，并从"移除过"的黑名单里解封（拖入、设置面板勾选、
 // 文件选择器三条路都走这里，行为一致）
-function addDockPaths(paths) {
+function addDockPaths(paths, from = '?') {
   let items = settings.dock_items;
   for (const item of paths || []) {
     const result = dockmodel.addItem(items, item);
@@ -498,6 +509,7 @@ function addDockPaths(paths) {
     settings.dock_removed = dockmodel.removeItem(settings.dock_removed, item);
   }
   settings.dock_items = items;
+  console.log(`[dock] 加入 ${(paths || []).length} 条（来源 ${from}）→ 现有 ${items.length} 条`);
   persist();
   syncDock();
   return items;
@@ -921,7 +933,7 @@ function registerIpc() {
     return settings.dock_specials;
   });
 
-  ipcMain.handle('dock:add', (_event, { paths }) => addDockPaths(paths));
+  ipcMain.handle('dock:add', (event, { paths }) => addDockPaths(paths, pageTag(event)));
 
   // 设置面板里的"逐个添加"：列出桌面上可收录的条目，并标出哪些已经在 Dock 上
   ipcMain.handle('dock:candidates', () =>
@@ -948,17 +960,28 @@ function registerIpc() {
     return addDockPaths(picked.filePaths);
   });
 
-  ipcMain.handle('dock:remove', (_event, { itemPath }) => {
+  ipcMain.handle('dock:remove', (event, { itemPath }) => {
     settings.dock_items = dockmodel.removeItem(settings.dock_items, itemPath);
     const blocked = dockmodel.addItem(settings.dock_removed, itemPath);
     settings.dock_removed = blocked.items;
+    // 记录来源页：条目被"莫名移除"时，这条日志能指出是谁干的
+    console.log(
+      `[dock] 移除条目（来源 ${pageTag(event)}）${path.basename(String(itemPath || ''))} → 现有 ${settings.dock_items.length} 条`
+    );
     persist();
     syncDock();
     return settings.dock_items;
   });
 
-  ipcMain.handle('dock:reorder', (_event, { items }) => {
-    settings.dock_items = store.normalizePathList(items);
+  ipcMain.handle('dock:reorder', (event, { items }) => {
+    const next = store.normalizePathList(items);
+    if (next.length !== settings.dock_items.length) {
+      // 重排不该改变条目数量：数量变了说明渲染层传错了，记下来（这条曾经导致条目被清空）
+      console.log(
+        `[dock] 重排把条目数从 ${settings.dock_items.length} 改成 ${next.length}（来源 ${pageTag(event)}）`
+      );
+    }
+    settings.dock_items = next;
     persist();
     syncDock();
     return settings.dock_items;
@@ -1086,6 +1109,20 @@ function registerIpc() {
   ipcMain.handle('window:close', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win && !win.isDestroyed()) win.close();
+    return true;
+  });
+
+  // 渲染层要提示用户时走这里：由主进程弹，不阻塞页面。
+  // （Dock 窗口 focusable:false，页内的 alert 会把渲染进程卡住，跟 window.prompt 一个坑）
+  ipcMain.handle('ui:alert', async (_event, payload = {}) => {
+    const message = String(payload.text || '').slice(0, 500);
+    if (!message) return false;
+    await dialog.showMessageBox({
+      type: 'warning',
+      title: APP_NAME,
+      message,
+      buttons: ['好']
+    });
     return true;
   });
 

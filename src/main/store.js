@@ -7,7 +7,6 @@
 const fs = require('node:fs');
 const os = require('node:os');
 
-const behavior = require('./windowBehavior');
 const path = require('node:path');
 const specials = require('./specials');
 
@@ -26,10 +25,11 @@ const DEFAULTS = {
   dock_hide_delay_ms: 400,
   dock_items: [],
   dock_specials: ['thispc', 'recyclebin'],  // 系统虚拟项：此电脑、回收站
-  dock_removed: [],
-  // 窗口行为，与 token 的 windowBehavior 同一套：floating / normal / desktop
-  basket_behavior: 'normal'    // 文件筐＝普通窗口；Dock 固定于桌面 + 常驻可见由开关决定
+  dock_removed: []
 };
+
+// 已经退休、不再有任何代码读取的字段：读到旧配置时顺手删掉，别让配置里留着"看着能调其实无效"的项
+const RETIRED_KEYS = ['basket_behavior', 'dock_behavior', 'dock_always_visible'];
 
 const ACCENT_MODES = ['off', 'acrylic', 'blur'];
 // 与 token 监测一致：它也有「磨砂」和「完全透明」两种模式，这里一一对应
@@ -139,13 +139,11 @@ function mergedSettings(raw) {
     DOCK_HIDE_DELAY_MAX
   );
   out.dock_items = normalizePathList(raw.dock_items);
-  // 旧的 dock_always_visible 字段从来没被代码读过，直接用 dock_auto_hide 取代
-  delete out.dock_always_visible;
   out.dock_specials = specials.normalizeSpecials(
     'dock_specials' in raw ? raw.dock_specials : DEFAULTS.dock_specials
   );
   out.dock_removed = normalizePathList(raw.dock_removed);
-  out.basket_behavior = behavior.normalizeWindowBehavior(raw.basket_behavior, 'normal');
+  for (const key of RETIRED_KEYS) delete out[key];
   return out;
 }
 

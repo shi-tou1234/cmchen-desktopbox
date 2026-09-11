@@ -1,6 +1,6 @@
 # DeskBasket · 桌面文件筐 ＋ 底部 Dock
 
-把桌面上散落的文件、文件夹、快捷方式收进玻璃/透明的面板里分类摆放；面板里的项目双击就能打开，右键文件夹还能钻进一个内置的"类资源管理器"页面逐级往下看。屏幕底部有一条常驻的常用软件栏（Dock），固定贴在桌面底部。
+把桌面上散落的文件、文件夹、快捷方式收进玻璃/透明的面板里分类摆放；面板里的项目双击就能打开，文件夹还能继续往里钻（同一个面板内换目录，不再另开窗口）。屏幕底部有一条常用软件栏（Dock），**只在桌面上显示**：默认鼠标离开就收起，碰一下底边滑出来；也可以切成「常驻显示」，那时它待在桌面层——桌面之上、所有应用窗口之下，不会压在其他程序上面。
 
 **技术栈：Electron（与 `D:\项目\token监测` 同架构）。** 之前的 Python/Qt 实现保留在仓库里（标签 `v2.2.0-python`），但不再是主线——原因见下面「为什么从 Qt 换成 Electron」。
 
@@ -14,13 +14,13 @@ Windows 11 实测通过（build 26200.9445）。
 
 ## 两种透明度模式
 
-设置面板里可切换，改完会**重建窗口**立即生效（Electron 的透明与材质参数在窗口创建时锁定，只能重建）。
+设置面板里可切换（`完全透明` / `磨砂玻璃` / `轻量模糊`），改完会**重建窗口**立即生效（Electron 的透明与材质参数在窗口创建时锁定，只能重建）。**文件夹弹窗同样跟随这个设置**：完全透明模式下它就是全透明，磨砂模式下挂系统材质（弹窗每次点开都重建，所以改完设置再打开即生效）。
 
 | 模式 | 实现 | 实测透光比 | 观感 |
 |---|---|---|---|
 | **完全透明**（默认） | `transparent: true`，不挂材质；页面不铺任何底色，只留一圈细边框 ＋ 文字阴影 | **1.000** | 桌面完全透出来，零衰减 |
 | **磨砂玻璃** | `transparent: false` + `backgroundMaterial: 'acrylic'` | 0.86（糊化 0.09） | 背后内容被糊开，是真磨砂 |
-| 轻量模糊 | 老 API `BLURBEHIND` | 0.60 | 部分系统上会偏暗 |
+| 轻量模糊 | 目前与「磨砂玻璃」同实现 | 0.86 | 当年 Python 版走的是老 API `BLURBEHIND`，Electron 版还没单独实现这一档 |
 
 **透光比怎么测的**：透明度必须用**纯色背板**量，不能拿真实桌面当参照——真实桌面内容不均匀，跨着面板边缘取样会得出假数值（我一开始就因此得出 0.85 的错误结论，还以为窗口在压暗）。做法是 `tools/opacity-meter.js`：先铺一块自己控制的 120 灰度背板，再把透明面板盖上去，比较面板内外：
 
@@ -31,34 +31,29 @@ Windows 11 实测通过（build 26200.9445）。
 → 透光比 1.000 （1.00 = 完全透明）
 ```
 
-## 窗口行为（与 token 监测的 `windowBehavior` 同一套）
+## 窗口行为（沿用 token 监测的 `windowBehavior`）
 
-token 有三个模式，本程序直接沿用同一套 profile 与语义，设置面板里可分别给「文件筐」和「Dock」选：
+窗口工厂里保留了 token 的三个 profile（`floating` 浮动置顶 / `normal` 普通窗口 / `desktop` 固定于桌面），**显式传入的选项优先于 profile**——Dock 的「常驻显示」与「自动收起」就是这么实现的（它不是 profile 里的任何一个，只能靠覆盖）。
 
-| 模式 | 置顶 | 可拖动 | 可缩放 | 本程序用途 |
-|---|---|---|---|---|
-| `floating` 浮动置顶 | ✅ | ✅ | ✅ | 想让它浮在其他窗口上方时选 |
-| `normal` **普通窗口** | ❌ | ✅ | ✅ | **文件筐默认**：可聚焦、进任务栏、可缩放最小化、双击标题条最大化 |
-| `desktop` **固定于桌面** | ❌ | ❌ | ❌ | **Dock 默认**：固定在桌面底部居中，不可拖走、不可缩放、不置顶 |
+| Dock 的显示模式 | 窗口 | 位置 | 效果 |
+|---|---|---|---|
+| **常驻显示** | 不置顶 | 建好后按 z 序逐步下沉到桌面层 | 桌面可见；任何窗口盖住底部时它就在后面，不压其他程序 |
+| **自动收起**（默认） | 置顶 | 鼠标不在附近就滑到屏幕外 | 不工作时完全不占屏幕，碰底边滑出且盖得住同样贴边的任务栏 |
 
-注意 `desktop` 在这套实现里**不是置顶**、也不用 Win32 的 z 序技巧——就是「不置顶 ＋ 不能拖 ＋ 不能缩放 ＋ 带 `desktop-mode` 类」，这与 token 完全一致。真机核对（窗口扩展样式）：
-
-```
-DeskBasket Dock  EX=0x00200100  置顶=False 工具窗=False NOREDIR=True   ← desktop 模式
-文件筐            EX=0x00200100  置顶=False 工具窗=False NOREDIR=True   ← normal 模式
-```
+「常驻显示」为什么要逐步下沉：Windows 的 z 序最底部是壁纸层与桌面层，`HWND_BOTTOM` 之类直接压到底会让窗口掉到壁纸**下面**（"可见却看不见"）；而把非置顶窗口插到**置顶**窗口之后又会被提升为置顶。所以做法是每一步只看「z 序里紧挨在它下面的那个窗口是谁」，是桌面层就停，否则插到它后面再来一步（见 `src/main/windowLayer.js`，实测 13~17 步收敛）。
 
 ## 功能
 
-- **文件筐**：按领导要求做成**普通窗口**——可聚焦、进任务栏、可缩放最小化、双击标题条最大化；位置大小持久化，重启后回到原处。
+- **文件夹弹窗（筐）**：点 Dock 上的文件夹图标弹出，**同一个面板内换目录**——双击文件夹往下钻、`⌂` 回筐、`↑` 上一级、`✕` 关闭；双击文件用系统默认程序打开，右键有「打开 / 在系统资源管理器中显示 / 从这个筐移除」。位置锚在图标上方，鼠标离开自动关。打开/收起有「从图标抽出来」的动画（磨砂模式下窗口整体同时淡入淡出）。
 - **底部 Dock**：**只在桌面上显示**，不压在其他程序上面。
   - **两种模式**（设置里切换）：**常驻显示**＝放进桌面层（桌面之上、所有应用窗口之下，窗口盖住底部时它就在后面）；**自动收起**（默认）＝鼠标不在附近就滑到屏幕外，碰一下底边滑出。
   - **三种添加方式**：设置面板「Dock 上的快捷方式」里逐个勾选桌面上的条目、点「选择文件添加…」从磁盘任意位置挑、或直接把文件/文件夹拖到 Dock 上；桌面新出现的 `.lnk` / `.url` / `.exe` 也会自动收录。
   - 图标取的是**不带 Windows 小箭头**的原图（`.lnk` 交给 Windows shell 解析后取系统图标列表里的原图，叠加的小箭头是 shell 绘制视图时才加的，不在图里）；「此电脑 / 回收站」两个系统图标也支持右键移除。
   - 拖动图标调整顺序并持久化；右键「从 Dock 移除」只去掉登记，磁盘文件不动，而且**移除过的不会再被自动收录加回来**。
   - 悬停只放大图标（放大程度与图标大小都可设置），不铺底色、不弹名称气泡。
-- **内置文件浏览器**：可点面包屑、返回、上一级（已在根目录时置灰），双击文件夹继续深入；只读遍历、零写操作，大目录分批渲染。
-- **托盘常驻**：显示所有筐、新建筐、显示/隐藏 Dock、Dock 常驻开关、设置、开机自启、退出。
+  - 右键菜单是**系统原生菜单**（不受 Dock 窗口只有 111px 高的限制）。已知限制：原生菜单在不可聚焦的 Dock 窗口上**收不到键盘**，只能用鼠标点。
+- **设置面板**：外观（磨砂模式、弹窗图标大小）、Dock（显示开关、常驻/自动收起、图标大小、悬停放大程度）、快捷方式清单、文件夹管理（改名 / 清理失效项 / 新建 / 删除）、开机自启、恢复默认。
+- **托盘常驻**：新建文件夹、显示/隐藏 Dock、设置、开机自启、退出。
 - **单实例**：重复启动会被挡下，避免两条 Dock 抢同一份配置。
 - **开机自启**：写 `HKCU\...\CurrentVersion\Run`，值名 `DeskBasket`，开关幂等。
 
@@ -67,7 +62,7 @@ DeskBasket Dock  EX=0x00200100  置顶=False 工具窗=False NOREDIR=True   ← 
 ```bash
 npm install                 # 装依赖（Electron 二进制走 npmmirror 镜像，实测 6.4 MB/s）
 npm start                   # 启动
-npm test                    # 跑纯逻辑单测（node --test，31 条）
+npm test                    # 跑纯逻辑单测（node --test，66 条）
 ```
 
 > 本机的 npm 11 有 `allow-scripts` 策略，会跳过 Electron 的下载脚本。换机器时若 `node_modules/electron/dist` 为空，手动补一次二进制：
@@ -87,19 +82,27 @@ npm run dist                # electron-builder --win portable，产物在 dist/
 
 ```
 package.json            Electron 工程（main / scripts / build 配置）
-src/main/main.js        主进程：窗口编排、托盘、IPC、自启、Dock 位置
-src/main/windows.js     窗口工厂（透明模式 / 磨砂模式、普通窗口 / 挂件窗口）
+src/main/main.js        主进程：窗口编排、托盘、IPC、自启、Dock 位置与收放、文件夹弹窗
+src/main/windows.js     窗口工厂（完全透明 / 系统磨砂、文件夹弹窗、行为 profile）
+src/main/windowBehavior.js  token 的三个窗口行为 profile（floating / normal / desktop）
+src/main/windowLayer.js 把常驻的 Dock 逐步下沉到「桌面之上、应用窗口之下」
+src/main/shellIcons.js  向 Windows shell 要图标（快捷方式由 shell 解析，取无叠加原图；虚拟项走 PIDL）
+src/main/specials.js    Dock 的系统虚拟项定义（此电脑 / 回收站）
 src/main/preload.js     渲染层能用的 API（走 contextBridge，页面不碰 Node）
 src/main/store.js       配置持久化（%APPDATA%\DeskBasket\settings.json，原子写、未知字段保留）
 src/main/baskets.js     筐数据模型（纯函数）
-src/main/dockmodel.js   Dock 纯逻辑（热区、全屏判定、位置、收录、排序）
+src/main/dockmodel.js   Dock 纯逻辑（热区、位置、收录、排序、候选清单）
 src/main/filebrowse.js  目录列举（只读，异常转中文提示）
 src/main/autostart.js   开机自启（注册表）
-src/renderer/*.html     basket / dock / explorer / settings 四个页面
-src/renderer/common.css 共用样式（半透明面板、两行名称截断、悬停放大）
-src/renderer/menu.js    页面内右键菜单（Electron 里 window.prompt 不可靠）
-tests/core.test.js      31 条纯逻辑单测
+src/renderer/dock.html  Dock 页面（图标、放大动画、拖拽排序、右键菜单）
+src/renderer/popup.html 文件夹弹窗（网格、导航、开关动画）
+src/renderer/settings.html 设置面板
+src/renderer/common.css 共用样式（透明面板、两行名称截断、图标网格）
+src/renderer/menu.js    右键菜单转发（交给主进程弹系统原生菜单）
+tests/core.test.js      66 条纯逻辑单测
 tools/glass-probe.js    玻璃探针：把几种透明/材质配置并排显示，用于真机比对
+tools/icon-proof.js     图标取证：把桌面上每个快捷方式的图标抽出来存 PNG，并做拼图
+scripts/desktop_snapshot.py / desktop_compare.py  只读快照与比对（证明程序没动过桌面）
 docs/                   截图与实测取证
 ```
 
