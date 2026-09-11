@@ -46,6 +46,8 @@ const POPUP_EDGE_GAP = 8;    // 弹窗与屏幕左右/上边的最小距离
 const POPUP_DOCK_GAP = 10;   // 弹窗与 Dock 上沿的间距
 const POPUP_BLUR_CLOSE_MS = 220; // 失焦后多久关（留出"点击 Dock 图标切换"的时间）
 const POPUP_CLOSE_ANIM_MS = 200; // 收起动画时长：先让渲染层缩回去，再销毁窗口
+const POPUP_FADE_MS = 160;       // 窗口整体淡入/淡出：磨砂模式下材质底是不透明的，
+const POPUP_FADE_STEPS = 7;      // 光靠内容缩放会和材质底对不上，所以两者一起做
 // 鼠标离开自动关：弹窗显示不抢焦点（showInactive），拿不到系统失焦事件，
 // 由主进程轮询鼠标位置——不在弹窗 ∪ Dock 的附近区域连续一段时间就关。
 const POPUP_HOVER_CHECK_MS = 250;
@@ -558,6 +560,38 @@ function popupDataFor(kind, payload = {}) {
   return null;
 }
 
+// 窗口整体淡入/淡出。磨砂模式下窗口底是不透明的系统材质，只有内容缩放的话
+// 会出现"磨砂矩形瞬间铺满、内容在里面缩"的错位，所以整体也淡一下。
+function fadeWindow(win, from, to) {
+  if (!win || win.isDestroyed() || typeof win.setOpacity !== 'function') return;
+  try {
+    win.setOpacity(from);
+  } catch (_) {
+    return;
+  }
+  let step = 0;
+  const timer = setInterval(() => {
+    if (!win || win.isDestroyed()) {
+      clearInterval(timer);
+      return;
+    }
+    step += 1;
+    const ratio = Math.min(1, step / POPUP_FADE_STEPS);
+    try {
+      win.setOpacity(from + (to - from) * ratio);
+    } catch (_) {
+      clearInterval(timer);
+      try {
+        win.setOpacity(to);
+      } catch (_) {
+        /* 个别平台不支持透明度：那就保持原样 */
+      }
+      return;
+    }
+    if (ratio >= 1) clearInterval(timer);
+  }, Math.max(12, Math.round(POPUP_FADE_MS / POPUP_FADE_STEPS)));
+}
+
 // 关文件夹弹窗：先通知渲染层播"收回"动画，动画时长后再销毁窗口。
 // 立刻销毁会看到窗口"啪"地消失，和打开时的抽出动画对不上。
 function closeFolderPopup() {
@@ -574,6 +608,7 @@ function closeFolderPopup() {
   } catch (_) {
     /* 页面可能还没就绪：直接销毁即可 */
   }
+  fadeWindow(win, 1, 0);
   setTimeout(() => {
     if (!win.isDestroyed()) win.destroy();
   }, POPUP_CLOSE_ANIM_MS);
@@ -644,7 +679,12 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
   );
 
   popupKey = popupKeyFor(kind, payload);
-  const win = winFactory.createPopupWindow({ ...rect, title: `${APP_NAME} · ${data.name}` });
+  const win = winFactory.createPopupWindow({
+    ...rect,
+    // 跟随「磨砂模式」：完全透明就全透，磨砂就挂系统材质
+    glass: winFactory.glassEnabled(settings),
+    title: `${APP_NAME} · ${data.name}`
+  });
   attachDiagnostics(win, 'popup');
   popupWindow = win;
   // 动画原点：被点开的 Dock 图标中心在弹窗里的横向比例（配合底边原点 = 从图标抽出来）
@@ -693,24 +733,39 @@ async function toggleFolderPopup(kind, payload, anchorXInDock) {
 
 // ------------------------------------------------------------------ 窗口：设置
 
-function openSettings() {
+// 打开设置窗口；带 basketId 时顺便让面板选中那个筐（Dock 右键「改名…」走这条路——
+// Electron 不支持 window.prompt，调用它会阻塞渲染进程，Dock 看起来就像卡死了）。
+function openSettings(basketId) {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.show();
     settingsWindow.focus();
-    return settingsWindow;
+  } else {
+    settingsWindow = winFactory.createBehaviorWindow('normal', {
+      glass: winFactory.glassEnabled(settings),
+      width: 560,
+      height: 560,
+      title: `${APP_NAME} 设置`
+    });
+    attachDiagnostics(settingsWindow, 'settings');
+    winFactory.loadPage(settingsWindow, 'settings.html');
+    settingsWindow.once('ready-to-show', () => settingsWindow.show());
+    settingsWindow.on('closed', () => {
+      settingsWindow = null;
+    });
   }
-  settingsWindow = winFactory.createBehaviorWindow('normal', {
-    glass: winFactory.glassEnabled(settings),
-    width: 560,
-    height: 560,
-    title: `${APP_NAME} 设置`
-  });
-  attachDiagnostics(settingsWindow, 'settings');
-  winFactory.loadPage(settingsWindow, 'settings.html');
-  settingsWindow.once('ready-to-show', () => settingsWindow.show());
-  settingsWindow.on('closed', () => {
-    settingsWindow = null;
-  });
+  if (basketId) {
+    // 页面可能还没加载完：等它就绪再发（loadFile 完成前 send 会丢）
+    const announce = () => {
+      if (settingsWindow && !settingsWindow.isDestroyed()) {
+        settingsWindow.webContents.send('settings:select-basket', basketId);
+      }
+    };
+    if (settingsWindow.webContents.isLoading()) {
+      settingsWindow.webContents.once('did-finish-load', announce);
+    } else {
+      announce();
+    }
+  }
   return settingsWindow;
 }
 
@@ -951,7 +1006,10 @@ function registerIpc() {
   ipcMain.handle('popup:present', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     // showInactive：显示但不抢用户当前应用的焦点（Dock 本身也不抢焦点，体验一致）
-    if (win === popupWindow && !win.isDestroyed()) win.showInactive();
+    if (win === popupWindow && !win.isDestroyed()) {
+      fadeWindow(win, 0, 1);
+      win.showInactive();
+    }
     return true;
   });
 
@@ -990,8 +1048,8 @@ function registerIpc() {
 
   ipcMain.handle('file:list', (_event, { path: target }) => filebrowse.listEntries(target));
 
-  ipcMain.handle('window:settings', () => {
-    openSettings();
+  ipcMain.handle('window:settings', (_event, payload = {}) => {
+    openSettings(payload && payload.basketId);
     return true;
   });
 

@@ -175,8 +175,10 @@
             } else if (picked === 'prune') {
               api.pruneMissing(entry.id);
             } else if (picked === 'rename') {
-              const name = window.prompt('筐的名字：', entry.name);
-              if (name && name.trim()) api.updateBasket({ id: entry.id, name: name.trim().slice(0, 24) });
+              // 不能在 Dock 里弹输入框：Electron 不支持 window.prompt（调用会阻塞渲染
+              // 进程，Dock 看起来就像卡死），而且 Dock 窗口本身不可聚焦、收不了键盘。
+              // 所以交给设置面板里那个改名输入框，并让它选好这个筐。
+              api.openSettings(entry.id);
             } else if (picked === 'delete') {
               api.deleteBasket(entry.id);
             }

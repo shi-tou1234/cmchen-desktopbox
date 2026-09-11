@@ -68,7 +68,13 @@ contextBridge.exposeInMainWorld('deskbasket', {
   addPathsToBasket: (basketId, paths) => ipcRenderer.invoke('basket:add', { basketId, paths }),
 
   // 设置
-  openSettings: () => ipcRenderer.invoke('window:settings'),
+  openSettings: (basketId) => ipcRenderer.invoke('window:settings', { basketId }),
+  // 被点名改名的筐：面板选中它并聚焦名字输入框
+  onSelectBasket: (handler) => {
+    const listener = (_event, basketId) => handler(basketId);
+    ipcRenderer.on('settings:select-basket', listener);
+    return () => ipcRenderer.removeListener('settings:select-basket', listener);
+  },
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', { patch }),
   getAutostart: () => ipcRenderer.invoke('autostart:get'),
   setAutostart: (enabled) => ipcRenderer.invoke('autostart:set', { enabled }),

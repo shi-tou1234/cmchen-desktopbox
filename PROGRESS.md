@@ -724,3 +724,57 @@ Dock 在桌面层之下——"IsWindowVisible 为真但看不见"这个坑，上
 - `npm test` → **64 passed / 0 fail**（新增桌面层类名一致性与句柄解析 2 条）。
 - 真机核对：常驻模式下 ZCode 铺满屏幕时 **Dock 完全被盖住**（截图确认，不再浮在它上面）；
   露出桌面时 **三个图标（此电脑 / 回收站 / 文件夹）正常可见**。
+
+## 三处修复：钩子报错 / 改名卡住 / 弹窗不跟随磨砂
+
+### 1. 安全钩子那条「跨文件污点」
+
+钩子每次提交都报 `scripts/desktop_snapshot.py:82` 与 `scripts/window_dump.py:134`，位置都是
+`sys.exit(main(sys.argv))`——**每个命令行脚本都有这么一行**，它盯的是"命令行参数流进 main"。
+
+实际情况：`desktop_snapshot.py` 早就只读 `docs/` 下两个固定文件名（`load_pair` 里写死），
+`window_dump.py` 的抗词只用来比对窗口标题，都不存在危险数据流，属于保守的启发式误报。
+但只要数据流在，钩子就会一直报，所以**把数据流切断**而不是删工具：
+
+- `compare()` / `load_pair()` 改成不带参数（参数只用于选 before/after，改成内部固定传字符串）；
+- `window_dump.py` 的过滤词先过一遍 `sanitize_needle()`（限长 64 + 只留可见字符）再用。
+
+两个脚本复跑确认功能没坏：`dump` / `compare`（`DESKTOP_UNCHANGED_OK`）/ 非法子命令回用法 /
+`window_dump.py deskbasket` 能过滤出 Dock 窗口。
+
+### 2. 「选改名后直接卡住」＝ Electron 不支持 `window.prompt`
+
+日志里是硬证据（两次点击两次报错）：
+
+```
+[dock] 渲染层报错: Uncaught (in promise) Error: prompt() is not supported.
+      (file:///D:/项目/桌面整理/src/renderer/dock.html:188)
+```
+
+Electron 里 `window.prompt` 没有实现，调用**直接抛异常**：菜单关掉、什么都不发生、也没有
+任何提示——看起来就是"卡住、没响应"。这也是"测试全绿但功能是坏的"的又一例（单测覆盖不到
+渲染层的弹窗 API）。
+
+改法：Dock 里不可能弹输入框（Electron 不支持 prompt，而且 Dock 窗口不可聚焦、收不到键盘），
+所以**右键「改名…」改为打开设置面板里那个已有的改名输入框**，并让面板自动选中这个筐、
+聚焦并全选名字：新增 `openSettings(basketId)` → 主进程发 `settings:select-basket`（等页面
+`did-finish-load` 再发，避免丢事件），渲染层 `selectBasket()` 负责选中 + 聚焦。
+
+### 3. 磨砂模式对文件夹弹窗无效
+
+上一轮按"要完全透明"的要求，把弹窗那套自研材质（截屏＋模糊）整条删掉了，于是设置里的
+磨砂模式对它不再有任何作用。现在**弹窗跟随 `accent_mode`**：`createPopupWindow` 用
+`glassOptions(glassEnabled(settings))`——完全透明模式就是透明窗口，磨砂模式挂系统材质
+（与设置面板／文件筐窗口同一套）。材质和 `transparent` 在建窗时锁定，而弹窗每次点开都重建，
+所以改完设置重新打开即生效。
+
+**顺带修掉一个连带问题**：挂材质后窗口底是不透明的，而原来的开合动画只缩放"内容"，
+会出现"磨砂矩形瞬间铺满、内容在里面缩"的错位。所以又加了**窗口整体淡入淡出**
+（`setOpacity` 分帧，160ms），两种模式下的开关动画都成立。
+
+### 验收
+
+- `npm test` → **64 passed / 0 fail**；两个 Python 脚本语法（`py_compile`）与功能复跑正常。
+- 钩子的两个标记点已按上面方式切断数据流，待下一次提交时观察是否还会报。
+- 待领导点一次确认（我这边的输入通道被前台校验锁住了，点不到 Dock）：
+  右键「改名…」应打开设置面板并选中该文件夹；点文件夹应能看到磨砂/透明随设置变化。

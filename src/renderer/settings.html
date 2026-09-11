@@ -139,6 +139,17 @@
       }
     }
 
+    // Dock 右键「改名…」会带 basketId 打开这里：选中那个筐并聚焦名字输入框
+    function selectBasket(basketId) {
+      const basket = settings.baskets.find((item) => item.id === basketId);
+      if (!basket) return;
+      selectedBasketId = basket.id;
+      renderBaskets();
+      el('basketName').value = basket.name;
+      el('basketName').focus();
+      el('basketName').select();
+    }
+
     function render() {
       loading = true;
       el('accent').innerHTML = '';
@@ -273,6 +284,8 @@
       settings = payload.settings;
       render();
     });
+    // Dock 右键「改名…」→ 主进程打开本窗口并点名要改哪个筐
+    if (api.onSelectBasket) api.onSelectBasket((basketId) => selectBasket(basketId));
 
     (async () => {
       await refresh();

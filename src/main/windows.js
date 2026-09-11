@@ -137,14 +137,16 @@ function listDisplays() {
   }));
 }
 
-// 文件夹弹窗：完全透明窗口（材质由渲染层自研——截屏＋高斯模糊），
+// 文件夹弹窗：跟随「磨砂模式」设置——完全透明模式就是全透明，磨砂模式挂系统材质。
 // 置顶可聚焦（聚焦才能在失焦时自动关闭），不进任务栏，大小固定。
+// 材质和 transparent 在窗口创建时锁定，所以改了模式要重新开一次弹窗才生效（本来就是每次点开重建）。
 function createPopupWindow(options = {}) {
   const {
     width = 480,
     height = 460,
     x,
     y,
+    glass = true,
     title = 'DeskBasket 文件夹'
   } = options;
   const win = new BrowserWindow({
@@ -155,8 +157,6 @@ function createPopupWindow(options = {}) {
     frame: false,
     show: false,
     hasShadow: false,
-    transparent: true,
-    backgroundColor: '#00000000',
     resizable: false,
     minimizable: false,
     maximizable: false,
@@ -170,7 +170,8 @@ function createPopupWindow(options = {}) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
-    }
+    },
+    ...glassOptions(glass)
   });
   win.setAlwaysOnTop(true, 'floating');
   win.setMenuBarVisibility?.(false);

@@ -31,10 +31,10 @@ def snapshot():
     return {"dir": root, "count": len(entries), "entries": entries}
 
 
-def load_pair(argv):
-    """按 docs 下的固定文件名读取两份快照，路径不接受任意输入。"""
-    arg = argv[2] if len(argv) > 2 else "before"
-    suffix = "after" if arg == "after" else "before"
+def load_pair(suffix):
+    """只读 docs 下固定的两个文件名：路径完全由本函数决定，不接受外部传入的路径。"""
+    if suffix not in ("before", "after"):
+        suffix = "before"
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     docs_dir = os.path.join(project_root, "docs")
     name = "desktop_after.json" if suffix == "after" else "desktop_before.json"
@@ -42,9 +42,10 @@ def load_pair(argv):
         return json.load(handle)
 
 
-def compare(argv):
-    before = load_pair([None, None, "before"])
-    after = load_pair([None, None, "after"])
+def compare():
+    """比较 docs 下的两份固定快照。刻意不带参数：命令行参数到此为止。"""
+    before = load_pair("before")
+    after = load_pair("after")
     before_keys = set(before["entries"])
     after_keys = set(after["entries"])
     added = sorted(after_keys - before_keys)
@@ -67,13 +68,14 @@ def compare(argv):
 
 
 def main(argv):
-    arg = argv[1] if len(argv) > 1 else "dump"
-    if arg == "dump":
+    # 只认固定的子命令；命令行参数不再往下面的函数里传（数据流到此为止）
+    command = argv[1] if len(argv) > 1 else "dump"
+    if command == "dump":
         json.dump(snapshot(), sys.stdout, ensure_ascii=False, indent=1)
         sys.stdout.write("\n")
         return 0
-    if arg == "compare":
-        return compare(argv)
+    if command == "compare":
+        return compare()
     sys.stderr.write("用法: desktop_snapshot.py dump|compare\n")
     return 2
 

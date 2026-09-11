@@ -78,8 +78,15 @@ def describe(hwnd):
     }
 
 
+def sanitize_needle(raw):
+    """命令行给的过滤词只用来比对窗口标题：限长 + 只保留可见字符，先洗一遍再用。"""
+    text = str(raw or "")
+    printable = "".join(ch for ch in text if ch.isprintable())
+    return printable[:64].lower()
+
+
 def main(argv):
-    needle = argv[1].lower() if len(argv) > 1 else ""
+    needle = sanitize_needle(argv[1] if len(argv) > 1 else "")
     rows = []
     collected = []
 
