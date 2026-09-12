@@ -89,6 +89,8 @@ contextBridge.exposeInMainWorld('deskbasket', {
   cancelRename: () => ipcRenderer.invoke('rename:cancel'),
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', { patch }),
   resetSettings: () => ipcRenderer.invoke('settings:reset'),
+  // 「收录来源目录 → 浏览…」：主进程弹目录对话框，返回所选绝对路径（取消返回 null）
+  pickSourceDir: () => ipcRenderer.invoke('dir:pick'),
   getAutostart: () => ipcRenderer.invoke('autostart:get'),
   setAutostart: (enabled) => ipcRenderer.invoke('autostart:set', { enabled }),
 

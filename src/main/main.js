@@ -87,16 +87,18 @@ const shortcutCache = new Map();  // pathKey -> shell.readShortcutLink 结果或
 
 // ------------------------------------------------------------------ 工具
 
-function desktopDir() {
-  return path.join(os.homedir(), 'Desktop');
+// 收录来源目录：设置里指定（shortcuts_dir），没设就是系统桌面。
+// Dock 的自动收录、设置面板两份候选清单、文件对话框的默认落点都看这里。
+function sourceDir() {
+  return settings.shortcuts_dir || path.join(os.homedir(), 'Desktop');
 }
 
-function desktopItems() {
+function sourceItems() {
   try {
     return fs
-      .readdirSync(desktopDir())
+      .readdirSync(sourceDir())
       .filter((name) => name.toLowerCase() !== 'desktop.ini')
-      .map((name) => path.join(desktopDir(), name));
+      .map((name) => path.join(sourceDir(), name));
   } catch (_) {
     return [];
   }
@@ -753,12 +755,12 @@ function syncDock() {
   dockWindow.webContents.send('state:changed', { settings });
 }
 
-// Dock 条目同步：把桌面上新出现的快捷方式补进来（用户移除过的不再加回）
+// Dock 条目同步：把来源目录里新出现的快捷方式补进来（用户移除过的不再加回）
 function syncDockItems() {
   const synced = dockmodel.syncDesktopShortcuts(
     settings.dock_items,
     settings.dock_removed,
-    desktopItems()
+    sourceItems()
   );
   if (synced.length !== settings.dock_items.length) {
     settings.dock_items = synced;
@@ -1272,7 +1274,7 @@ function installTray() {
 function registerIpc() {
   ipcMain.handle('state:get', () => ({
     settings,
-    desktop: desktopDir(),
+    desktop: sourceDir(),
     theme: resolvedTheme,
     displays: displaySummaries()
   }));
@@ -1300,12 +1302,12 @@ function registerIpc() {
     return { added, total: saved.items.length };
   });
 
-  // 设置面板：往选中的筐里批量勾选（桌面上的条目，勾上就加进去、取消就移出）。
+  // 设置面板：往选中的筐里批量勾选（来源目录里的条目，勾上就加进去、取消就移出）。
   // 这是"一次加一堆"最省事的入口——不用一层层翻文件对话框。
   ipcMain.handle('basket:candidates', (_event, { basketId } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return [];
-    return dockmodel.basketCandidates(desktopItems(), basket.items);
+    return dockmodel.basketCandidates(sourceItems(), basket.items);
   });
 
   // 「添加文件…」/「添加文件夹…」：选完直接登记进筐。
@@ -1318,8 +1320,8 @@ function registerIpc() {
     const picked = await dialog.showOpenDialog({
       title: (wantsDirs ? '往「' : '把文件加进「') + basket.name + '」',
       buttonLabel: '添加',
-      // 默认停在桌面：这个程序整理的就是桌面上的东西，省得每次从头翻目录
-      defaultPath: desktopDir(),
+      // 默认停在收录来源目录：这个程序整理的就是那里面的东西，省得每次从头翻目录
+      defaultPath: sourceDir(),
       properties: wantsDirs ? ['openDirectory', 'multiSelections'] : ['openFile', 'multiSelections']
     });
     if (picked.canceled || !picked.filePaths.length) return { added: 0, total: basket.items.length };
@@ -1416,16 +1418,17 @@ function registerIpc() {
 
   ipcMain.handle('dock:add', (event, { paths }) => addDockPaths(paths, pageTag(event)));
 
-  // 设置面板里的"逐个添加"：列出桌面上可收录的条目，并标出哪些已经在 Dock 上
+  // 设置面板里的"逐个添加"：列出来源目录里可收录的条目，并标出哪些已经在 Dock 上
   ipcMain.handle('dock:candidates', () =>
-    dockmodel.shortcutCandidates(desktopItems(), settings.dock_items)
+    dockmodel.shortcutCandidates(sourceItems(), settings.dock_items)
   );
 
-  // 从磁盘任意位置挑文件加进 Dock（不限于桌面）
+  // 从磁盘任意位置挑文件加进 Dock（不限于来源目录）
   ipcMain.handle('dock:pick', async () => {
     const options = {
       title: '选择要放进 Dock 的快捷方式',
       buttonLabel: '加入 Dock',
+      defaultPath: sourceDir(),
       properties: ['openFile', 'multiSelections'],
       filters: [
         { name: '快捷方式与程序', extensions: ['lnk', 'url', 'exe'] },
@@ -1439,6 +1442,23 @@ function registerIpc() {
       : await dialog.showOpenDialog(options);
     if (picked.canceled || !picked.filePaths.length) return settings.dock_items;
     return addDockPaths(picked.filePaths);
+  });
+
+  // 设置面板「收录来源目录 → 浏览…」：挑一个目录，交回渲染层走 settings:update 落盘
+  ipcMain.handle('dir:pick', async () => {
+    const owner = settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : null;
+    const options = {
+      title: '选择收录来源目录',
+      buttonLabel: '选这个目录',
+      defaultPath: sourceDir(),
+      properties: ['openDirectory', 'createDirectory']
+    };
+    // 两个重载分开写：不要把 undefined 当第一个参数传进去
+    const picked = owner
+      ? await dialog.showOpenDialog(owner, options)
+      : await dialog.showOpenDialog(options);
+    if (picked.canceled || !picked.filePaths.length) return null;
+    return picked.filePaths[0];
   });
 
   ipcMain.handle('dock:remove', (event, { itemPath }) => {
@@ -1675,6 +1695,7 @@ function registerIpc() {
       dock_magnify: settings.dock_magnify,
       dock_bottom_gap: settings.dock_bottom_gap,
       dock_display: settings.dock_display,
+      shortcuts_dir: settings.shortcuts_dir,
       theme_mode: settings.theme_mode,
       basket_count: settings.baskets.length
     };
@@ -1686,6 +1707,10 @@ function registerIpc() {
     else if (settings.dock_auto_hide !== before.dock_auto_hide) {
       // 常驻 ⇄ 自动收起：切换置顶，常驻时重新放到桌面层
       applyDockLayerMode();
+    } else if (settings.shortcuts_dir !== before.shortcuts_dir) {
+      // 收录来源换了：把新目录里的快捷方式补进 Dock（移除过的黑名单照旧生效），再刷新
+      syncDockItems();
+      syncDock();
     } else if (
       settings.dock_icon_size !== before.dock_icon_size ||
       settings.dock_bottom_gap !== before.dock_bottom_gap ||

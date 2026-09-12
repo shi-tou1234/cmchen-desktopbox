@@ -101,6 +101,18 @@
       </div>
 
       <div class="group">
+        <h3>收录来源目录</h3>
+        <div class="row" style="justify-content:flex-start;gap:8px;flex-wrap:wrap">
+          <input type="text" id="sourceDir" placeholder="（空 ＝ 系统桌面）" style="width:300px" spellcheck="false">
+          <button class="btn" id="btnPickDir">浏览…</button>
+          <button class="btn" id="btnUseDesktop">用回桌面</button>
+        </div>
+        <div class="row" style="margin-top:6px;display:block">
+          <span class="hint">Dock 的自动收录和筐的勾选清单都从这里取条目。把快捷方式集中放进一个普通文件夹（比如 D:\shortcuts），再把这里指过去，桌面就能既干净又看得见新下载的文件。目录里的文件挪走或改名会变成失效图标，需重新指认或手动清理。</span>
+        </div>
+      </div>
+
+      <div class="group">
         <h3>Dock 上的快捷方式</h3>
         <div class="shortcut-list" id="shortcutList"></div>
         <div class="row" style="margin-top:6px;justify-content:flex-start;gap:8px;flex-wrap:wrap">
@@ -125,7 +137,7 @@
           <button class="btn" id="btnDelete">删除</button>
         </div>
         <div class="row" style="margin-top:8px;display:block">
-          <span class="hint" id="basketCandidateHint">桌面上的条目：勾选即加进这个筐（一次能勾一堆；磁盘文件不动）。不在桌面上的文件用上面的「添加文件…」（对话框里按住 Ctrl / Shift 可多选）。</span>
+          <span class="hint" id="basketCandidateHint">来源目录里的条目：勾选即加进这个筐（一次能勾一堆；磁盘文件不动）。不在来源目录里的文件用上面的「添加文件…」（对话框里按住 Ctrl / Shift 可多选）。</span>
         </div>
         <div class="shortcut-list" id="basketCandidateList"></div>
       </div>

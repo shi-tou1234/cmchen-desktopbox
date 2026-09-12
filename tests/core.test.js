@@ -72,6 +72,37 @@ test('默认配置：完全透明 ＋ Dock 开着且自动收起', () => {
   assert.strictEqual(store.DEFAULTS.accent_mode, 'off');
   assert.strictEqual(store.DEFAULTS.dock_enabled, true);
   assert.strictEqual(store.DEFAULTS.dock_auto_hide, true);
+  assert.strictEqual(store.DEFAULTS.shortcuts_dir, '', '收录来源默认空串＝系统桌面');
+});
+
+test('收录来源目录：只认写出来就是绝对路径的字符串，其余回退系统桌面', () => {
+  // 平台无关地构造一个绝对路径（测试可能跑在任何系统上）
+  const abs = path.join(os.tmpdir(), '快捷方式');
+  assert.strictEqual(store.mergedSettings({ shortcuts_dir: abs }).shortcuts_dir, path.normalize(abs));
+  // 结尾的分隔符与 "." 段会被 normalize 收拾干净
+  assert.strictEqual(
+    store.mergedSettings({ shortcuts_dir: abs + path.sep + '.' }).shortcuts_dir,
+    path.normalize(abs)
+  );
+  // 缺省/空串/纯空白 → 空（= 系统桌面）
+  assert.strictEqual(store.mergedSettings({}).shortcuts_dir, '');
+  assert.strictEqual(store.mergedSettings({ shortcuts_dir: '' }).shortcuts_dir, '');
+  assert.strictEqual(store.mergedSettings({ shortcuts_dir: '   ' }).shortcuts_dir, '');
+  // 相对路径 resolve 后会落在进程目录下，是意外，不收
+  assert.strictEqual(store.mergedSettings({ shortcuts_dir: '快捷方式' }).shortcuts_dir, '');
+  assert.strictEqual(store.mergedSettings({ shortcuts_dir: './快捷方式' }).shortcuts_dir, '');
+  // 非字符串一律回退
+  assert.strictEqual(store.mergedSettings({ shortcuts_dir: 42 }).shortcuts_dir, '');
+  assert.strictEqual(store.mergedSettings({ shortcuts_dir: null }).shortcuts_dir, '');
+  // Windows 盘符与 UNC 只有在 win32 上才算绝对（UNC 的 normalize 会补结尾分隔符，
+  // 因为 \\nas\share 本身就是「根」，这里只跟 path.normalize 的结果对齐）
+  if (process.platform === 'win32') {
+    assert.strictEqual(store.mergedSettings({ shortcuts_dir: 'E:\\shortcuts' }).shortcuts_dir, 'E:\\shortcuts');
+    assert.strictEqual(
+      store.mergedSettings({ shortcuts_dir: '\\\\nas\\share' }).shortcuts_dir,
+      path.normalize('\\\\nas\\share')
+    );
+  }
 });
 
 test('退休字段：读到旧配置里的 basket_behavior / dock_behavior 会被清掉', () => {

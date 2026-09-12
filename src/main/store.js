@@ -20,6 +20,7 @@ const DEFAULTS = {
   autostart: false,
   icon_size: 48,
   baskets: [],
+  shortcuts_dir: '',           // 收录来源目录（Dock 自动收录、候选清单、文件对话框默认落点）；空 = 系统桌面
   dock_enabled: true,
   dock_auto_hide: true,        // 鼠标离开就收起（贴底边才滑出），这样不会挡着别的窗口
   dock_icon_size: 48,
@@ -160,6 +161,15 @@ function normalizeDockDisplay(raw) {
   return 'primary';
 }
 
+// 收录来源目录：只认「写出来就是绝对路径」的字符串。相对路径 resolve 之后会落在
+// 进程当前目录下的某个意外位置，一律回退空串（= 系统桌面）。
+function normalizeSourceDir(raw) {
+  if (typeof raw !== 'string') return '';
+  const text = raw.trim();
+  if (!text || !path.isAbsolute(text)) return '';
+  return normalizePath(text) || '';
+}
+
 function mergedSettings(raw) {
   const out = { ...DEFAULTS };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
@@ -195,6 +205,7 @@ function mergedSettings(raw) {
     DOCK_HIDE_DELAY_MAX
   );
   out.dock_items = normalizePathList(raw.dock_items);
+  out.shortcuts_dir = normalizeSourceDir(raw.shortcuts_dir);
   out.dock_bottom_gap = clampInt(
     raw.dock_bottom_gap,
     DEFAULTS.dock_bottom_gap,
@@ -304,6 +315,7 @@ module.exports = {
   normalizeAliases,
   normalizePath,
   normalizePathList,
+  normalizeSourceDir,
   pathKey,
   saveSettings,
   settingsDir,

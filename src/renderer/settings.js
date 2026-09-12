@@ -73,7 +73,7 @@ async function renderBasketCandidates() {
     rows = [];
   }
   if (!rows.length) {
-    host.textContent = '桌面上没有条目';
+    host.textContent = '来源目录里没有条目';
     return;
   }
   for (const row of rows) {
@@ -126,11 +126,12 @@ function render() {
   el('dockIconSize').value = settings.dock_icon_size;
   el('dockMagnify').value = settings.dock_magnify;
   el('dockBottomGap').value = settings.dock_bottom_gap;
+  el('sourceDir').value = settings.shortcuts_dir || '';
   el('dockCount').textContent =
     'Dock 现有 ' + settings.dock_items.length + ' 个快捷方式 ＋ ' +
     (settings.dock_specials || []).length + ' 个系统图标（此电脑/回收站）＋ ' +
     settings.baskets.filter((b) => b.visible !== false).length + ' 个文件夹' +
-    '；自动收录桌面的 .lnk / .url / .exe，也可直接拖进去';
+    '；自动收录来源目录里的 .lnk / .url / .exe，也可直接拖进去';
   renderTheme();
   renderDockDisplay();
   el('reduceMotion').checked = Boolean(settings.reduce_motion);
@@ -186,7 +187,7 @@ async function renderShortcuts() {
   }
   host.innerHTML = '';
   if (!rows.length) {
-    host.textContent = '桌面上没有可收录的 .lnk / .url / .exe';
+    host.textContent = '来源目录里没有可收录的 .lnk / .url / .exe';
     return;
   }
   for (const row of rows) {
@@ -284,6 +285,25 @@ el('dockMagnify').addEventListener('change', (event) => {
 el('dockBottomGap').addEventListener('change', (event) => {
   push({ dock_bottom_gap: Number(event.target.value) }, 'Dock 离底边的距离已更新');
 });
+
+// 收录来源目录：手输（change 在失焦/回车时触发）与「浏览…」「用回桌面」殊途同归。
+// push 里会 render()，把输入框刷回主进程真正存下的值——非法路径被回退成空串时看得见。
+async function applySourceDir(raw) {
+  await push({ shortcuts_dir: raw });
+  if (raw && !settings.shortcuts_dir) flash('这个路径无效（需要绝对路径），已回退系统桌面');
+  else if (settings.shortcuts_dir) flash('收录来源已切换，自动收录现在看：' + settings.shortcuts_dir);
+  else flash('已改回系统桌面');
+}
+
+el('sourceDir').addEventListener('change', (event) => {
+  applySourceDir(String(event.target.value || '').trim());
+});
+el('btnPickDir').addEventListener('click', async () => {
+  const picked = await api.pickSourceDir();
+  if (!picked) return;
+  await applySourceDir(picked);
+});
+el('btnUseDesktop').addEventListener('click', () => applySourceDir(''));
 
 el('btnPick').addEventListener('click', async () => {
   const items = await api.pickDockFiles();
