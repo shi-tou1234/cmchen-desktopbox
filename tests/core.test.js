@@ -338,6 +338,34 @@ test('同步桌面快捷方式：不重复、不复活被移除的', () => {
   assert.strictEqual(withRemoved.some((p) => path.basename(p) === 'QQ.lnk'), false);
 });
 
+test('换收录来源目录：黑名单按文件名迁到新目录，冲突条目请出 Dock', () => {
+  // 旧目录里手动移除过的，换了目录之后路径对不上、但意愿还在：
+  // 新目录里同名文件对应的路径要补进黑名单，旧条目原样保留
+  const removed = ['C:\\Users\\me\\Desktop\\Snipaste.lnk', 'C:\\Users\\me\\Desktop\\查无此文件.lnk'];
+  const newDir = ['E:\\shortcuts\\Snipaste.lnk', 'E:\\shortcuts\\微信.lnk', 'E:\\shortcuts\\价格.txt'];
+  const migrated = dockmodel.migrateRemoved(removed, newDir);
+  assert.ok(migrated.includes('E:\\shortcuts\\Snipaste.lnk'), '同名文件的新路径进黑名单');
+  assert.ok(migrated.includes(removed[0]) && migrated.includes(removed[1]), '旧黑名单条目保留');
+  assert.strictEqual(migrated.length, 3, '不同名的（微信）不受牵连');
+  assert.deepStrictEqual(dockmodel.migrateRemoved([], newDir), [], '空黑名单原样返回');
+  assert.deepStrictEqual(dockmodel.migrateRemoved(removed, null), removed, '无新目录可迁时原样返回');
+
+  // 与黑名单冲突的现存条目被请出 Dock，其余与顺序保持不变
+  const items = ['E:\\shortcuts\\Snipaste.lnk', 'E:\\shortcuts\\微信.lnk', 'E:\\shortcuts\\QQ.lnk'];
+  assert.deepStrictEqual(
+    dockmodel.removeItems(items, migrated),
+    ['E:\\shortcuts\\微信.lnk', 'E:\\shortcuts\\QQ.lnk']
+  );
+  assert.deepStrictEqual(dockmodel.removeItems([], migrated), []);
+  // win32 上路径键不区分大小写
+  if (process.platform === 'win32') {
+    assert.deepStrictEqual(
+      dockmodel.removeItems(['e:\\SHORTCUTS\\snipaste.lnk'], migrated),
+      []
+    );
+  }
+});
+
 test('排序：越界与同位置都是原样返回', () => {
   const items = ['a', 'b', 'c'];
   assert.deepStrictEqual(dockmodel.moveItem(items, 0, 2), ['b', 'c', 'a']);

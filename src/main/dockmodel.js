@@ -250,6 +250,36 @@ function syncDesktopShortcuts(items, removed, desktopPaths) {
   return result;
 }
 
+// 收录来源换了目录时迁移黑名单：黑名单记的是「这类东西别自动收录」的意愿，
+// 路径变了意愿没变——旧条目原样保留（文件挪回去时语义仍在），新目录里同名
+// 文件对应的路径补进黑名单，syncDesktopShortcuts 就不会把它们当新面孔收回来。
+function migrateRemoved(removed, newDirPaths) {
+  const result = [...(removed || [])];
+  const present = new Set(result.map(pathKey));
+  const byBase = new Map();
+  for (const raw of newDirPaths || []) {
+    const value = normalizePath(raw);
+    if (!value) continue;
+    byBase.set(path.basename(value).toLowerCase(), value);
+  }
+  for (const raw of removed || []) {
+    const base = path.basename(String(raw || '')).toLowerCase();
+    const hit = byBase.get(base);
+    if (!hit) continue;
+    const key = pathKey(hit);
+    if (present.has(key)) continue;
+    present.add(key);
+    result.push(hit);
+  }
+  return result;
+}
+
+// 把 items 里落在 removeList（黑名单）里的条目请出去，其余顺序不变。
+function removeItems(items, removeList) {
+  const blocked = new Set((removeList || []).map(pathKey));
+  return (items || []).filter((item) => !blocked.has(pathKey(item)));
+}
+
 // 右键菜单窗口的尺寸。自绘菜单要用一个尺寸刚好的窗口装它（原生菜单没有这个问题，
 // 但它挂在不聚焦的 Dock 窗口上时点别处关不掉）。宽度按最长一条标签估算：
 // 中日韩字符按 13px、其余按 7px，再加图标/内边距的余量。
@@ -370,12 +400,14 @@ module.exports = {
   isHotZone,
   isShellWindow,
   menuLayout,
+  migrateRemoved,
   monitorGeometry,
   moveItem,
   pickDisplay,
   pointNearBounds,
   popupGeometry,
   removeItem,
+  removeItems,
   revealedGeometry,
   shouldHide,
   shouldReveal,

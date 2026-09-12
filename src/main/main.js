@@ -1708,7 +1708,11 @@ function registerIpc() {
       // 常驻 ⇄ 自动收起：切换置顶，常驻时重新放到桌面层
       applyDockLayerMode();
     } else if (settings.shortcuts_dir !== before.shortcuts_dir) {
-      // 收录来源换了：把新目录里的快捷方式补进 Dock（移除过的黑名单照旧生效），再刷新
+      // 收录来源换了：黑名单按文件名跟到新目录（以前移除过的同名文件不再自动收录），
+      // 与黑名单冲突的现存条目一并请出 Dock，然后常规同步把新目录里的补进来
+      settings.dock_removed = dockmodel.migrateRemoved(settings.dock_removed, sourceItems());
+      settings.dock_items = dockmodel.removeItems(settings.dock_items, settings.dock_removed);
+      persist();
       syncDockItems();
       syncDock();
     } else if (
