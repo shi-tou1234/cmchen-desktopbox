@@ -88,6 +88,7 @@ contextBridge.exposeInMainWorld('deskbasket', {
   commitRename: (value) => ipcRenderer.invoke('rename:commit', { value }),
   cancelRename: () => ipcRenderer.invoke('rename:cancel'),
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', { patch }),
+  resetSettings: () => ipcRenderer.invoke('settings:reset'),
   getAutostart: () => ipcRenderer.invoke('autostart:get'),
   setAutostart: (enabled) => ipcRenderer.invoke('autostart:set', { enabled }),
 

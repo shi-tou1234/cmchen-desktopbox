@@ -1665,7 +1665,9 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle('settings:update', (_event, { patch }) => {
+  // 设置补丁的统一入口：合并 → 主题解析 → 落盘 → 按变化面同步 Dock，返回新设置。
+  // settings:update 和 settings:reset 都走这一条路，行为不会分叉。
+  function applySettingsPatch(patch) {
     const before = {
       dock_enabled: settings.dock_enabled,
       dock_auto_hide: settings.dock_auto_hide,
@@ -1702,6 +1704,21 @@ function registerIpc() {
       }
     }
     return settings;
+  }
+
+  ipcMain.handle('settings:update', (_event, { patch }) => applySettingsPatch(patch));
+
+  // 「恢复默认」：设置窗口里能调的那些项回到 DEFAULTS；筐、Dock 条目、弹窗尺寸、
+  // 开机自启这类用户数据/系统登记不动。
+  const RESETTABLE_KEYS = [
+    'accent_mode', 'theme_mode', 'reduce_motion', 'icon_size',
+    'dock_enabled', 'dock_auto_hide', 'dock_icon_size',
+    'dock_magnify', 'dock_bottom_gap', 'dock_display'
+  ];
+  ipcMain.handle('settings:reset', () => {
+    const patch = {};
+    for (const key of RESETTABLE_KEYS) patch[key] = store.DEFAULTS[key];
+    return applySettingsPatch(patch);
   });
 
   ipcMain.handle('autostart:get', () => ({

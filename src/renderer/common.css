@@ -138,8 +138,15 @@ html, body {
   align-content: start;
 }
 
-.grid::-webkit-scrollbar { width: 8px; }
-.grid::-webkit-scrollbar-thumb {
+/* 细滚动条：网格、设置页、两条清单共用一套 */
+.grid::-webkit-scrollbar,
+.settings::-webkit-scrollbar,
+.shortcut-list::-webkit-scrollbar,
+.basket-list::-webkit-scrollbar { width: 8px; }
+.grid::-webkit-scrollbar-thumb,
+.settings::-webkit-scrollbar-thumb,
+.shortcut-list::-webkit-scrollbar-thumb,
+.basket-list::-webkit-scrollbar-thumb {
   background: var(--scroll-thumb);
   border-radius: 4px;
 }
@@ -287,19 +294,34 @@ body.reduce-motion .popup-grid.nav-backward {
   gap: 12px;
   padding: 4px 0;
 }
-.row > label { font-size: 12px; }
+/* 标签可换行、控件不被压缩：窄窗口时长标签折行，不把右侧控件挤变形 */
+.row > label { font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
+.row > select, .row > input, .row > .btn { flex: 0 0 auto; }
 .row .hint { font-size: 11px; color: var(--text-faint); }
 
-select, input[type="number"] {
+/* 输入类控件自带底色，不再继承页面的文字阴影（小字号＋阴影会发糊）；
+   color-scheme 跟着主题走，原生下拉弹层、数字步进箭头才会按深/浅渲染。 */
+select, input[type="number"], input[type="text"] {
   background: var(--field-bg);
   color: var(--field-fg);
   border: 0;
   border-radius: 7px;
   padding: 4px 8px;
   font-size: 12px;
-  min-width: 120px;
+  color-scheme: dark;
+  text-shadow: none;
 }
-select option { background: var(--option-bg); color: #23252e; }
+input[type="number"] { width: 96px; }
+select { width: 260px; }
+select:focus-visible, input:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+/* 下拉每一项的底/字成对取自同一主题（此前字色写死浅色主题的深色，深色模式下深字压深底看不清） */
+select option { background: var(--option-bg); color: var(--field-fg); }
+@media (prefers-color-scheme: light) {
+  select, input[type="number"], input[type="text"] { color-scheme: light; }
+}
 
 input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent-check); }
 

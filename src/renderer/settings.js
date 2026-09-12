@@ -351,14 +351,10 @@ el('btnDelete').addEventListener('click', async () => {
 });
 
 el('btnReset').addEventListener('click', async () => {
-  settings = await api.updateSettings({
-    accent_mode: 'acrylic',
-    icon_size: 48,
-    dock_enabled: true,
-    dock_icon_size: 48
-  });
+  // 主进程按 DEFAULTS 重置设置窗口里能调的全部项；筐、Dock 条目、开机自启不受影响
+  settings = await api.resetSettings();
   render();
-  flash('已恢复默认设置');
+  flash('已恢复默认设置（筐和桌面上的文件不动）');
 });
 
 el('autostart').addEventListener('change', async (event) => {
