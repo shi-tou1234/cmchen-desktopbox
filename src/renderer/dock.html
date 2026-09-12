@@ -61,6 +61,9 @@
     pointer-events: none;
   }
   .dock-caption.flash { color: #9fd0ff; font-weight: 600; }
+  /* 天气那行写的是实时气温（'26° 多云'），比筐名长，稍微放宽一点；
+     邻居这一格都是空的，多出来的字落在条目之间的间隙里，不会压到谁 */
+  .dock-item.weather .dock-caption { max-width: calc(var(--icon) + 26px); }
 
   /* 悬停不给底色：只在 ::after 时代的那圈灰被去掉了（领导说丑），
      反馈只靠放大动画 + 图标自带的投影。 */
@@ -101,6 +104,7 @@
 </head>
 <body>
   <div class="dock" id="dock"></div>
+  <script src="weather-icons.js"></script>
   <script src="dock.js"></script>
 </body>
 </html>

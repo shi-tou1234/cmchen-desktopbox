@@ -8,6 +8,7 @@ const os = require('node:os');
 
 const path = require('node:path');
 const specials = require('./specials');
+const weather = require('./weather');
 
 const SETTINGS_FILENAME = 'settings.json';
 const SETTINGS_BACKUP_SUFFIX = '.bak';
@@ -32,8 +33,11 @@ const DEFAULTS = {
   popup_height: 460,
   dock_items: [],
   dock_aliases: {},            // 快捷方式在 Dock 上的显示名：只存设置，绝不动磁盘上的文件名
-  dock_specials: ['thispc', 'recyclebin'],  // 系统虚拟项：此电脑、回收站
-  dock_removed: []
+  dock_specials: ['thispc', 'recyclebin', 'weather'],  // 系统虚拟项：此电脑、回收站、天气
+  dock_removed: [],
+  // 天气城市：只存一个名字，经纬度每次启动重新查（一次地理编码请求，代价极低，
+  // 省得设置里留一堆坐标字段要去校验）。空 = 用 weather.DEFAULT_CITY。
+  weather_city: ''
 };
 
 // 已经退休、不再有任何代码读取的字段：读到旧配置时顺手删掉，别让配置里留着"看着能调其实无效"的项
@@ -170,6 +174,13 @@ function normalizeSourceDir(raw) {
   return normalizePath(text) || '';
 }
 
+// 天气城市：压缩空白、限长（地理编码接口按名字查，太长的串只会白跑一趟）；
+// 非字符串回空串，等于用 weather.DEFAULT_CITY。
+function normalizeCity(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw.replace(/\s+/g, ' ').trim().slice(0, weather.CITY_MAX);
+}
+
 function mergedSettings(raw) {
   const out = { ...DEFAULTS };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
@@ -230,6 +241,7 @@ function mergedSettings(raw) {
     'dock_specials' in raw ? raw.dock_specials : DEFAULTS.dock_specials
   );
   out.dock_removed = normalizePathList(raw.dock_removed);
+  out.weather_city = normalizeCity(raw.weather_city);
   for (const key of RETIRED_KEYS) delete out[key];
   return out;
 }
@@ -313,6 +325,7 @@ module.exports = {
   mergedSettings,
   normalizeAlias,
   normalizeAliases,
+  normalizeCity,
   normalizePath,
   normalizePathList,
   normalizeSourceDir,

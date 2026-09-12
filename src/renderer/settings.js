@@ -16,6 +16,15 @@ let settings = null;
 let displays = [];         // 主进程随 state 广播的显示器列表（#9）
 let selectedBasketId = null;
 let loading = true;
+// 天气快照（主进程随 weather:changed 推）：设置面板里显示"哪个城市、现在几度、什么时候更新的"
+let weatherState = null;
+
+// 系统虚拟项的固定顺序：Dock 上就是这个次序（此电脑 → 回收站 → 天气）
+const SPECIAL_ORDER = [
+  ['thispc', 'specialThisPc'],
+  ['recyclebin', 'specialRecycle'],
+  ['weather', 'specialWeather']
+];
 
 const el = (id) => document.getElementById(id);
 
@@ -129,15 +138,49 @@ function render() {
   el('sourceDir').value = settings.shortcuts_dir || '';
   el('dockCount').textContent =
     'Dock 现有 ' + settings.dock_items.length + ' 个快捷方式 ＋ ' +
-    (settings.dock_specials || []).length + ' 个系统图标（此电脑/回收站）＋ ' +
+    (settings.dock_specials || []).length + ' 个系统图标（此电脑/回收站/天气）＋ ' +
     settings.baskets.filter((b) => b.visible !== false).length + ' 个文件夹' +
     '；自动收录来源目录里的 .lnk / .url / .exe，也可直接拖进去';
   renderTheme();
   renderDockDisplay();
+  renderSpecials();
+  renderWeather();
   el('reduceMotion').checked = Boolean(settings.reduce_motion);
   renderBaskets();
   renderShortcuts();
   loading = false;
+}
+
+// Dock 上的系统图标（此电脑 / 回收站 / 天气）：勾上就摆到 Dock 上，取消就撤下来
+function renderSpecials() {
+  const on = new Set(settings.dock_specials || []);
+  for (const [id, boxId] of SPECIAL_ORDER) el(boxId).checked = on.has(id);
+}
+
+function specialsFromBoxes() {
+  return SPECIAL_ORDER.filter(([, boxId]) => el(boxId).checked).map(([id]) => id);
+}
+
+// 天气那一块：城市输入框 ＋ 一行状态（解析到的城市、现在几度、什么时候更新的）
+function renderWeather() {
+  el('weatherCity').value = settings.weather_city || '';
+  const state = weatherState;
+  let text;
+  if (!state || !state.current) {
+    text = state && state.error ? '取天气失败：' + state.error : '天气读取中…';
+  } else {
+    const place = (state.place && state.place.label) || state.city;
+    const when = new Date(state.updatedAt);
+    const pad = (n) => String(n).padStart(2, '0');
+    text =
+      place + (state.auto ? '（自动定位）' : '') +
+      '　现在 ' + Math.round(state.current.temperature) + '° ' + state.current.text +
+      '　（' + pad(when.getHours()) + ':' + pad(when.getMinutes()) + ' 更新）';
+    if (state.ok === false && state.error) text += '　上次刷新失败，显示的是旧数据';
+  }
+  // 系统里没有「天气」应用（被卸载/精简系统）：点图标会退到网页版，这里先说清楚
+  if (state && state.installed === false) text += '　· 没找到系统「天气」应用，点图标会打开网页版';
+  el('weatherInfo').textContent = text;
 }
 
 // 主题（#1）：配色深浅；auto 由主进程按壁纸亮度解析
@@ -286,6 +329,23 @@ el('dockBottomGap').addEventListener('change', (event) => {
   push({ dock_bottom_gap: Number(event.target.value) }, 'Dock 离底边的距离已更新');
 });
 
+// 系统图标（此电脑 / 回收站 / 天气）：整份列表交回主进程（顺序固定，天气总在回收站旁边）
+for (const [, boxId] of SPECIAL_ORDER) {
+  el(boxId).addEventListener('change', () => {
+    push({ dock_specials: specialsFromBoxes() }, 'Dock 上的系统图标已更新');
+  });
+}
+
+// 天气城市：回车/失焦时提交；主进程收到就重新地理编码并立刻取一次天气
+el('weatherCity').addEventListener('change', (event) => {
+  push({ weather_city: String(event.target.value || '').trim() }, '城市已更新，正在取天气…');
+});
+el('btnWeatherRefresh').addEventListener('click', async () => {
+  weatherState = await api.refreshWeather();
+  renderWeather();
+  flash('天气已刷新');
+});
+
 // 收录来源目录：手输（change 在失焦/回车时触发）与「浏览…」「用回桌面」殊途同归。
 // push 里会 render()，把输入框刷回主进程真正存下的值——非法路径被回退成空串时看得见。
 async function applySourceDir(raw) {
@@ -396,6 +456,7 @@ async function refresh() {
   const state = await api.getState();
   settings = state.settings;
   displays = state.displays || [];
+  weatherState = await api.getWeather().catch(() => null);
   render();
 }
 
@@ -404,6 +465,12 @@ api.onStateChanged((payload) => {
   settings = payload.settings;
   if (payload.displays) displays = payload.displays;
   render();
+});
+
+// 天气刷新（15 分钟一次 / 点了「立即刷新」）：只更新那一行状态文字
+api.onWeatherChanged((state) => {
+  weatherState = state;
+  renderWeather();
 });
 
 (async () => {

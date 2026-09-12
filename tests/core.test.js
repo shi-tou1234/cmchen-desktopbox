@@ -668,6 +668,18 @@ test('虚拟项：此电脑与回收站都带 shell 解析名和打开方式', (
   assert.ok(bin.parsingName.startsWith('::{'));
 });
 
+test('虚拟项：天气指向 Windows 自带的天气应用（图标与打开同一个 AppsFolder 名）', () => {
+  const weather = specials.findSpecial(specials.WEATHER_ID);
+  assert.strictEqual(weather.label, '天气');
+  assert.strictEqual(weather.kind, 'weather', '渲染层靠 kind 把它跟此电脑/回收站分开处理');
+  assert.ok(weather.parsingName.startsWith('shell:AppsFolder\\'), 'UWP 应用只能靠 AppsFolder 解析名');
+  assert.ok(weather.parsingName.includes('Microsoft.BingWeather_8wekyb3d8bbwe!App'));
+  assert.strictEqual(weather.openUri, weather.parsingName, '图标与打开用同一个解析名');
+  assert.ok(weather.webFallback.startsWith('https://'), '应用被卸载时要能退到网页版');
+  // 另外两项是 shell 类，渲染层按 kind 分流
+  assert.strictEqual(specials.findSpecial('recyclebin').kind, 'shell');
+});
+
 test('快捷方式候选：只列可收录的、去重、标出是否已在 Dock 上', () => {
   const desktop = [
     'C:\\Users\\me\\Desktop\\QQ音乐.lnk',
@@ -813,9 +825,14 @@ test('菜单尺寸：宽度跟着最长的标签走，并且收在上下限内',
   assert.deepStrictEqual(dockmodel.menuLayout(null), empty);
 });
 
-test('配置：dock_specials 默认就是此电脑＋回收站（老配置也会拿到）', () => {
-  assert.deepStrictEqual(store.DEFAULTS.dock_specials, ['thispc', 'recyclebin']);
-  assert.deepStrictEqual(store.mergedSettings({}).dock_specials, ['thispc', 'recyclebin']);
+test('配置：dock_specials 默认是此电脑＋回收站＋天气（没写过这一项的老配置也是这三个）', () => {
+  assert.deepStrictEqual(store.DEFAULTS.dock_specials, ['thispc', 'recyclebin', 'weather']);
+  assert.deepStrictEqual(store.mergedSettings({}).dock_specials, ['thispc', 'recyclebin', 'weather']);
+  // 显式写过这一项的（比如在设置里撤下了天气）：以用户写的为准，不硬塞默认值
+  assert.deepStrictEqual(store.mergedSettings({ dock_specials: ['thispc', 'recyclebin'] }).dock_specials, [
+    'thispc',
+    'recyclebin'
+  ]);
 });
 
 test('配置：dock_specials 的脏值被清掉，显式清空要保住', () => {

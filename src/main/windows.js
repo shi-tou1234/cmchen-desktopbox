@@ -123,6 +123,40 @@ function createBehaviorWindow(behaviorName, options = {}) {
   return win;
 }
 
+// 天气悬浮卡片：鼠标靠近 Dock 上的天气图标时，在它上方浮出一张未来几天的小卡片。
+// 只读展示，所以不可聚焦（也不抢焦点）、不进任务栏，材质跟菜单一样自绘
+// （卡片要浮在任意画面之上，自己画的深/浅色底比让系统材质去糊背景更稳）。
+function createWeatherCardWindow(options = {}) {
+  const { width = 272, height = 250, x, y, title = 'DeskBasket 天气' } = options;
+  const win = new BrowserWindow({
+    width,
+    height,
+    ...(Number.isInteger(x) ? { x } : {}),
+    ...(Number.isInteger(y) ? { y } : {}),
+    frame: false,
+    show: false,
+    hasShadow: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    movable: false,
+    focusable: false,   // 悬停提示不该把焦点从用户手上抢走
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    title,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    },
+    ...glassOptions(false)
+  });
+  win.setAlwaysOnTop(true, 'popup');
+  win.setMenuBarVisibility?.(false);
+  return win;
+}
+
 function primaryWorkArea() {
   return screen.getPrimaryDisplay().workArea;
 }
@@ -255,6 +289,7 @@ module.exports = {
   createMenuWindow,
   createPopupWindow,
   createRenameWindow,
+  createWeatherCardWindow,
   glassEnabled,
   glassOptions,
   listDisplays,

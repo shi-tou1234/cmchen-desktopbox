@@ -52,8 +52,12 @@ function fallbackIcon() {
 
 let iconSize = 48;
 let reduceMotion = false;   // 减弱动画开关（#7）：来自设置 reduce_motion
-let entries = [];       // { type:'special', id, name } | { type:'basket', id, name, color } | { type:'shortcut', path }
+let entries = [];       // { type:'special', id, name } | { type:'weather', id, name } | { type:'basket', id, name, color } | { type:'shortcut', path }
 let nodes = [];         // 与 entries 对齐的动画节点
+// 天气快照（主进程每 15 分钟刷一次）：天气条目的图标与那行气温都读它
+let weatherState = null;
+
+const weatherIcons = window.weatherIcons;
 
 function baseName(target) {
   return String(target).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || target;
@@ -69,6 +73,13 @@ function displayName(entry) {
   return entry.name || '';
 }
 
+// 图标下面那行字：筐写筐名，天气写实时气温（'26° 多云'），其余留空（这一格本来就是留给筐名的）
+function captionText(entry) {
+  if (entry.type === 'basket') return displayName(entry);
+  if (entry.type === 'weather') return weatherIcons.caption(weatherState) || '天气';
+  return '';
+}
+
 // 条目的身份：用来判断这次重画里谁是新来的、谁走了、谁只是挪了位置
 function keyOf(entry) {
   return entry.type === 'shortcut' ? 'p:' + entry.path : entry.type + ':' + entry.id;
@@ -78,7 +89,8 @@ function keyOf(entry) {
 
 function makeNode(entry) {
   const item = document.createElement('div');
-  item.className = 'dock-item';
+  // 带上类型类名：天气那行气温要用到更宽的 max-width（见 dock.html）
+  item.className = 'dock-item ' + entry.type;
   // 每条挂一份动画状态，全部由 tick 逐帧积分：
   //   influence 悬停联动 / press 按下回弹 / hopAt 点开时的弹跳 / enter 新条目进场 / dx,dy 位移
   const node = {
@@ -100,6 +112,16 @@ function makeNode(entry) {
   img.alt = '';
   if (entry.type === 'basket') {
     img.src = folderIcon(entry.color);
+  } else if (entry.type === 'weather') {
+    img.src = weatherIcons.tile();   // 先摆兜底图，免得这一格空一下
+    // 天气：优先用 Windows 天气应用的真图标（问 shell 要 AppsFolder 解析名），
+    // 拿不到（应用被卸载）就留着这块同款橙色方块
+    api
+      .getSpecialIcon('weather')
+      .then((dataUrl) => {
+        if (dataUrl) img.src = dataUrl;
+      })
+      .catch(() => {});
   } else if (entry.type === 'special') {
     // 此电脑 / 回收站：图标由 shell 按解析名给（带状态，如回收站空/非空）
     api
@@ -122,15 +144,26 @@ function makeNode(entry) {
   }
   item.append(img);
 
-  // 图标下面那行小字：只有文件夹筐写名字（其余条目留空，位置保持对齐）
+  // 图标下面那行小字：文件夹筐写筐名、天气写实时气温（'26° 多云'），其余条目留空保持对齐
   const caption = document.createElement('div');
   caption.className = 'dock-caption';
-  caption.textContent = entry.type === 'basket' ? displayName(entry) : '';
+  caption.textContent = captionText(entry);
   item.append(caption);
   node.caption = caption;
 
   // 不画悬停名称气泡（领导要求）：视觉名称只留给无障碍用
-  item.setAttribute('aria-label', displayName(entry));
+  item.setAttribute('aria-label', entry.type === 'weather' ? '天气' : displayName(entry));
+
+  // 天气：鼠标靠近就在图标上方浮出未来几天的预报卡片，离开就收。
+  // （卡片由主进程单独开一个小窗——Dock 只有一条窄带，装不下预报。
+  //   图标放大是以底边中心为原点的，中心横坐标不变，所以不用跟着重算锚点。）
+  if (entry.type === 'weather') {
+    item.addEventListener('pointerenter', () => {
+      const rect = item.getBoundingClientRect();
+      api.showWeatherCard(rect.left + rect.width / 2);
+    });
+    item.addEventListener('pointerleave', () => api.hideWeatherCard());
+  }
 
   // 按下压一下、松手弹回来（弹簧在 tick 里积分），点开时再向上跳一下
   item.addEventListener('pointerdown', (event) => {
@@ -155,6 +188,14 @@ function makeNode(entry) {
     const centerX = rect.left + rect.width / 2;
     if (entry.type === 'basket') {
       api.toggleFolder({ kind: 'basket', id: entry.id }, centerX);
+    } else if (entry.type === 'weather') {
+      // 点天气 = 打开 Windows 自带的天气应用；顺手把悬停卡片收掉（鼠标这会儿还在图标上）
+      api.hideWeatherCard();
+      api.openWeatherApp().then((result) => {
+        if (result && result.ok === false) {
+          api.alertMessage('打不开天气应用：\n' + result.error);
+        }
+      });
     } else if (entry.type === 'special') {
       api.openSpecial(entry.id).then((result) => {
         if (result && result.ok === false) {
@@ -201,6 +242,30 @@ function makeNode(entry) {
           });
         } else if (picked === 'delete') {
           api.deleteBasket(entry.id);
+        }
+      });
+    } else if (entry.type === 'weather') {
+      window.showContextMenu(
+        [
+          { key: 'open', label: '打开天气' },
+          { key: 'refresh', label: '刷新天气' },
+          { key: 'city', label: '换个城市…' },
+          { separator: true },
+          { key: 'remove', label: '从 Dock 移除' }
+        ],
+        event
+      ).then((picked) => {
+        if (!picked) return;
+        if (picked === 'open') {
+          api.openWeatherApp().then((result) => {
+            if (result && result.ok === false) api.alertMessage('打不开天气应用：\n' + result.error);
+          });
+        } else if (picked === 'refresh') {
+          api.refreshWeather();
+        } else if (picked === 'city') {
+          api.openSettings();
+        } else if (picked === 'remove') {
+          api.removeDockSpecial('weather');
         }
       });
     } else if (entry.type === 'special') {
@@ -368,9 +433,15 @@ async function refresh() {
   const magnify = Number(state.settings.dock_magnify);
   boostScale = Math.max(0, (Number.isFinite(magnify) ? magnify : 50) / 100);
   const data = await api.getDockItems();
+  // 天气快照要在建节点之前拿到：天气条目那行气温是画的时候就写上的
+  weatherState = await api.getWeather().catch(() => null);
   entries = [
-    // 顺序：系统虚拟项（此电脑/回收站）→ 筐 → 快捷方式
-    ...(data.specials || []).map((item) => ({ type: 'special', id: item.id, name: item.label })),
+    // 顺序：系统虚拟项（此电脑/回收站/天气）→ 筐 → 快捷方式
+    ...(data.specials || []).map((item) => ({
+      type: item.kind === 'weather' ? 'weather' : 'special',
+      id: item.id,
+      name: item.label
+    })),
     ...(data.baskets || []).map((basket) => ({ type: 'basket', id: basket.id, name: basket.name, color: basket.color })),
     ...(data.shortcuts || []).map((item) => ({
       type: 'shortcut',
@@ -379,6 +450,17 @@ async function refresh() {
     }))
   ];
   render();
+}
+
+// 天气刷新（主进程每 15 分钟推一次）：只改天气那一格图下的小字，
+// 不整块重画——重画会把入场动画又播一遍，看着像 Dock 闪了一下。
+function applyWeather(state) {
+  weatherState = state;
+  for (const node of nodes) {
+    if (node.entry.type === 'weather' && node.caption) {
+      node.caption.textContent = captionText(node.entry);
+    }
+  }
 }
 
 // 主题 / 减弱动画：主进程随 state 一起广播，这里同步 body 类名（#1 #7）
@@ -568,5 +650,8 @@ api.onStateChanged((state) => {
   applyRuntimeFlags(state);
   refresh();
 });
+
+// 天气更新就改那一行小字（不整块重画）
+api.onWeatherChanged((state) => applyWeather(state));
 
 refresh();

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<title>DeskBasket 天气</title>
+<link rel="stylesheet" href="common.css">
+<style>
+  /* 窗口透明、尺寸由主进程按天数算好；卡片底色在这里画：
+     它要浮在任意画面之上，自己画的底比让系统材质去糊背后的东西更稳（与右键菜单同一个理由）。 */
+  html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+
+  .card {
+    position: absolute;
+    inset: 0;
+    padding: 10px 12px 8px;
+    border-radius: 12px;
+    background: rgba(30, 32, 40, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+    transform-origin: bottom center;
+    transition: opacity 110ms ease-out, transform 160ms cubic-bezier(0.34, 1.3, 0.64, 1);
+  }
+  body.ready .card { opacity: 1; transform: none; }
+  @media (prefers-color-scheme: light) {
+    .card {
+      background: rgba(250, 251, 253, 0.96);
+      border: 1px solid rgba(0, 0, 0, 0.12);
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+    }
+  }
+  /* 减弱动画：不淡不缩，直接到位 */
+  body.reduce-motion .card { transition: none; opacity: 1; transform: none; }
+
+  .head { display: flex; align-items: baseline; gap: 6px; flex: 0 0 auto; }
+  .city {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #eef0f6;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .updated { font-size: 10.5px; color: #9aa0b0; flex: 0 0 auto; }
+  @media (prefers-color-scheme: light) {
+    .city { color: #23252e; }
+    .updated { color: #6a6d75; }
+  }
+
+  /* 当前天气：大号温度 ＋ 一句说法 ＋ 体感/湿度 */
+  .now { display: flex; align-items: center; gap: 10px; padding: 4px 0 6px; flex: 0 0 auto; }
+  .now img { width: 34px; height: 34px; flex: 0 0 auto; }
+  .now .temp {
+    font-size: 30px;
+    font-weight: 300;
+    line-height: 1;
+    color: #ffffff;
+    letter-spacing: -1px;
+  }
+  .now .meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .now .desc { font-size: 12.5px; color: #dfe3ec; }
+  .now .extra { font-size: 10.5px; color: #9aa0b0; }
+  @media (prefers-color-scheme: light) {
+    .now .temp { color: #1d1f27; }
+    .now .desc { color: #33363f; }
+    .now .extra { color: #6a6d75; }
+  }
+
+  .sep { height: 1px; background: rgba(255, 255, 255, 0.13); flex: 0 0 auto; }
+  @media (prefers-color-scheme: light) { .sep { background: rgba(0, 0, 0, 0.10); } }
+
+  .days { flex: 1 1 auto; display: flex; flex-direction: column; }
+  .day {
+    height: 26px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #e6e9f0;
+  }
+  @media (prefers-color-scheme: light) { .day { color: #2b2e37; } }
+  .day .when { width: 34px; flex: 0 0 auto; color: #b9bfcd; }
+  .day .g { width: 18px; height: 18px; flex: 0 0 auto; }
+  .day .what { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .day .hi { width: 34px; text-align: right; flex: 0 0 auto; font-weight: 600; }
+  .day .lo { width: 34px; text-align: right; flex: 0 0 auto; color: #99a0b0; }
+  @media (prefers-color-scheme: light) {
+    .day .when { color: #6a6d75; }
+    .day .lo { color: #7a7d86; }
+  }
+
+  .note { font-size: 11px; color: #9aa0b0; padding-top: 6px; flex: 0 0 auto; }
+  @media (prefers-color-scheme: light) { .note { color: #6a6d75; } }
+  .note.warn { color: #ffbe78; }
+</style>
+</head>
+<body>
+  <div class="card" id="card"></div>
+  <script src="weather-icons.js"></script>
+  <script src="weathercard.js"></script>
+</body>
+</html>

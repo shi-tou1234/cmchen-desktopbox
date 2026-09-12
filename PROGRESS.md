@@ -1240,3 +1240,71 @@ icon-proof/list-windows）、`docs/icon-probe/`（5 张探针图）、`docs/prob
 
 验证：`node --check` 全过、`npm test` 76 passed / 0 fail、应用重启正常（Dock/设置面板都起来了）。
 要找回旧版：`git show <本次提交>^:main.py` 或 `git switch --detach v2.2.0-python`。
+
+## Dock 加天气图标：实时气温 ＋ 悬停未来天气（2026-09-12）
+
+领导要求：Dock 回收站旁边加一个 Windows 天气应用图标，点开应用，图标上实时显示当前天气，
+鼠标靠近浮出未来天气。
+
+**做的**：
+
+- `src/main/weather.js`（新）：WMO 天气代码 → 中文说法 ＋ 图形种类、今天/明天/后天的换算、
+  地理编码与预报响应的解析、卡片尺寸 —— 全是纯函数；取数用 node:https（不引依赖），
+  多一个可注入的 `request` 参数，所以 `node --test` 能把整条链路测完。
+- `specials.js`：新增虚拟项 `weather`，kind='weather'，解析名与打开落点都是
+  `shell:AppsFolder\Microsoft.BingWeather_8wekyb3d8bbwe!App`，另有 MSN 网页兜底。
+  实测 `SHParseDisplayName` 认这个 AppsFolder 名并给出**真图标**（橙色太阳＋白云），
+  所以它跟此电脑/回收站走同一条图标链路，只是渲染层按 kind 分流。
+- `main.js` 天气服务：15 分钟刷一次，快照常驻内存并广播（`weather:changed`）；
+  失败**不弹窗**，保留上次数据只标 error；城市留空时走 IP 自动定位
+  （ipwho.is → 城市名 → Open-Meteo 地理编码换中文名，因为 ipwho.is 只回英文）。
+- 悬浮卡片：新窗口 `weather.html` ＋ `weathercard.js`，不可聚焦、自绘底色（与右键菜单同套路），
+  按 `popupGeometry` 锚在图标上方；关闭判定沿用文件夹弹窗那套鼠标轮询，
+  另外把 `cursorNearDock` 也算上卡片，免得鼠标从图标移向卡片时 Dock 收走、卡片跟着消失。
+- 渲染层 `weather-icons.js`：14 种天气的自绘 SVG ＋ Dock 兜底方块 ＋ 气温文案，Dock 与卡片共用。
+- `dock.js`：天气条目、图下实时气温（只改那一行文字，不整块重画，免得重播入场动画）、
+  pointerenter/pointerleave 出卡片、点击打开应用、右键菜单。
+- 设置面板：「Dock 上的系统图标」三个勾选（此电脑/回收站/天气）＋「天气」组（城市、
+  立即刷新、一行状态：解析到的城市／现在几度／何时更新）。
+- `store.js`：`weather_city`（默认空 ＝ 自动定位）；`dock_specials` 默认加上 weather。
+  注意：**显式写过这一项的配置不会被硬塞**（用户撤下天气就是真撤下）。
+
+**验证**（真机）：
+
+- `npm test` → 104 passed / 0 fail（新增 8 条：代码译码、今天/明天/后天、地理编码与预报解析、
+  Dock 文案、地址编码与卡片尺寸、注入式取数链路、IP 自动定位、weather_city 归一化）。
+  另改了 2 条既有断言（dock_specials 默认值、虚拟项用例）。
+- 用临时 `APPDATA` ＋ `--user-data-dir` 起了一个独立实例（不动领导自己的配置）：
+  Dock 上天气图标排在回收站旁边、图标是系统的真图标、下面写 `28° 阴`；
+  鼠标移上去浮出卡片「杭州 浙江 中国 · 自动定位 · 12:14 更新 / 28° 阴 体感 30° 湿度 55%」
+  ＋ 今天/明天/后天/周二/周三/周四 六行最高最低温；鼠标移开卡片收、Dock 滑走。
+- 点图标 → `Microsoft.Msn.Weather` 进程在 12:11:47 起来（正好是点击那一刻），确认能开应用。
+- 设置面板截图核对：系统图标三个勾选、天气组与状态行都对。
+
+**踩到的坑（留给下次）**：
+
+- Win+D 会把 Electron 窗口一并最小化，常驻（桌面层）的 Dock 因此截不到图 ——
+  验证要用自动收起模式（置顶）才看得见。
+- CUA 的鼠标事件只允许发给前台窗口，而 Dock 刻意 `focusable:false`，
+  于是 `mouse_move`/`left_click` 都被拒；改用 PowerShell 的 `SetCursorPos`/`mouse_event`
+  驱动真实光标才验成。
+- 本机沙箱会把 node/python 对 `%APPDATA%` 的读写**虚拟化**（读到的是旧快照、写进去别人看不见），
+  而 PowerShell 的读写是真的 —— 读领导的配置必须走 PowerShell，否则会得到一份过期的 settings.json。
+- 领导原来的配置里 `dock_specials` 显式只有两项，所以新图标不会自动出现；
+  已按本次要求把 weather 加进那份配置并重启实例，Dock 上现在就带着天气。
+
+## 重写 README ＋ 版本 3.1.0 → 3.2.0（2026-09-12）
+
+领导要求「重写 README 提交 GitHub」。重写时把天气并进正文（原来只有 Dock 一小节提到它），
+并补齐几处只有代码里才写得清的事：
+
+- 「它能做什么」按筐 / Dock / 天气 / 收录来源 / 外观 / 其他 六个小节重排，天气单独一节写清
+  图标来源、点击行为、悬停卡片、城市来源与刷新节奏；
+- 常用操作表加两行（看天气 / 天气城市不对），常见问题加三条（城市不符、取不到、「会联网吗」）；
+- 「本程序会联网吗」写明只有天气这一处，勾掉天气图标就停请求 —— 这是本项目唯一的外发数据面，
+  README 里不该回避；
+- 开发一节补上天气模块（纯逻辑可单测），并说明 `scripts/desktop_*.py` 的用途。
+
+版本随之从 3.1.0 提到 3.2.0（加功能，minor），`package.json` 与 `package-lock.json` 根包版本
+一起改（lockfile 里那两处 3.1.0 是依赖的版本，没动）。README 里没有贴截图：`docs/` 下现有的
+PNG 都是开发过程中的调试截图（含 ZCode 界面与领导桌面），不适合放进公开 README。

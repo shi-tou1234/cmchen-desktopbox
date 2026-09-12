@@ -13,7 +13,7 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 
 const {
   app,
@@ -38,6 +38,7 @@ const windowLayer = require('./windowLayer');
 const winFactory = require('./windows');
 const autostart = require('./autostart');
 const theme = require('./theme');
+const weatherModel = require('./weather');
 
 const APP_NAME = 'DeskBasket';
 const DOCK_PADDING = 8;
@@ -81,6 +82,18 @@ let popupOpenMode = '';        // '新建窗口' | '复用热窗口'，只用于
 let popupBlurTimer = null;
 let popupHoverTimer = null;    // 鼠标离开自动关的轮询
 let menuOpen = false;          // 自绘右键菜单开着：期间弹窗不许"失焦即关"
+
+// 天气：快照常驻内存（页面随时可取），由定时器刷新；悬浮卡片是另一个小窗口
+let weatherSnapshot = null;    // { ok, city, place, current, days, updatedAt, error, installed }
+let weatherRefreshTimer = null;
+let weatherRefreshPending = null;  // 进行中的刷新：同一时刻只跑一个（切城市/定时到点不会叠起来）
+let weatherPlace = null;       // { city, name, label, latitude, longitude }：城市没换就不再查坐标
+let weatherLastError = '';
+let weatherCardWindow = null;
+let weatherCardPainted = false;
+let weatherCardWanted = false;     // 想要卡片显示（页面还没画出第一帧时先记下，画完再浮出来）
+let weatherCardPollTimer = null;
+let weatherCardLeftAt = 0;
 
 const iconCache = new Map();      // `${size}:${pathKey}` -> dataURL
 const shortcutCache = new Map();  // pathKey -> shell.readShortcutLink 结果或 null
@@ -432,6 +445,276 @@ function dirTargetForShortcut(target) {
   return null;
 }
 
+// ------------------------------------------------------------------ 天气
+//
+// 数据源 Open-Meteo（免费、免注册、不要 API Key）：城市名 → 坐标 → 当前天气 ＋ 未来几天。
+// 取数必须在主进程：各页面的 CSP 是 default-src 'self'，渲染层发不出网络请求。
+// 结果存成一份常驻快照广播出去，Dock 图标下面那行气温与悬浮卡片都读它。
+//
+// 取天气失败一律**不弹窗**：保留上一次的数据，只把错误记进快照、日志里记一条。
+const WEATHER_REFRESH_MS = 15 * 60 * 1000;   // 15 分钟刷一次（实时性够用，又不至于频繁打接口）
+const WEATHER_CARD_CHECK_MS = 250;           // 悬浮卡片"鼠标还在不在"的轮询间隔
+const WEATHER_CARD_AWAY_MS = 500;            // 鼠标离开 Dock 与卡片多久后收起
+
+function weatherCity() {
+  // 空 = 自动按网络位置判断（见 weather.resolveAutoPlace）：多数人不必去设置里填城市
+  return settings.weather_city || '';
+}
+
+// 天气应用装着没有：问 shell 要它的图标，拿得到就说明系统里有这个应用。
+// 图标本来就在 Dock 预热的那批里，这里等于白拿（拿不到就是被卸载了，点击退到网页版）。
+async function weatherAppInstalled() {
+  try {
+    const url = await shellIcons.parsingNameIconDataUrl(
+      specials.WEATHER_APP_URI,
+      shellIcons.ICON_PX
+    );
+    return Boolean(url);
+  } catch (_) {
+    return false;
+  }
+}
+
+// 渲染层要的那份天气（还没取到时给一份空壳，页面照样画得出来）
+function weatherPayload() {
+  if (!weatherSnapshot) {
+    return {
+      ok: false,
+      city: weatherCity(),
+      auto: !weatherCity(),
+      place: null,
+      current: null,
+      days: [],
+      updatedAt: 0,
+      error: '',
+      installed: null
+    };
+  }
+  return weatherSnapshot;
+}
+
+function sendWeather() {
+  const payload = weatherPayload();
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('weather:changed', payload);
+  }
+}
+
+async function refreshWeather(force = false) {
+  if (weatherRefreshPending) return weatherRefreshPending;
+  const city = weatherCity();
+  weatherRefreshPending = (async () => {
+    try {
+      if (force || !weatherPlace || weatherPlace.city !== city) {
+        // 填了城市就按名字查；留空则自动定位（IP → 城市名 → 中文坐标）
+        const place = city
+          ? await weatherModel.resolveCity(city)
+          : await weatherModel.resolveAutoPlace();
+        weatherPlace = { ...place, city };
+      }
+      const data = await weatherModel.fetchForecast(weatherPlace);
+      // 「今天/明天/后天」在这里就算好：渲染层只负责把 label 印出来，
+      // 周几的换算只存在于 weather.dayLabel 一处（那边有单测）
+      const today = data.current.date || (data.days[0] ? data.days[0].date : '');
+      weatherSnapshot = {
+        ok: true,
+        city,
+        auto: Boolean(weatherPlace.auto),
+        place: { name: weatherPlace.name, label: weatherPlace.label },
+        current: data.current,
+        days: data.days.map((day) => ({ ...day, label: weatherModel.dayLabel(day.date, today) })),
+        updatedAt: Date.now(),
+        error: '',
+        installed: await weatherAppInstalled()
+      };
+      weatherLastError = '';
+      console.log(
+        `[weather] ${weatherPlace.label} ${data.current.temperature}° ${data.current.text}` +
+          (weatherPlace.auto ? '（自动定位）' : '')
+      );
+    } catch (error) {
+      const message = String((error && error.message) || error || '取天气失败');
+      // 同一条错误只记一次：断网时每 15 分钟刷一次，别把日志刷满
+      if (message !== weatherLastError) {
+        weatherLastError = message;
+        console.log(`[weather] 取「${city || '自动定位'}」的天气失败：${message}`);
+      }
+      weatherSnapshot = {
+        ok: false,
+        city,
+        auto: !city,
+        // 这次失败了也留着上次的数据与城市名：一次网络抖动不该让气温凭空消失
+        place: weatherSnapshot ? weatherSnapshot.place : null,
+        current: weatherSnapshot ? weatherSnapshot.current : null,
+        days: weatherSnapshot ? weatherSnapshot.days : [],
+        updatedAt: weatherSnapshot ? weatherSnapshot.updatedAt : 0,
+        error: message,
+        installed: weatherSnapshot ? weatherSnapshot.installed : null
+      };
+    } finally {
+      weatherRefreshPending = null;
+    }
+    sendWeather();
+    return weatherSnapshot;
+  })();
+  return weatherRefreshPending;
+}
+
+function startWeatherRefresh() {
+  if (weatherRefreshTimer) clearInterval(weatherRefreshTimer);
+  refreshWeather().catch(() => {});
+  weatherRefreshTimer = setInterval(() => {
+    refreshWeather().catch(() => {});
+  }, WEATHER_REFRESH_MS);
+}
+
+function stopWeatherRefresh() {
+  if (weatherRefreshTimer) clearInterval(weatherRefreshTimer);
+  weatherRefreshTimer = null;
+}
+
+// 子进程"起完就不管"：explorer 代劳打开 shell: 时用得到，错误一律折成 false
+function spawnDetached(exe, args) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    } catch (_) {
+      resolve(false);
+      return;
+    }
+    child.once('error', () => resolve(false));
+    child.once('spawn', () => {
+      child.unref();
+      resolve(true);
+    });
+  });
+}
+
+// 点 Dock 上的天气图标 = 打开 Windows 自带的天气应用。
+// 三层兜底：AppsFolder 解析名（与本机开始菜单里点它等价）→ 让 explorer 代劳
+// → MSN 天气网页（应用被卸载/系统精简掉时）。
+async function openWeatherApp() {
+  const special = specials.findSpecial(specials.WEATHER_ID);
+  if (!special) return { ok: false, error: '天气项没注册' };
+  if (!(await weatherAppInstalled())) {
+    try {
+      await shell.openExternal(special.webFallback);
+      return { ok: true, error: '' };
+    } catch (error) {
+      return { ok: false, error: String((error && error.message) || error) };
+    }
+  }
+  const message = await shell.openPath(special.openUri);
+  if (!message) return { ok: true, error: '' };
+  if (await spawnDetached('explorer.exe', [special.openUri])) return { ok: true, error: '' };
+  return { ok: false, error: message };
+}
+
+// 卡片锚在天气图标上方：与文件夹弹窗同一套算法（左右不出屏、顶部留边）
+function weatherCardGeometry(anchorCenterX, size) {
+  const display = activeDisplay();
+  const bounds = dockWindow && !dockWindow.isDestroyed() ? dockWindow.getBounds() : null;
+  return dockmodel.popupGeometry(
+    display.workArea,
+    bounds,
+    anchorCenterX,
+    size,
+    POPUP_EDGE_GAP,
+    POPUP_DOCK_GAP
+  );
+}
+
+function stopWeatherCardWatch() {
+  if (weatherCardPollTimer) clearInterval(weatherCardPollTimer);
+  weatherCardPollTimer = null;
+  weatherCardLeftAt = 0;
+}
+
+function hideWeatherCard() {
+  weatherCardWanted = false;
+  stopWeatherCardWatch();
+  const win = weatherCardWindow;
+  if (win && !win.isDestroyed() && win.isVisible()) win.hide();
+}
+
+// 鼠标还在 Dock 附近或卡片上就留着，两边都离开了才收。
+// 这条轮询同时兜住"Dock 自动收起把卡片留在屏幕中间"的情况：Dock 一滑走，
+// 鼠标就不在它的矩形里了，卡片跟着收。
+function startWeatherCardWatch() {
+  if (weatherCardPollTimer) return;
+  weatherCardPollTimer = setInterval(() => {
+    const win = weatherCardWindow;
+    if (!win || win.isDestroyed() || !win.isVisible()) {
+      stopWeatherCardWatch();
+      return;
+    }
+    const point = screen.getCursorScreenPoint();
+    // 与文件夹弹窗同口径：Dock 那圈多让一点（上方给放大动画，下方把 Dock 与底边之间的缝包进来）
+    const pad = 16 + Math.max(0, settings.dock_bottom_gap || 0);
+    const onDock =
+      dockWindow &&
+      !dockWindow.isDestroyed() &&
+      dockmodel.pointNearBounds(point, dockWindow.getBounds(), pad);
+    const onCard = dockmodel.pointNearBounds(point, win.getBounds(), 16);
+    if (onDock || onCard) {
+      weatherCardLeftAt = 0;
+      return;
+    }
+    if (!weatherCardLeftAt) {
+      weatherCardLeftAt = Date.now();
+      return;
+    }
+    if (Date.now() - weatherCardLeftAt >= WEATHER_CARD_AWAY_MS) hideWeatherCard();
+  }, WEATHER_CARD_CHECK_MS);
+}
+
+function ensureWeatherCardWindow(size) {
+  if (weatherCardWindow && !weatherCardWindow.isDestroyed()) return weatherCardWindow;
+  const win = winFactory.createWeatherCardWindow({
+    width: size.width,
+    height: size.height,
+    title: `${APP_NAME} 天气`
+  });
+  weatherCardWindow = win;
+  weatherCardPainted = false;
+  attachDiagnostics(win, 'weather');
+  winFactory.loadPage(win, 'weather.html', settings.reduce_motion ? { rm: 1 } : undefined);
+  win.on('closed', () => {
+    if (weatherCardWindow === win) weatherCardWindow = null;
+    stopWeatherCardWatch();
+  });
+  // 页面画出第一帧再浮出来：不然会闪一下空白卡片。
+  // 期间鼠标可能已经离开（weatherCardWanted 变 false），那就干脆不显示。
+  win.once('ready-to-show', () => {
+    weatherCardPainted = true;
+    if (weatherCardWindow !== win || win.isDestroyed()) return;
+    if (!weatherCardWanted) return;
+    win.showInactive();
+    startWeatherCardWatch();
+  });
+  return win;
+}
+
+// 鼠标靠近 Dock 上的天气图标：在图标上方浮出未来天气卡片（只读，不抢焦点）
+function showWeatherCard(anchorCenterX) {
+  if (!settings.dock_specials.includes(specials.WEATHER_ID)) return false;
+  // 自动收起模式下 Dock 收着的时候它贴在屏幕外，别把卡片也跟着摆到屏幕外去
+  if (settings.dock_auto_hide && !dockRevealed) return false;
+  const days = weatherSnapshot && weatherSnapshot.days ? weatherSnapshot.days.length : 0;
+  const size = weatherModel.cardSize(days || weatherModel.FORECAST_DAYS);
+  const spot = weatherCardGeometry(Number(anchorCenterX) || 0, size);
+  if (!spot) return false;
+  weatherCardWanted = true;
+  const win = ensureWeatherCardWindow(size);
+  win.setBounds(spot);
+  if (weatherCardPainted) {
+    win.showInactive();
+    startWeatherCardWatch();
+  }
+  return true;
+}
+
 // ------------------------------------------------------------------ 窗口：Dock
 
 function dockSize() {
@@ -549,10 +832,18 @@ function cursorNearDock() {
   // 抬起来之后，Dock 底边与屏幕底边之间那条缝也算"在附近"：鼠标从底边往上移过去时
   // 不能中途判定成"离开"而收起来
   const pad = 6 + Math.max(0, settings.dock_bottom_gap || 0);
-  return (
-    dockmodel.pointNearBounds(point, dockWindow.getBounds(), pad) ||
-    dockmodel.isHotZone(point, display.bounds, dockmodel.EDGE_BOTTOM, DOCK_HOT_ZONE_PX)
-  );
+  if (dockmodel.pointNearBounds(point, dockWindow.getBounds(), pad)) return true;
+  // 天气悬浮卡片算 Dock 的一部分：鼠标从天气图标往上移去看预报时，
+  // 既不能让 Dock 收走，也不能让卡片跟着消失
+  if (
+    weatherCardWindow &&
+    !weatherCardWindow.isDestroyed() &&
+    weatherCardWindow.isVisible() &&
+    dockmodel.pointNearBounds(point, weatherCardWindow.getBounds(), 16)
+  ) {
+    return true;
+  }
+  return dockmodel.isHotZone(point, display.bounds, dockmodel.EDGE_BOTTOM, DOCK_HOT_ZONE_PX);
 }
 
 function tickDockAutoHide() {
@@ -590,6 +881,7 @@ function tickDockAutoHide() {
     dockRevealed = false;
     dockLeftAt = 0;
     closeFolderPopup();
+    hideWeatherCard();   // Dock 都要滑走了，挂在它上面的天气卡片跟着收
     slideDockTo(dockHiddenGeometry());
   }
 }
@@ -744,6 +1036,7 @@ function syncDock() {
       dockWindow.destroy();
       dockWindow = null;
     }
+    hideWeatherCard();   // Dock 都没了，挂在它上面的天气卡片没有存在的理由
     return;
   }
   prewarmDockIcons();
@@ -1389,13 +1682,13 @@ function registerIpc() {
     return settings.baskets;
   });
 
-  // Dock 条目 = 系统虚拟项（此电脑/回收站）＋筐（文件夹，点击弹文件夹弹窗）＋快捷方式；隐藏的筐不上 Dock
-  // 快捷方式的名字在这里就定好（别名优先），渲染层只管画
+  // Dock 条目 = 系统虚拟项（此电脑/回收站/天气）＋筐（文件夹，点击弹文件夹弹窗）＋快捷方式；
+  // 隐藏的筐不上 Dock。快捷方式的名字在这里就定好（别名优先），渲染层只管画
   ipcMain.handle('dock:get', () => ({
     specials: settings.dock_specials
       .map((id) => specials.findSpecial(id))
       .filter(Boolean)
-      .map((item) => ({ id: item.id, label: item.label })),
+      .map((item) => ({ id: item.id, label: item.label, kind: item.kind || 'shell' })),
     baskets: settings.baskets
       .filter((basket) => basket.visible !== false)
       .map((basket) => ({ id: basket.id, name: basket.name, color: basket.color })),
@@ -1407,10 +1700,30 @@ function registerIpc() {
 
   ipcMain.handle('special:icon', (_event, { id }) => specialIconFor(id));
 
-  ipcMain.handle('special:open', (_event, { id }) => openSpecial(id));
+  // 天气项不走 shell 打开（要三层兜底 + 应用是否装着的判断），单独一条路
+  ipcMain.handle('special:open', (_event, { id }) =>
+    id === specials.WEATHER_ID ? openWeatherApp() : openSpecial(id)
+  );
+
+  // 天气：快照（Dock 图标下的气温、悬浮卡片都读它）／立刻刷新／打开天气应用／悬浮卡片
+  ipcMain.handle('weather:get', () => weatherPayload());
+  ipcMain.handle('weather:refresh', () => refreshWeather(true));
+  ipcMain.handle('weather:open-app', () => openWeatherApp());
+  ipcMain.handle('weather:card-show', (_event, { itemCenterX } = {}) =>
+    showWeatherCard(itemCenterX)
+  );
+  ipcMain.handle('weather:card-hide', () => {
+    hideWeatherCard();
+    return true;
+  });
 
   ipcMain.handle('dock:remove-special', (_event, { id }) => {
     settings.dock_specials = settings.dock_specials.filter((item) => item !== id);
+    if (id === specials.WEATHER_ID) {
+      // 天气撤下来了：定时请求停掉（不取就别白打接口），悬浮卡片也收掉
+      stopWeatherRefresh();
+      hideWeatherCard();
+    }
     persist();
     syncDock();
     return settings.dock_specials;
@@ -1695,14 +2008,31 @@ function registerIpc() {
       dock_magnify: settings.dock_magnify,
       dock_bottom_gap: settings.dock_bottom_gap,
       dock_display: settings.dock_display,
+      dock_specials: (settings.dock_specials || []).join(','),
       shortcuts_dir: settings.shortcuts_dir,
       theme_mode: settings.theme_mode,
+      weather_city: settings.weather_city,
       basket_count: settings.baskets.length
     };
     settings = store.mergedSettings({ ...settings, ...(patch || {}) });
     // 主题要在 persist（=广播）之前解析好，payload 里才带得出新深浅色
     if (settings.theme_mode !== before.theme_mode) applyTheme();
     persist();
+    if (settings.weather_city !== before.weather_city) {
+      // 换了城市：坐标要重新查，立刻刷一次（不等下一个 15 分钟）
+      weatherPlace = null;
+      weatherSnapshot = null;
+      refreshWeather().catch(() => {});
+      hideWeatherCard();
+    }
+    const weatherOn = settings.dock_specials.includes(specials.WEATHER_ID);
+    const weatherWas = before.dock_specials.includes(specials.WEATHER_ID);
+    if (weatherOn && !weatherWas) startWeatherRefresh();   // 刚把天气摆上 Dock
+    if (!weatherOn && weatherWas) {
+      // 天气图标被撤下：停掉定时请求（不取就不要白打接口），卡片也跟着收
+      stopWeatherRefresh();
+      hideWeatherCard();
+    }
     if (settings.dock_enabled !== before.dock_enabled) syncDock();
     else if (settings.dock_auto_hide !== before.dock_auto_hide) {
       // 常驻 ⇄ 自动收起：切换置顶，常驻时重新放到桌面层
@@ -1719,6 +2049,8 @@ function registerIpc() {
       settings.dock_icon_size !== before.dock_icon_size ||
       settings.dock_bottom_gap !== before.dock_bottom_gap ||
       settings.dock_display !== before.dock_display ||
+      // 增删系统图标（此电脑/回收站/天气）也会改变条目数 → Dock 要重算宽度
+      settings.dock_specials.join(',') !== before.dock_specials ||
       settings.baskets.length !== before.basket_count
     ) {
       // 换屏（primary ⇄ mouse ⇄ 下标）要重算底边锚点与居中，跟改尺寸/抬起同一套处理
@@ -1742,7 +2074,7 @@ function registerIpc() {
   const RESETTABLE_KEYS = [
     'accent_mode', 'theme_mode', 'reduce_motion', 'icon_size',
     'dock_enabled', 'dock_auto_hide', 'dock_icon_size',
-    'dock_magnify', 'dock_bottom_gap', 'dock_display'
+    'dock_magnify', 'dock_bottom_gap', 'dock_display', 'weather_city'
   ];
   ipcMain.handle('settings:reset', () => {
     const patch = {};
@@ -1783,6 +2115,8 @@ function bootstrap() {
   syncDock();
   installTray();
   startDockAutoHide();
+  // 天气：图标在 Dock 上才去取（撤下来就不白打接口）
+  if (settings.dock_specials.includes(specials.WEATHER_ID)) startWeatherRefresh();
   // 后台把筐里条目的图标热进缓存：启动后第一次点开文件夹弹窗不该等图标
   prewarmBasketIcons();
   if (settings.autostart) autostart.sync(true);
@@ -1816,6 +2150,13 @@ if (!singleInstance) {
 
   app.on('window-all-closed', () => {
     // 托盘常驻：窗口关光了也不退出
+  });
+
+  app.on('will-quit', () => {
+    // 定时器留着会把进程吊住：退出前明确停掉
+    stopWeatherRefresh();
+    stopWeatherCardWatch();
+    if (dockWatchTimer) clearInterval(dockWatchTimer);
   });
 }
 

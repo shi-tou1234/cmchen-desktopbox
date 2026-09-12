@@ -42,10 +42,23 @@ contextBridge.exposeInMainWorld('deskbasket', {
   // 逐个添加：桌面候选清单 ＋ 从磁盘挑文件
   dockCandidates: () => ipcRenderer.invoke('dock:candidates'),
   pickDockFiles: () => ipcRenderer.invoke('dock:pick'),
-  // 系统虚拟项（此电脑 / 回收站）
+  // 系统虚拟项（此电脑 / 回收站 / 天气）
   getSpecialIcon: (id) => ipcRenderer.invoke('special:icon', { id }),
   openSpecial: (id) => ipcRenderer.invoke('special:open', { id }),
   removeDockSpecial: (id) => ipcRenderer.invoke('dock:remove-special', { id }),
+
+  // 天气：当前天气＋未来几天的那份快照（主进程每 15 分钟刷一次，页面只管画）
+  getWeather: () => ipcRenderer.invoke('weather:get'),
+  refreshWeather: () => ipcRenderer.invoke('weather:refresh'),
+  openWeatherApp: () => ipcRenderer.invoke('weather:open-app'),
+  onWeatherChanged: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on('weather:changed', listener);
+    return () => ipcRenderer.removeListener('weather:changed', listener);
+  },
+  // 鼠标靠近 Dock 上的天气图标：在它上方浮出未来天气卡片（itemCenterX 是图标中心的窗口内横坐标）
+  showWeatherCard: (itemCenterX) => ipcRenderer.invoke('weather:card-show', { itemCenterX }),
+  hideWeatherCard: () => ipcRenderer.invoke('weather:card-hide'),
   // 点击 Dock 条目：指向文件夹的弹文件夹弹窗（再点一次收起），其余交给系统打开
   activateDockItem: (itemPath, itemCenterX) =>
     ipcRenderer.invoke('dock:activate', { path: itemPath, itemCenterX }),

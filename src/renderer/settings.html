@@ -38,6 +38,15 @@
   .shortcut-row .name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .shortcut-row .state { font-size: 11px; color: var(--text-faint); flex: 0 0 auto; }
   .shortcut-row .btn { padding: 2px 8px; font-size: 11px; flex: 0 0 auto; }
+  /* 一个行里并排几个小勾选（系统图标那种） */
+  .inline-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    margin-left: 12px;
+  }
+  .inline-check:first-child { margin-left: 0; }
 </style>
 </head>
 <body>
@@ -97,6 +106,36 @@
         </div>
         <div class="row">
           <span class="hint" id="dockCount"></span>
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>Dock 上的系统图标</h3>
+        <div class="row">
+          <label>显示哪些</label>
+          <span>
+            <label class="inline-check"><input type="checkbox" id="specialThisPc"> 此电脑</label>
+            <label class="inline-check"><input type="checkbox" id="specialRecycle"> 回收站</label>
+            <label class="inline-check"><input type="checkbox" id="specialWeather"> 天气</label>
+          </span>
+        </div>
+        <div class="row" style="display:block">
+          <span class="hint">天气图标排在回收站旁边：点它打开 Windows 自带的「天气」应用，图标下面那行是当前气温与天气，鼠标停上去浮出未来几天。</span>
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>天气</h3>
+        <div class="row">
+          <label for="weatherCity">城市（中文名或拼音都行）</label>
+          <input type="text" id="weatherCity" maxlength="24" placeholder="留空 ＝ 自动定位" spellcheck="false">
+        </div>
+        <div class="row" style="justify-content:flex-start;gap:8px">
+          <button class="btn" id="btnWeatherRefresh">立即刷新</button>
+          <span class="hint" id="weatherInfo"></span>
+        </div>
+        <div class="row" style="display:block">
+          <span class="hint">留空时按网络位置自动判断城市（会向 ipwho.is 查一次所在城市，再由 Open-Meteo 取天气）；填了就按填的城市取。数据来自 Open-Meteo，免费无需注册，每 15 分钟刷新一次。</span>
         </div>
       </div>
 

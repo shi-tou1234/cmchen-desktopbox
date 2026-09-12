@@ -220,3 +220,216 @@ test('备份：坏文件被回退后，下一次保存会修好主文件且备�
     assert.strictEqual(JSON.parse(fs.readFileSync(store.backupPath(), 'utf8')).icon_size, 60);
   });
 });
+
+// ---------------------------------------------------------------- 天气（Dock 上的天气图标）
+
+const weather = require('../src/main/weather');
+
+test('天气：WMO 代码译成中文与图形，昼/夜只影响晴天', () => {
+  assert.deepStrictEqual(weather.describeCode(0, true), { text: '晴', icon: 'clear' });
+  assert.deepStrictEqual(weather.describeCode(0, false), { text: '晴', icon: 'clear-night' });
+  assert.strictEqual(weather.describeCode(3, true).text, '阴');
+  assert.strictEqual(weather.describeCode(61, true).text, '小雨');
+  assert.strictEqual(weather.describeCode(95, false).text, '雷阵雨', '阵雨类昼夜说法一样');
+  assert.strictEqual(weather.describeCode(99, true).icon, 'thunder');
+  // 认不出的代码给「未知」而不是空白/抛错（新代码不该让整块天气画不出来）
+  assert.deepStrictEqual(weather.describeCode(12345, true), { text: '未知', icon: 'unknown' });
+  assert.deepStrictEqual(weather.describeCode(undefined, true), { text: '未知', icon: 'unknown' });
+});
+
+test('天气：今天/明天/后天按当地日期算，之后报周几', () => {
+  assert.strictEqual(weather.dayLabel('2026-09-12', '2026-09-12'), '今天');
+  assert.strictEqual(weather.dayLabel('2026-09-13', '2026-09-12'), '明天');
+  assert.strictEqual(weather.dayLabel('2026-09-14', '2026-09-12'), '后天');
+  // 2026-09-12 是周六 → 09-17 是周四
+  assert.strictEqual(weather.dayLabel('2026-09-17', '2026-09-12'), '周四');
+  // 跨月/跨年不吃时区：日期一律按 UTC 解析，不会整块挪一天
+  assert.strictEqual(weather.dayLabel('2027-01-01', '2026-12-31'), '明天');
+  // 坏日期不抛，回空串
+  assert.strictEqual(weather.dayLabel('不是日期', '2026-09-12'), '');
+});
+
+test('天气：地理编码响应解析出坐标，找不到城市回 null', () => {
+  const place = weather.parseGeocode({
+    results: [
+      {
+        name: '北京',
+        latitude: 39.9075,
+        longitude: 116.39723,
+        country: '中国',
+        admin1: '北京市'
+      }
+    ]
+  });
+  assert.strictEqual(place.latitude, 39.9075);
+  assert.strictEqual(place.longitude, 116.39723);
+  assert.strictEqual(place.label, '北京 北京市 中国');
+  assert.strictEqual(weather.parseGeocode({ results: [] }), null);
+  assert.strictEqual(weather.parseGeocode(null), null);
+  assert.strictEqual(weather.parseGeocode({ results: [{ name: 'x' }] }), null, '缺坐标不算有效结果');
+  // 城市名与省/国家重名时不重复写（「北京 北京 中国」→「北京 中国」）
+  assert.strictEqual(
+    weather.parseGeocode({ results: [{ name: '上海', admin1: '上海', country: '中国', latitude: 1, longitude: 2 }] })
+      .label,
+    '上海 中国'
+  );
+});
+
+test('天气：预报响应解析出当前天气与每天的最高/最低温', () => {
+  const parsed = weather.parseForecast({
+    timezone: 'Asia/Shanghai',
+    current: {
+      time: '2026-09-12T12:30',
+      temperature_2m: 26.4,
+      apparent_temperature: 28.1,
+      relative_humidity_2m: 40,
+      weather_code: 2,
+      is_day: 1
+    },
+    daily: {
+      time: ['2026-09-12', '2026-09-13'],
+      weather_code: [2, 61],
+      temperature_2m_max: [27.6, 24.2],
+      temperature_2m_min: [18.4, 17.1]
+    }
+  });
+  assert.strictEqual(parsed.current.temperature, 26.4);
+  assert.strictEqual(parsed.current.feelsLike, 28.1);
+  assert.strictEqual(parsed.current.humidity, 40);
+  assert.strictEqual(parsed.current.text, '多云');
+  assert.strictEqual(parsed.current.date, '2026-09-12', '当地日期要给出来：算今天/明天要用');
+  assert.strictEqual(parsed.days.length, 2);
+  assert.deepStrictEqual(parsed.days[1], {
+    date: '2026-09-13',
+    code: 61,
+    text: '小雨',
+    icon: 'rain',
+    max: 24.2,
+    min: 17.1
+  });
+  // 关键字段缺失当坏数据处理：宁可显示"取不到"，也别画一张半截的预报
+  assert.strictEqual(weather.parseForecast({ current: {}, daily: { time: [] } }), null);
+  assert.strictEqual(weather.parseForecast({ current: { temperature_2m: 20 } }), null);
+  assert.strictEqual(weather.parseForecast(null), null);
+});
+
+test('天气：Dock 图标下那行字是实时气温＋天气，没数据时留空', () => {
+  assert.strictEqual(weather.dockCaption({ current: { temperature: 26.4, text: '多云' } }), '26° 多云');
+  assert.strictEqual(weather.dockCaption({ current: { temperature: -3.6, text: '小雪' } }), '-4° 小雪');
+  assert.strictEqual(weather.dockCaption({ current: { temperature: 20, text: '' } }), '20°');
+  assert.strictEqual(weather.dockCaption({ current: null }), '');
+  assert.strictEqual(weather.dockCaption(null), '');
+});
+
+test('天气：请求地址带上城市/坐标与天数，卡片高度随天数走', () => {
+  const geo = weather.geocodeUrl('北京');
+  assert.ok(geo.startsWith(weather.GEOCODE_ENDPOINT + '?'));
+  assert.ok(geo.includes('format=json') && geo.includes('count=1'));
+  assert.strictEqual(decodeURIComponent(geo.split('name=')[1].split('&')[0]), '北京');
+  // 城市名里的特殊字符必须编码，不能拼进 URL
+  assert.ok(weather.geocodeUrl('a&b=c').includes('a%26b%3Dc'));
+  // 空城市退回默认城市，不至于请求一个空名字
+  assert.strictEqual(weather.geocodeUrl('  '), weather.geocodeUrl(weather.DEFAULT_CITY));
+  const url = weather.forecastUrl(39.9, 116.4);
+  assert.ok(url.includes('latitude=39.9') && url.includes('longitude=116.4'));
+  assert.ok(url.includes('forecast_days=' + weather.FORECAST_DAYS));
+
+  const few = weather.cardSize(2);
+  const many = weather.cardSize(6);
+  assert.strictEqual(few.width, weather.CARD_WIDTH);
+  assert.strictEqual(many.height - few.height, 4 * weather.CARD_ROW);
+  assert.strictEqual(weather.cardSize(0).height, weather.cardSize(1).height, '至少留一行');
+  assert.ok(weather.cardSize(99).height <= weather.CARD_HEAD + 7 * weather.CARD_ROW + weather.CARD_PAD);
+});
+
+test('天气：取数走注入的 request，城市→坐标→预报串成一条链', async () => {
+  const calls = [];
+  const request = (url) => {
+    calls.push(url);
+    if (url.startsWith(weather.GEOCODE_ENDPOINT)) {
+      return Promise.resolve({ results: [{ name: '北京', latitude: 39.9, longitude: 116.4, country: '中国' }] });
+    }
+    return Promise.resolve({
+      current: { time: '2026-09-12T12:00', temperature_2m: 26, weather_code: 0, is_day: 1 },
+      daily: { time: ['2026-09-12'], weather_code: [0], temperature_2m_max: [28], temperature_2m_min: [18] }
+    });
+  };
+  const result = await weather.fetchWeather('北京', request);
+  assert.strictEqual(calls.length, 2, '先查坐标再取预报');
+  assert.ok(calls[0].startsWith(weather.GEOCODE_ENDPOINT));
+  assert.ok(calls[1].startsWith(weather.FORECAST_ENDPOINT));
+  assert.strictEqual(result.place.name, '北京');
+  assert.strictEqual(result.current.temperature, 26);
+  assert.strictEqual(result.current.icon, 'clear');
+  assert.strictEqual(result.days[0].max, 28);
+
+  // 查不到城市要报错（页面据此显示"取不到"，而不是画一张空白卡）
+  await assert.rejects(() => weather.fetchWeather('不存在的地方', () => Promise.resolve({ results: [] })),
+    /找不到城市/);
+  // 有坐标就直接取预报，不再地理编码
+  const again = [];
+  await weather.fetchForecast({ latitude: 1, longitude: 2 }, (url) => {
+    again.push(url);
+    return Promise.resolve({
+      current: { time: '2026-09-12T12:00', temperature_2m: 20, weather_code: 3 },
+      daily: { time: ['2026-09-12'], weather_code: [3], temperature_2m_max: [22], temperature_2m_min: [15] }
+    });
+  });
+  assert.strictEqual(again.length, 1);
+  assert.ok(again[0].startsWith(weather.FORECAST_ENDPOINT));
+});
+
+test('配置：weather_city 压缩空白并限长，坏值回空串（= 用默认城市）', () => {
+  assert.strictEqual(store.normalizeCity('  上海  '), '上海');
+  assert.strictEqual(store.normalizeCity('New   York'), 'New York');
+  assert.strictEqual(store.normalizeCity('x'.repeat(100)).length, weather.CITY_MAX);
+  assert.strictEqual(store.normalizeCity(42), '');
+  assert.strictEqual(store.normalizeCity(null), '');
+  assert.strictEqual(store.mergedSettings({ weather_city: '  广州 ' }).weather_city, '广州');
+  assert.strictEqual(store.mergedSettings({}).weather_city, '');
+});
+
+test('天气：没填城市时按 IP 定位，并把英文城市名换成中文', async () => {
+  const calls = [];
+  const request = (url) => {
+    calls.push(url);
+    if (url.startsWith('https://ipwho.is')) {
+      return Promise.resolve({
+        success: true,
+        city: 'Hangzhou',
+        region: 'Zhejiang Sheng',
+        country: 'China',
+        latitude: 30.29,
+        longitude: 120.16
+      });
+    }
+    // 地理编码：英文名交给 Open-Meteo 换中文
+    return Promise.resolve({
+      results: [{ name: '杭州', admin1: '浙江省', country: '中国', latitude: 30.27, longitude: 120.15 }]
+    });
+  };
+  const place = await weather.resolveAutoPlace(request);
+  assert.strictEqual(calls.length, 2);
+  assert.ok(calls[0].startsWith(weather.IP_LOOKUP_ENDPOINT));
+  assert.strictEqual(place.label, '杭州 浙江省 中国', 'Dock 上要写中文地名');
+  assert.strictEqual(place.auto, true);
+  assert.strictEqual(place.latitude, 30.27, '坐标以地理编码为准（比 IP 更准）');
+
+  // IP 服务挂了：抛错，由上层折进快照显示"取不到"，不能让整块天气崩掉
+  await assert.rejects(
+    () => weather.resolveAutoPlace(() => Promise.resolve({ success: false })),
+    /定位失败/
+  );
+  // 地理编码查不到这个名字（生僻地名）：退回 IP 给的坐标，宁可名字是英文
+  const fallback = await weather.resolveAutoPlace((url) =>
+    url.startsWith('https://ipwho.is')
+      ? Promise.resolve({ success: true, city: 'Xyzzy', country: 'Nowhere', latitude: 1, longitude: 2 })
+      : Promise.resolve({ results: [] })
+  );
+  assert.strictEqual(fallback.label, 'Xyzzy Nowhere');
+  assert.strictEqual(fallback.auto, true);
+  // 没有城市名但有坐标：直接用坐标
+  const bare = await weather.parseIpLocation({ success: true, latitude: 3, longitude: 4 });
+  assert.strictEqual(bare.name, '');
+  assert.strictEqual(weather.parseIpLocation({ success: true, city: 'X' }), null, '没坐标不算有效定位');
+});
