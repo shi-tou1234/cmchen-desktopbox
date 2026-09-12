@@ -4,14 +4,29 @@
 
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
-function filePathOf(file) {
-  // Electron 32 起 File.path 被移除，必须用 webUtils.getPathForFile
+// 从桌面/资源管理器拖进来的文件：路径只能在**这个 preload 世界**里取。
+// Electron 32 起 File.path 被移除，得用 webUtils.getPathForFile；而 File / FileList
+// **过不了 contextBridge**——真机实测：渲染层那边 drop 里明明有 1 个文件、files.length=1，
+// 桥这边拿到的却是个空列表，于是"拖进去了但什么也没发生"。
+// 所以路径不由页面传进来：preload 自己监听 drop（捕获阶段，先于页面自己的处理），
+// 用 webUtils 把路径算好放进 droppedPaths，页面在它的 drop 处理里同步调 pathsFromFiles() 取走。
+let droppedPaths = [];
+
+function rememberDroppedPaths(event) {
+  const out = [];
   try {
-    return webUtils.getPathForFile(file);
+    const files = event.dataTransfer ? event.dataTransfer.files : null;
+    for (const file of files || []) {
+      const value = webUtils.getPathForFile(file);
+      if (value) out.push(value);
+    }
   } catch (_) {
-    return '';
+    /* 取不到就当作这次没有文件（内部拖拽排序会走到这里） */
   }
+  droppedPaths = out;
 }
+
+window.addEventListener('drop', rememberDroppedPaths, true);
 
 contextBridge.exposeInMainWorld('deskbasket', {
   // 状态
@@ -76,6 +91,9 @@ contextBridge.exposeInMainWorld('deskbasket', {
   popupReady: () => ipcRenderer.invoke('popup:ready'),
   popupPresent: () => ipcRenderer.invoke('popup:present'),
   popupClose: () => ipcRenderer.invoke('popup:close'),
+  // 有东西正拖在弹窗上（dragover→true，拖出窗口或放下→false）：拖拽期间主进程不自动收弹窗
+  popupDragState: (dragging) =>
+    ipcRenderer.send('popup:drag-state', { dragging: Boolean(dragging) }),
   popupNavigate: (target) => ipcRenderer.invoke('popup:navigate', { path: target }),
   // 拖右下角改弹窗大小：主进程负责夹范围并落到该屏工作区内，尺寸随后被记住（#3）
   resizePopup: (width, height) => ipcRenderer.invoke('popup:resize', { width, height }),
@@ -121,9 +139,6 @@ contextBridge.exposeInMainWorld('deskbasket', {
   menuPick: (key) => ipcRenderer.invoke('menu:pick', { key }),
   menuDismiss: () => ipcRenderer.invoke('menu:dismiss'),
 
-  // 拖放：把 DataTransfer 里的文件转成本地路径
-  pathsFromFiles: (files) =>
-    Array.from(files || [])
-      .map(filePathOf)
-      .filter(Boolean)
+  // 拖放：取刚才那次真实拖放的本地路径（preload 在 drop 的捕获阶段已经算好，见文件头）
+  pathsFromFiles: () => droppedPaths.slice()
 });

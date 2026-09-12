@@ -216,21 +216,37 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') api.popupClose();
 });
 
-// 把文件直接拖进弹窗 = 加到这个筐里（拖动时给一圈高亮）
+// 把文件直接拖进弹窗 = 加到这个筐里（拖动时给一圈高亮）。
+// 拖动期间要告诉主进程"别收窗"：主进程的"鼠标离开就关"挡不住拖拽——用户得先离开弹窗去
+// 桌面/资源管理器抓文件，那一段光标确实不在弹窗附近，弹窗会被收掉，文件到了没有落点。
+// dragover 在拖动期间以帧率连续触发，所以只在状态真的变了时上报（一次拖拽就两条 IPC）。
+let draggingFiles = false;
+
+function setDragState(next) {
+  if (next === draggingFiles) return;
+  draggingFiles = next;
+  api.popupDragState(next);
+}
+
 document.addEventListener('dragover', (event) => {
   if (!view || view.kind !== 'basket') return;
   event.preventDefault();
   document.body.classList.add('dragover');
+  setDragState(true);
 });
 document.addEventListener('dragleave', (event) => {
   // 拖到窗口外才取消高亮（子元素之间移动也会触发 dragleave）
-  if (event.relatedTarget === null) document.body.classList.remove('dragover');
+  if (event.relatedTarget === null) {
+    document.body.classList.remove('dragover');
+    setDragState(false);
+  }
 });
 document.addEventListener('drop', async (event) => {
+  setDragState(false);
   if (!view || view.kind !== 'basket') return;
   event.preventDefault();
   document.body.classList.remove('dragover');
-  const paths = api.pathsFromFiles(event.dataTransfer.files);
+  const paths = api.pathsFromFiles();
   if (!paths.length) return;
   const result = await api.addPaths(view.basketId, paths);
   await reloadHome();

@@ -629,7 +629,7 @@ document.addEventListener('drop', async (event) => {
   event.preventDefault();
   const basket = basketUnderPointer(event.target);
   markDropTarget(null);
-  const paths = api.pathsFromFiles(event.dataTransfer.files);
+  const paths = api.pathsFromFiles();
   if (!paths.length) return;
   if (!basket) {
     await api.addDockPaths(paths);

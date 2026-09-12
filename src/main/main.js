@@ -39,6 +39,7 @@ const winFactory = require('./windows');
 const autostart = require('./autostart');
 const theme = require('./theme');
 const weatherModel = require('./weather');
+const mouseState = require('./mouseState');
 
 const APP_NAME = 'DeskBasket';
 const DOCK_PADDING = 8;
@@ -49,6 +50,12 @@ const POPUP_DOCK_GAP = 10;   // 弹窗与 Dock 上沿的间距
 // 拖完右下角之后的落盘防抖：拖边时每帧都发 resize，攒一下再写设置
 const POPUP_RESIZE_SAVE_MS = 350;
 const POPUP_BLUR_CLOSE_MS = 220; // 失焦后多久关（留出"点击 Dock 图标切换"的时间）
+// 失焦这条路要等"失焦之后的报数"才敢下判断（见 schedulePopupBlurClose）：
+// 最多补等这么多拍，等不到就按老行为关，不让正常场景跟着变慢
+const POPUP_BLUR_RECHECK_MAX = 5;
+// 渲染层报的"拖拽中"多久不更新就作废：拖拽被 Esc 取消之类的情况可能收不到"结束"，
+// 不能让它把弹窗钉在屏幕上
+const POPUP_DRAG_STALE_MS = 30000;
 const POPUP_CLOSE_ANIM_MS = 210; // 收起动画时长：先让渲染层缩回去，再隐藏窗口
 // 磨砂模式的收起更短：内容淡掉就可以收，别让一块空的材质底多晾着（那看着就是"闪一下"）
 const POPUP_CLOSE_ANIM_GLASS_MS = 170;
@@ -59,6 +66,9 @@ const POPUP_CLOSE_ANIM_GLASS_MS = 170;
 // 由主进程轮询鼠标位置——不在弹窗 ∪ Dock 的附近区域连续一段时间就关。
 const POPUP_HOVER_CHECK_MS = 250;
 const POPUP_AWAY_CLOSE_MS = 900;
+// 光标停在桌面上时给的长预算：这时候用户多半是走去桌面抓一个文件回来拖进弹窗，
+// 路上不该把弹窗收掉（真正"拖起来了"的判据是鼠标键按着，见 mouseState）。
+const POPUP_AWAY_CLOSE_DESKTOP_MS = 6000;
 
 let settings = null;
 let resolvedTheme = 'dark';    // theme_mode=auto 时按壁纸亮度算出来的实际深浅色（dark/light），广播给各页
@@ -81,6 +91,8 @@ let popupPainted = false;      // 页面是否已经画出第一帧（没画出�
 let popupOpenMode = '';        // '新建窗口' | '复用热窗口'，只用于日志
 let popupBlurTimer = null;
 let popupHoverTimer = null;    // 鼠标离开自动关的轮询
+let popupExternalDrag = false; // 渲染层报上来的"有东西正拖在弹窗上"（见 popup:drag-state）
+let popupExternalDragAt = 0;   // 上面这条是何时报的（过期作废，见 POPUP_DRAG_STALE_MS）
 let menuOpen = false;          // 自绘右键菜单开着：期间弹窗不许"失焦即关"
 
 // 天气：快照常驻内存（页面随时可取），由定时器刷新；悬浮卡片是另一个小窗口
@@ -880,7 +892,11 @@ function tickDockAutoHide() {
   if (Date.now() - dockLeftAt >= settings.dock_hide_delay_ms) {
     dockRevealed = false;
     dockLeftAt = 0;
-    closeFolderPopup();
+    // 弹窗跟着 Dock 一起收——但"正拖着东西 / 光标还赖在弹窗或桌面上"时例外。
+    // 自动收起模式下 Dock 400ms 就滑走，比弹窗自己的 900ms 离开判定还早：
+    // 用户点开弹窗、走去桌面抓文件，第一段路就足够让 Dock 收起，
+    // 不豁免的话弹窗会被这条路先收掉，拖到地方已经没有落点了（真机复现过）。
+    if (!popupAutoCloseBlocked()) closeFolderPopup('Dock 收起');
     hideWeatherCard();   // Dock 都要滑走了，挂在它上面的天气卡片跟着收
     slideDockTo(dockHiddenGeometry());
   }
@@ -1097,10 +1113,15 @@ function rebuildPopupPayload() {
 
 // 关文件夹弹窗：先通知渲染层播"收回"动画，动画放完再隐藏窗口。
 // 立刻隐藏会看到窗口"啪"地消失，和打开时的抽出动画对不上。
-function closeFolderPopup() {
+// reason 只进日志：自动收弹窗的路有好几条（鼠标离开、Dock 收起、失焦），
+// 出问题时日志里要能看出是哪条收的
+function closeFolderPopup(reason = '?') {
+  console.log(`[popup] 收起（${reason}）`);
   clearTimeout(popupBlurTimer);
   popupBlurTimer = null;
   stopPopupAwayWatch();
+  mouseState.scheduleIdleStop();
+  popupExternalDrag = false;
   popupPayload = null;
   popupKey = null;
   if (!popupWindow || popupWindow.isDestroyed()) return;
@@ -1130,37 +1151,84 @@ function stopPopupAwayWatch() {
   }
 }
 
+// 光标是不是还在弹窗 ∪ Dock 的附近（两条"该不该自动收"的路共用）
+function popupPointerNear() {
+  if (!popupWindow || popupWindow.isDestroyed()) return false;
+  const point = screen.getCursorScreenPoint();
+  const popupBounds = popupWindow.getBounds();
+  const dockBounds = dockWindow && !dockWindow.isDestroyed() ? dockWindow.getBounds() : null;
+  // Dock 四周多让一点：上方给图标的放大动画，下方把"Dock 与屏幕底边之间的那条缝"也包进来
+  // （Dock 抬起来之后鼠标从底边往上移到图标要经过那条缝，不能算离开）
+  const dockPad = 16 + Math.max(0, settings.dock_bottom_gap || 0);
+  return (
+    dockmodel.pointNearBounds(point, popupBounds, 16) ||
+    dockmodel.pointNearBounds(point, dockBounds, dockPad)
+  );
+}
+
+// 这些情况下弹窗不该被"自动收"的任何一条路收掉（三条路共用）：
+//   · 鼠标键按着 / 有东西正拖在弹窗上：拖拽还没结束，收窗口 = 撤掉落点；
+//   · 光标还在弹窗附近：用户没走；
+//   · 光标停在桌面上：多半正走去抓一个文件（这一条只用于 Dock 收起的连带关闭，
+//     弹窗自己的离开判定给它的是"长预算"而不是"豁免"，见 startPopupAwayWatch）。
+function popupAutoCloseBlocked(includeDesktop = true) {
+  if (popupPointerNear()) return true;
+  const mouse = mouseState.poll();
+  if (mouse.held || popupDragActive()) return true;
+  return includeDesktop ? mouse.overDesktop : false;
+}
+
+// 渲染层说"有东西拖在弹窗上"（dragover 起、拖出去或放下止）。带过期时间：
+// 拖拽被 Esc 取消这类情况可能收不到"结束"，不能让一个旧标记把弹窗钉在屏幕上
+function popupDragActive() {
+  return popupExternalDrag && Date.now() - popupExternalDragAt < POPUP_DRAG_STALE_MS;
+}
+
 function startPopupAwayWatch() {
   stopPopupAwayWatch();
+  // 轮询前先把全局鼠标状态问起来（PowerShell 有启动开销，第一秒按"可能有拖拽"处理，见 mouseState）
+  mouseState.ensureRunning();
   let awayMs = 0;
   popupHoverTimer = setInterval(() => {
     if (!popupWindow || popupWindow.isDestroyed()) {
       stopPopupAwayWatch();
       return;
     }
-    const point = screen.getCursorScreenPoint();
-    const popupBounds = popupWindow.getBounds();
-    const dockBounds = dockWindow && !dockWindow.isDestroyed() ? dockWindow.getBounds() : null;
-    // Dock 四周多让一点：上方给图标的放大动画，下方把"Dock 与屏幕底边之间的那条缝"也包进来
-    // （Dock 抬起来之后鼠标从底边往上移到图标要经过那条缝，不能算离开）
-    const dockPad = 16 + Math.max(0, settings.dock_bottom_gap || 0);
-    const near =
-      dockmodel.pointNearBounds(point, popupBounds, 16) ||
-      dockmodel.pointNearBounds(point, dockBounds, dockPad);
-    if (near) {
+    const mouse = mouseState.poll();
+    // 鼠标键按着 = 多半正拖着东西（从桌面/资源管理器往弹窗里拖，或者拖着桌面图标）。
+    // 这时候弹窗是那个文件唯一可能的落点，收了就白拖——倒计时归零、重新等。
+    if (popupPointerNear() || mouse.held || popupDragActive()) {
       awayMs = 0;
       return;
     }
     awayMs += POPUP_HOVER_CHECK_MS;
-    if (awayMs >= POPUP_AWAY_CLOSE_MS) closeFolderPopup();
+    // 停在桌面上：用户可能正走去抓文件，给长预算（真抓起东西之后按钮按住会冻结倒计时）
+    const budget = mouse.overDesktop ? POPUP_AWAY_CLOSE_DESKTOP_MS : POPUP_AWAY_CLOSE_MS;
+    if (awayMs >= budget) closeFolderPopup('away');
   }, POPUP_HOVER_CHECK_MS);
 }
 
-function schedulePopupBlurClose() {
+// 失焦自动关：点了别的窗口/桌面之后 220ms 关掉（留出"点 Dock 图标切换"的时间）。
+// 三条让路规则都是真机拖拽时踩出来的：
+//   · 光标还在弹窗附近 → 用户没走（刚把文件拖进来松手时，窗口是失焦的，别把战果收掉）；
+//   · 鼠标键按着 / 拖拽还没结束 → 收窗口等于撤掉落点；
+//   · 判据必须是"失焦之后"产生的那份报数 —— PowerShell 每 125ms 报一次，按下那一拍的报数
+//     往往还是按之前的，拿旧报数判"没在拖拽"就会把刚抓起的文件连着窗口一起收掉
+//     （真机复现：倒计时被正确冻结了，窗口却还是被失焦这条路关掉）。
+//     等到一份新报数再决定；一直等不到（比如这台机器上根本没起侦察进程）就按老行为关。
+function schedulePopupBlurClose(blurredAt = Date.now(), rechecks = 0) {
   clearTimeout(popupBlurTimer);
   popupBlurTimer = setTimeout(() => {
     popupBlurTimer = null;
-    closeFolderPopup();
+    if (!popupWindow || popupWindow.isDestroyed()) return;
+    // 注意不含"光标在桌面上"：点桌面关掉弹窗是用户明确的意思，这里不该豁免
+    if (popupAutoCloseBlocked(false)) return;
+    const mouse = mouseState.poll();
+    if (mouse.active && mouse.at < blurredAt && rechecks < POPUP_BLUR_RECHECK_MAX) {
+      schedulePopupBlurClose(blurredAt, rechecks + 1);
+      return;
+    }
+    closeFolderPopup('blur');
   }, POPUP_BLUR_CLOSE_MS);
 }
 
@@ -1204,9 +1272,12 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
   const t0 = Date.now();
   const data = popupDataFor(kind, payload);
   if (!data) return null;
+  // 打开就先把全局鼠标状态问起来：PowerShell 编译要几百毫秒，等到"鼠标离开"那一步再起就晚了
+  mouseState.ensureRunning();
+  popupExternalDrag = false;
 
   // 先关旧弹窗：一是不叠窗，二是它不能出现在磨砂背景的截屏里
-  closeFolderPopup();
+  closeFolderPopup('换内容');
 
   const dockBounds = dockWindow && !dockWindow.isDestroyed() ? dockWindow.getContentBounds() : null;
   const display = activeDisplay();
@@ -1313,7 +1384,7 @@ async function toggleFolderPopup(kind, payload, anchorXInDock) {
   const key = popupKeyFor(kind, payload);
   console.log(`[popup] toggle kind=${kind} key=${key} 现有=${popupKey} 窗口=${Boolean(popupWindow)}`);
   if (popupWindow && popupKey === key) {
-    closeFolderPopup();
+    closeFolderPopup('再点一次');
     return { open: false };
   }
   await openFolderPopup(kind, payload, anchorXInDock);
@@ -1675,7 +1746,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('basket:delete', (_event, { basketId }) => {
-    if (popupWindow && popupKey === `basket:${basketId}`) closeFolderPopup();
+    if (popupWindow && popupKey === `basket:${basketId}`) closeFolderPopup('筐被删');
     settings.baskets = basketModel.dropBasket(settings.baskets, basketId);
     persist();
     syncDock();
@@ -1816,7 +1887,7 @@ function registerIpc() {
       const result = await toggleFolderPopup('dir', { path: dirTarget }, itemCenterX);
       return { opened: result.open ? 'popup' : 'none' };
     }
-    if (popupWindow) closeFolderPopup();
+    if (popupWindow) closeFolderPopup('点开了别的条目');
     const error = await shell.openPath(target);
     return { opened: 'app', ok: !error, error: error || '' };
   });
@@ -1883,8 +1954,19 @@ function registerIpc() {
   });
 
   ipcMain.handle('popup:close', () => {
-    closeFolderPopup();
+    closeFolderPopup('页面要求');
     return true;
+  });
+
+  // 渲染层报"有东西正拖在弹窗上"（dragover 起、dragleave 出窗或 drop 止）：
+  // 拖拽期间弹窗不许自动收——它就是这个文件唯一可能的落点
+  ipcMain.on('popup:drag-state', (_event, payload = {}) => {
+    popupExternalDrag = Boolean(payload && payload.dragging);
+    popupExternalDragAt = popupExternalDrag ? Date.now() : 0;
+    if (popupExternalDrag) {
+      clearTimeout(popupBlurTimer);
+      popupBlurTimer = null;
+    }
   });
 
   // 弹窗内导航：进入子目录 / 返回上级。窗口不动，磨砂背景也不变。
@@ -2157,6 +2239,8 @@ if (!singleInstance) {
     stopWeatherRefresh();
     stopWeatherCardWatch();
     if (dockWatchTimer) clearInterval(dockWatchTimer);
+    // 鼠标状态那个 PowerShell 小循环也要收掉，别留一个孤儿进程
+    mouseState.stop();
   });
 }
 
