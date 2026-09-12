@@ -352,8 +352,20 @@ function shortcutCandidates(desktopPaths, items) {
 
 // 设置面板里"往筐里批量勾选"的候选清单：桌面上**所有**条目（不筛后缀——筐里可以放
 // 任何东西，不像 Dock 只收快捷方式）。返回 [{ path, name, inBasket }]，按名称排序。
+// 筐的候选清单：来源目录里的条目 ＋ 是否已在这个筐里。
+// 「已在筐里」既看路径也看**文件名**：文件搬进筐目录之后路径就变了（还有"Dock 也在用、
+// 所以只复制一份"的情况），只按路径比会显示成没加过、再勾一次又会多出一份。
+// 名字命中时把筐里那一份的实际路径带回去（itemPath），取消勾选就能精确移出它。
 function basketCandidates(desktopPaths, basketItems) {
-  const inBasket = new Set((basketItems || []).map(pathKey));
+  const byKey = new Map();
+  const byName = new Map();
+  for (const raw of basketItems || []) {
+    const value = normalizePath(raw);
+    if (!value) continue;
+    byKey.set(pathKey(value), value);
+    const name = path.basename(value).toLowerCase();
+    if (!byName.has(name)) byName.set(name, value);
+  }
   const rows = [];
   const seen = new Set();
   for (const raw of desktopPaths || []) {
@@ -362,7 +374,9 @@ function basketCandidates(desktopPaths, basketItems) {
     const key = pathKey(value);
     if (seen.has(key)) continue;
     seen.add(key);
-    rows.push({ path: value, name: path.basename(value), inBasket: inBasket.has(key) });
+    const name = path.basename(value);
+    const matched = byKey.get(key) || byName.get(name.toLowerCase()) || '';
+    rows.push({ path: value, name, inBasket: Boolean(matched), itemPath: matched });
   }
   rows.sort((a, b) => a.name.localeCompare(b.name, 'zh'));
   return rows;

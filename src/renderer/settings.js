@@ -93,8 +93,9 @@ async function renderBasketCandidates() {
     box.type = 'checkbox';
     box.checked = row.inBasket;
     box.addEventListener('change', async () => {
+      // 移出时用筐里那一份的实际路径（文件搬进筐目录后路径就变了）
       if (box.checked) await api.addPaths(selectedBasketId, [row.path]);
-      else await api.removeItem(selectedBasketId, row.path);
+      else await api.removeItem(selectedBasketId, row.itemPath || row.path);
       flash((box.checked ? '已加进筐：' : '已移出筐：') + row.name.replace(/\.(lnk|url)$/i, ''));
       // 刷新面板（筐的计数、Dock 上的名字）
       await refresh();
@@ -136,6 +137,7 @@ function render() {
   el('dockMagnify').value = settings.dock_magnify;
   el('dockBottomGap').value = settings.dock_bottom_gap;
   el('sourceDir').value = settings.shortcuts_dir || '';
+  el('basketDir').value = settings.basket_dir || '';
   el('dockCount').textContent =
     'Dock 现有 ' + settings.dock_items.length + ' 个快捷方式 ＋ ' +
     (settings.dock_specials || []).length + ' 个系统图标（此电脑/回收站/天气）＋ ' +
@@ -364,6 +366,21 @@ el('btnPickDir').addEventListener('click', async () => {
   await applySourceDir(picked);
 });
 el('btnUseDesktop').addEventListener('click', () => applySourceDir(''));
+
+// 筐的文件目录：只影响之后新建的筐（老筐的目录已经建好了，不去搬它，免得把文件挪来挪去）
+el('basketDir').addEventListener('change', async (event) => {
+  const raw = String(event.target.value || '').trim();
+  await push({ basket_dir: raw });
+  if (raw && !settings.basket_dir) flash('这个路径无效（需要绝对路径），已回退默认目录');
+  else flash('筐的文件目录已改成：' + settings.basket_dir);
+});
+el('btnPickBasketDir').addEventListener('click', async () => {
+  const picked = await api.pickSourceDir('baskets');
+  if (!picked) return;
+  await push({ basket_dir: picked });
+  el('basketDir').value = settings.basket_dir || '';
+  flash('筐的文件目录已改成：' + settings.basket_dir);
+});
 
 el('btnPick').addEventListener('click', async () => {
   const items = await api.pickDockFiles();

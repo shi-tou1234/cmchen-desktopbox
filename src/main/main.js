@@ -40,6 +40,7 @@ const autostart = require('./autostart');
 const theme = require('./theme');
 const weatherModel = require('./weather');
 const mouseState = require('./mouseState');
+const basketfiles = require('./basketfiles');
 
 const APP_NAME = 'DeskBasket';
 const DOCK_PADDING = 8;
@@ -184,6 +185,171 @@ function replaceBasket(basket) {
   settings.baskets = settings.baskets.map((item) => (item.id === basket.id ? basket : item));
   persist();
   return basket;
+}
+
+// 筐的文件目录（3.3.0 起）：每个筐在磁盘上有一个真实文件夹，加进来的文件会被移动进去，
+// 从此归筐所有 —— 原始位置删掉也照样打得开。边界见 src/main/basketfiles.js 的文件头。
+function basketRoot() {
+  return settings.basket_dir || basketfiles.DEFAULT_DIR;
+}
+
+// 给筐定目录：已经定过的沿用（改筐名不挪目录，免得把文件搬来搬去）
+function resolveBasketDir(basket, taken) {
+  if (basket.dir) return basket.dir;
+  const name = basketfiles.uniqueName(basketfiles.sanitizeFolderName(basket.name), taken);
+  return path.join(basketRoot(), name);
+}
+
+// 除了这个筐，还有谁在引用这些路径：Dock 的条目 ＋ 别的筐的条目。
+// 被别处引用着的文件只复制不移动 —— 搬走会把那边弄坏。
+function protectedKeysFor(basketId) {
+  const keys = new Set();
+  for (const item of settings.dock_items || []) keys.add(basketfiles.keyOf(item));
+  for (const basket of settings.baskets) {
+    if (!basket || basket.id === basketId) continue;
+    for (const item of basket.items || []) keys.add(basketfiles.keyOf(item));
+  }
+  return keys;
+}
+
+// 往筐里加东西：先把文件搬进筐目录，再把**筐里的那份**登记进清单。
+// 搬不动的（被占用、源文件没了）原样登记原路径并如实报数，绝不让"东西不知去向"。
+async function addPathsToBasket(basket, paths, tag) {
+  const list = (paths || []).filter(Boolean);
+  const failed = [];
+  let next = basket;
+  let added = 0;
+  let moved = 0;
+  let copied = 0;
+  let dir = '';
+  let note = '';
+
+  if (list.length) {
+    const taken = new Set(
+      settings.baskets.filter((item) => item.dir).map((item) => path.basename(item.dir))
+    );
+    dir = resolveBasketDir(basket, taken);
+    try {
+      basketfiles.ensureDir(dir);
+    } catch (error) {
+      // 目录建不起来（盘不在、没权限）：什么都不动，照旧登记原路径并说明白
+      dir = '';
+      note = '筐的文件夹建不起来（' + basketfiles.errorText(error) + '）：这次只登记路径，文件没动';
+      console.log(`[basket] ${note}`);
+    }
+  }
+
+  const protect = protectedKeysFor(basket.id);
+  for (const item of list) {
+    let target = item;
+    if (dir) {
+      const result = await basketfiles.moveInto(dir, item, { protect });
+      if (result.action === 'move') {
+        moved += 1;
+        target = result.dest;
+      } else if (result.action === 'copy') {
+        copied += 1;
+        target = result.dest;
+        if (result.note) console.log(`[basket] ${result.note}：${item}`);
+      } else if (result.action === 'inside') {
+        target = result.dest || item;
+      } else if (result.action === 'failed') {
+        failed.push({ name: path.basename(item), reason: result.error });
+        target = item;
+      }
+    }
+    const outcome = basketModel.addItem(next, target);
+    if (outcome.result === 'added') {
+      next = outcome.basket;
+      added += 1;
+    }
+  }
+
+  const saved = replaceBasket({ ...next, dir: dir || next.dir || '' });
+  console.log(
+    `[basket] ${tag}：登记 ${added} 条（移入 ${moved}、复制 ${copied}、失败 ${failed.length}）` +
+      `→ 现有 ${saved.items.length} 条` + (saved.dir ? `，目录 ${saved.dir}` : '')
+  );
+  for (const problem of failed) {
+    console.log(`[basket] 没能移进筐：${problem.name} —— ${problem.reason}`);
+  }
+  syncDock();
+  prewarmBasketIcons();
+  return { added, total: saved.items.length, moved, copied, failed, note, dir: saved.dir };
+}
+
+// 老条目归位：把筐里还引用着外部路径的条目搬进筐目录。
+// 幂等 —— 已经躺在筐目录里的直接跳过，所以每次启动跑一遍即可（上次没搬成的这次会重试）。
+// 源文件已经不在了的保持原样（页面上照旧显示成缺失），绝不删登记。
+async function migrateBasketFiles() {
+  const taken = new Set();
+  let moved = 0;
+  let copied = 0;
+  const failed = [];
+  let changed = false;
+
+  for (const basket of settings.baskets) {
+    let dir = basket.dir;
+    if (!dir) {
+      const name = basketfiles.uniqueName(basketfiles.sanitizeFolderName(basket.name), taken);
+      dir = path.join(basketRoot(), name);
+      taken.add(name);
+      basket.dir = dir;
+      changed = true;
+    } else {
+      taken.add(path.basename(dir));
+    }
+    try {
+      basketfiles.ensureDir(dir);
+    } catch (error) {
+      console.log(`[basket] 「${basket.name}」的目录建不起来（${dir}）：${basketfiles.errorText(error)}`);
+      continue;
+    }
+
+    const previous = basket.items || [];
+    const items = [];
+    for (const item of previous) {
+      const decision = basketfiles.moveDecision({
+        item,
+        dir,
+        protectKeys: protectedKeysFor(basket.id),
+        exists: fs.existsSync(item)
+      });
+      if (decision.action === 'inside' || decision.action === 'missing') {
+        items.push(item);
+        continue;
+      }
+      const result = await basketfiles.moveInto(dir, item, {
+        protect: decision.action === 'copy' ? new Set([basketfiles.keyOf(item)]) : null
+      });
+      if (result.action === 'move' || result.action === 'copy') {
+        if (result.action === 'move') moved += 1;
+        else copied += 1;
+        items.push(result.dest);
+        changed = true;
+      } else {
+        if (result.action === 'failed') {
+          failed.push({ basket: basket.name, name: path.basename(item), reason: result.error });
+        }
+        items.push(item);
+      }
+    }
+    if (items.length !== previous.length || items.some((value, index) => value !== previous[index])) {
+      basket.items = items;
+      changed = true;
+    }
+  }
+
+  if (changed) persist();
+  if (moved || copied || failed.length) {
+    console.log(
+      `[basket] 老条目归位：移入 ${moved}、复制 ${copied}、没搬成 ${failed.length}（筐目录 ${basketRoot()}）`
+    );
+    for (const problem of failed) {
+      console.log(`[basket] 没能归位：「${problem.basket}」${problem.name} —— ${problem.reason}`);
+    }
+  }
+  return { moved, copied, failed };
 }
 
 // 把一个筐转成渲染层直接可用的视图：带上每个条目是否存在、是不是目录
@@ -1645,25 +1811,12 @@ function registerIpc() {
 
   ipcMain.handle('basket:get', (_event, { basketId } = {}) => basketView(findBasket(basketId)));
 
-  // 往筐里登记文件。三条入口共用：拖到 Dock 的文件夹图标上、拖进文件夹弹窗、
-  // 弹窗/设置面板里的「添加文件…」。返回 { added, total } 让渲染层能给出"＋N"的回执。
-  ipcMain.handle('basket:add', (event, { basketId, paths } = {}) => {
+  // 往筐里加东西。四条入口共用：拖到 Dock 的文件夹图标上、拖进文件夹弹窗、弹窗/设置面板里的
+  // 「添加文件…」、设置面板的勾选清单。先把文件**移动进筐目录**再登记，所以原位置删掉也打得开。
+  ipcMain.handle('basket:add', async (event, { basketId, paths } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return null;
-    let next = basket;
-    let added = 0;
-    for (const item of paths || []) {
-      const result = basketModel.addItem(next, item);
-      if (result.result === 'added') {
-        next = result.basket;
-        added += 1;
-      }
-    }
-    const saved = replaceBasket(next);
-    console.log(`[basket] 加入 ${added} 条（来源 ${pageTag(event)}）→ 现有 ${saved.items.length} 条`);
-    syncDock();
-    prewarmBasketIcons();
-    return { added, total: saved.items.length };
+    return addPathsToBasket(basket, paths, `加入（来源 ${pageTag(event)}）`);
   });
 
   // 设置面板：往选中的筐里批量勾选（来源目录里的条目，勾上就加进去、取消就移出）。
@@ -1688,21 +1841,9 @@ function registerIpc() {
       defaultPath: sourceDir(),
       properties: wantsDirs ? ['openDirectory', 'multiSelections'] : ['openFile', 'multiSelections']
     });
-    if (picked.canceled || !picked.filePaths.length) return { added: 0, total: basket.items.length };
-    let next = basket;
-    let added = 0;
-    for (const item of picked.filePaths) {
-      const result = basketModel.addItem(next, item);
-      if (result.result === 'added') {
-        next = result.basket;
-        added += 1;
-      }
-    }
-    const saved = replaceBasket(next);
-    console.log(`[basket] 从对话框加入 ${added} 条（${wantsDirs ? '文件夹' : '文件'}）→ 现有 ${saved.items.length} 条`);
-    syncDock();
-    prewarmBasketIcons();
-    return { added, total: saved.items.length };
+    const empty = { added: 0, total: basket.items.length, moved: 0, copied: 0, failed: [], dir: basket.dir || '' };
+    if (picked.canceled || !picked.filePaths.length) return empty;
+    return addPathsToBasket(basket, picked.filePaths, `从对话框加入（${wantsDirs ? '文件夹' : '文件'}）`);
   });
 
   ipcMain.handle('basket:remove', (_event, { basketId, itemPath }) => {
@@ -1714,7 +1855,8 @@ function registerIpc() {
   ipcMain.handle('basket:update', (_event, { basket }) => {
     const current = findBasket(basket && basket.id);
     if (!current) return null;
-    const merged = { ...current, ...basket, items: current.items };
+    // items 与 dir 以主进程为准：这两个字段管着磁盘上的东西，不接受渲染层改写
+    const merged = { ...current, ...basket, items: current.items, dir: current.dir };
     settings.baskets = settings.baskets.map((item) =>
       item.id === merged.id ? merged : item
     );
@@ -1739,6 +1881,14 @@ function registerIpc() {
 
   ipcMain.handle('basket:create', (_event, { name } = {}) => {
     const created = basketModel.createBasket(settings.baskets, name);
+    const taken = new Set(settings.baskets.filter((item) => item.dir).map((item) => path.basename(item.dir)));
+    created.basket.dir = resolveBasketDir(created.basket, taken);
+    try {
+      basketfiles.ensureDir(created.basket.dir);
+      console.log(`[basket] 新筐「${created.basket.name}」的目录：${created.basket.dir}`);
+    } catch (error) {
+      console.log(`[basket] 新筐的目录建不起来（${created.basket.dir}）：${basketfiles.errorText(error)}`);
+    }
     settings.baskets = created.baskets;
     persist();
     syncDock();
@@ -1746,10 +1896,13 @@ function registerIpc() {
   });
 
   ipcMain.handle('basket:delete', (_event, { basketId }) => {
+    const basket = findBasket(basketId);
     if (popupWindow && popupKey === `basket:${basketId}`) closeFolderPopup('筐被删');
     settings.baskets = basketModel.dropBasket(settings.baskets, basketId);
     persist();
     syncDock();
+    // 删筐只删清单：筐目录连同里面的文件原样留在磁盘上，一个不删
+    if (basket && basket.dir) console.log(`[basket] 已删筐「${basket.name}」，它的目录原样保留：${basket.dir}`);
     return settings.baskets;
   });
 
@@ -1829,12 +1982,13 @@ function registerIpc() {
   });
 
   // 设置面板「收录来源目录 → 浏览…」：挑一个目录，交回渲染层走 settings:update 落盘
-  ipcMain.handle('dir:pick', async () => {
+  ipcMain.handle('dir:pick', async (_event, { purpose } = {}) => {
     const owner = settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : null;
+    const forBaskets = purpose === 'baskets';
     const options = {
-      title: '选择收录来源目录',
+      title: forBaskets ? '选择筐的文件目录' : '选择收录来源目录',
       buttonLabel: '选这个目录',
-      defaultPath: sourceDir(),
+      defaultPath: forBaskets ? basketRoot() : sourceDir(),
       properties: ['openDirectory', 'createDirectory']
     };
     // 两个重载分开写：不要把 undefined 当第一个参数传进去
@@ -2199,8 +2353,13 @@ function bootstrap() {
   startDockAutoHide();
   // 天气：图标在 Dock 上才去取（撤下来就不白打接口）
   if (settings.dock_specials.includes(specials.WEATHER_ID)) startWeatherRefresh();
-  // 后台把筐里条目的图标热进缓存：启动后第一次点开文件夹弹窗不该等图标
-  prewarmBasketIcons();
+  // 老条目归位（搬进筐目录）之后再热图标：顺序反了会给"已经不在那个路径"的图标白热一遍
+  migrateBasketFiles()
+    .then(() => {
+      syncDock();
+      prewarmBasketIcons();
+    })
+    .catch((error) => console.log(`[basket] 老条目归位失败：${basketfiles.errorText(error)}`));
   if (settings.autostart) autostart.sync(true);
   if (wantsSettingsWindow()) openSettings();
 }

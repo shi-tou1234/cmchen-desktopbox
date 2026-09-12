@@ -81,7 +81,7 @@ function makeCell(entry, index) {
       { key: 'reveal', label: '在系统资源管理器中显示' }
     ];
     if (view.kind === 'basket') {
-      items.push({ separator: true }, { key: 'remove', label: '从这个筐移除' });
+      items.push({ separator: true }, { key: 'remove', label: '从筐里移出（不删文件）' });
     }
     window.showContextMenu(items, event).then(async (picked) => {
       if (!picked) return;
@@ -103,6 +103,18 @@ function makeCell(entry, index) {
 function setStatus(text, isError = false) {
   el('status').textContent = text || '';
   el('status').className = 'popup-status' + (isError ? ' error' : '');
+}
+
+// 加进来的回执：说清楚文件去哪了（搬进筐目录 / 因为 Dock 也在用而只复制了一份 / 没能搬进去）
+function addStatus(result) {
+  const moved = Number(result.moved) || 0;
+  const copied = Number(result.copied) || 0;
+  const bad = (result.failed || []).length;
+  const how = moved ? '（已移进筐的文件夹）' : copied ? '（Dock 也在用，复制了一份）' : '';
+  if (!result.added && !bad) return '没有新增（已在这个筐里的会跳过）';
+  let text = '已加入 ' + result.added + ' 项' + how + '，筐里共 ' + result.total + ' 项';
+  if (bad) text += '；' + bad + ' 项没能移进去（原文件留在原处）';
+  return text;
 }
 
 // 翻目录的方向：给网格加一次性动画类，动画放完自动摘掉（避免下次布局也吃这个动画）
@@ -163,7 +175,7 @@ function render(navDirection) {
   el('emptyTip').style.display = entries.length ? 'none' : '';
   el('emptyTip').textContent =
     view.kind === 'basket'
-      ? '这个筐还是空的：点上面的「＋」添加文件，或者把文件直接拖进来 / 拖到 Dock 的文件夹图标上'
+      ? '这个筐还是空的：点上面的「＋」添加文件，或者把文件直接拖进来 / 拖到 Dock 的文件夹图标上（文件会移动进筐的文件夹，原来那处不再保留）'
       : '这个文件夹是空的';
   setStatus(entries.length ? entries.length + ' 项' : '');
 }
@@ -204,12 +216,12 @@ el('btnAdd').addEventListener('click', async () => {
   if (!view || view.kind !== 'basket') return;
   const result = await api.pickBasketFiles(view.basketId, 'files');
   if (!result) return;
-  if (!result.added) {
+  if (!result.added && !(result.failed || []).length) {
     setStatus('没有新增（已在这个筐里的会跳过）');
     return;
   }
   await reloadHome();
-  setStatus('已加入 ' + result.added + ' 项，筐里共 ' + result.total + ' 项');
+  setStatus(addStatus(result));
 });
 el('btnClose').addEventListener('click', () => api.popupClose());
 document.addEventListener('keydown', (event) => {
@@ -250,7 +262,7 @@ document.addEventListener('drop', async (event) => {
   if (!paths.length) return;
   const result = await api.addPaths(view.basketId, paths);
   await reloadHome();
-  if (result) setStatus('已加入 ' + result.added + ' 项，筐里共 ' + result.total + ' 项');
+  if (result) setStatus(addStatus(result));
 });
 
 // 点击弹窗本身保持主进程的聚焦状态（失焦自动关的定时器会被取消）

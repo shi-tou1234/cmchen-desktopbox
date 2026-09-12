@@ -152,6 +152,17 @@
       </div>
 
       <div class="group">
+        <h3>筐的文件目录</h3>
+        <div class="row" style="justify-content:flex-start;gap:8px;flex-wrap:wrap">
+          <input type="text" id="basketDir" placeholder="（默认 E:\文件筐）" style="width:300px" spellcheck="false">
+          <button class="btn" id="btnPickBasketDir">浏览…</button>
+        </div>
+        <div class="row" style="margin-top:6px;display:block">
+          <span class="hint">每个筐在这个目录下有一个自己的文件夹（按筐名）。加进筐的文件会**移动**进那个文件夹，从此归筐所有 —— 原来那个位置删掉、挪走，筐里照样打得开。程序不删你的文件：从筐里移出、删除筐都只动清单，磁盘上的文件原样留着。改这个目录只影响之后新建的筐，已经在用的筐目录不动。</span>
+        </div>
+      </div>
+
+      <div class="group">
         <h3>Dock 上的快捷方式</h3>
         <div class="shortcut-list" id="shortcutList"></div>
         <div class="row" style="margin-top:6px;justify-content:flex-start;gap:8px;flex-wrap:wrap">
@@ -176,7 +187,10 @@
           <button class="btn" id="btnDelete">删除</button>
         </div>
         <div class="row" style="margin-top:8px;display:block">
-          <span class="hint" id="basketCandidateHint">来源目录里的条目：勾选即加进这个筐（一次能勾一堆；磁盘文件不动）。不在来源目录里的文件用上面的「添加文件…」（对话框里按住 Ctrl / Shift 可多选）。</span>
+          <span class="hint" id="basketDirHint"></span>
+        </div>
+        <div class="row" style="margin-top:8px;display:block">
+          <span class="hint" id="basketCandidateHint">来源目录里的条目：勾选即加进这个筐（一次能勾一堆）。加进来的文件会移动进上面的筐目录；不在来源目录里的文件用「添加文件…」（对话框里按住 Ctrl / Shift 可多选）。</span>
         </div>
         <div class="shortcut-list" id="basketCandidateList"></div>
       </div>

@@ -101,6 +101,8 @@ function normalizeBasket(raw, fallbackId = 'b1') {
     w: coerceDimension(raw.w, DEFAULT_WIDTH, MIN_WIDTH),
     h: coerceDimension(raw.h, DEFAULT_HEIGHT, MIN_HEIGHT),
     visible: typeof raw.visible === 'boolean' ? raw.visible : true,
+    // 筐的磁盘目录（3.3.0 起）：加进来的文件会移动进这里。空 = 还没定，由主进程按筐名分配
+    dir: typeof raw.dir === 'string' ? raw.dir.trim() : '',
     // 颜色先保留用户已有的合法值；缺失/非法时置 null，交给 normalizeBaskets 统一分配
     color: isValidColor(raw.color),
     items

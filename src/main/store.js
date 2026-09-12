@@ -9,6 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const specials = require('./specials');
 const weather = require('./weather');
+const basketfiles = require('./basketfiles');
 
 const SETTINGS_FILENAME = 'settings.json';
 const SETTINGS_BACKUP_SUFFIX = '.bak';
@@ -22,6 +23,7 @@ const DEFAULTS = {
   icon_size: 48,
   baskets: [],
   shortcuts_dir: '',           // 收录来源目录（Dock 自动收录、候选清单、文件对话框默认落点）；空 = 系统桌面
+  basket_dir: basketfiles.DEFAULT_DIR,   // 筐的文件目录：每个筐在它下面有一个真实文件夹（见 basketfiles）
   dock_enabled: true,
   dock_auto_hide: true,        // 鼠标离开就收起（贴底边才滑出），这样不会挡着别的窗口
   dock_icon_size: 48,
@@ -167,6 +169,14 @@ function normalizeDockDisplay(raw) {
 
 // 收录来源目录：只认「写出来就是绝对路径」的字符串。相对路径 resolve 之后会落在
 // 进程当前目录下的某个意外位置，一律回退空串（= 系统桌面）。
+// 筐的文件目录：必须是绝对路径，坏的/空的回默认（E:\文件筐），不让它变成"当前工作目录下的文件夹"
+function normalizeBasketDir(raw) {
+  if (typeof raw !== 'string') return DEFAULTS.basket_dir;
+  const text = raw.trim();
+  if (!text || !path.isAbsolute(text)) return DEFAULTS.basket_dir;
+  return normalizePath(text) || DEFAULTS.basket_dir;
+}
+
 function normalizeSourceDir(raw) {
   if (typeof raw !== 'string') return '';
   const text = raw.trim();
@@ -217,6 +227,7 @@ function mergedSettings(raw) {
   );
   out.dock_items = normalizePathList(raw.dock_items);
   out.shortcuts_dir = normalizeSourceDir(raw.shortcuts_dir);
+  out.basket_dir = normalizeBasketDir(raw.basket_dir);
   out.dock_bottom_gap = clampInt(
     raw.dock_bottom_gap,
     DEFAULTS.dock_bottom_gap,
