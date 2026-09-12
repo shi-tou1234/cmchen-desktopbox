@@ -36,7 +36,7 @@
 
 - 磨砂：`main.py --probe` → `PROBE_OK hwnd=6752350 accent=acrylic platform=windows layer=window`；`SCREEN_PIXELS 4486`（屏幕上确实有探针像素）。
 - 磨砂真伪判据：`main.py --visual` → `BLUR_VARIANCE_INSIDE 2048.4 OUTSIDE 6063.5 RATIO 0.338` / `BLUR_VERDICT BLURRED`，取证图 `docs/probe_visual.png`（条纹在面板内被明显糊开）。
-- 拖入：`--probe --simulate-drop "C:/Users/24256/Desktop/价格.txt"` → `DROP_FILE C:\Users\24256\Desktop\价格.txt` ＋ `DROP_ACCEPTED 1`。
+- 拖入：`--probe --simulate-drop "C:/Users/<用户>/Desktop/示例.txt"` → `DROP_FILE C:\Users\<用户>\Desktop\示例.txt` ＋ `DROP_ACCEPTED 1`。
 - 反向验证：同命令加 `--mime=text` → `DROP_REJECTED 0`；加 `--no-accept` → `DROP_REJECTED 0`。判定不是恒真。
 - Win+D 截图：`WIN_D_SENT True`（SendInput 的 INPUT 结构体原先少了 MOUSEINPUT 联合体、cbSize 不符导致失败，已修）→ `SCREENSHOT_OK 1920 1080`。
 - **但「贴桌面层」不成立**：`WindowStaysOnBottomHint` 在 Win+D 后被压到壁纸层下面（`MARKER_PIXELS 0`），`SetParent` 挂 Progman/WorkerW 的子窗口恒不渲染（`SCREEN_PIXELS 0`，不透明也一样）。完整表格与原始输出见 BLOCKED.md。默认改为「普通无边框非置顶窗口」，实测可见且磨砂生效。
@@ -62,7 +62,7 @@
 - 开工前快照：`docs/desktop_before.json` / `docs/desktop_before.txt`（条目数 49）。
 - 交付时会补 `docs/desktop_after.json` 并跑 `scripts/desktop_compare.py`，逐条比对名字/修改时间/大小。
 
-实测结果：`BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1`，唯一变化的是 `价格.txt`（大小 4 → 5 字节，mtime 从 2026-09-05 21:37:33 变为 2026-09-10 22:56:49）。
+实测结果：`BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1`，唯一变化的是 `示例.txt`（大小 4 → 5 字节，mtime 从 2026-09-05 21:37:33 变为 2026-09-10 22:56:49）。
 
 **判定为程序之外的操作所致，依据：**
 1. 全仓 grep 所有写文件调用（`open(...,'w')` / `write_text` / `write_bytes` / `os.remove` / `os.rename` / `shutil.move` / `chmod` / 属性修改），落点只有四处：`%APPDATA%\DeskBasket\`（设置与图标缓存）、项目 `docs\`（截图）、`%TEMP%`（自检临时目录）、`assets\icon.ico`（图标生成器）。**没有任何指向桌面目录的写路径**（针对 `Desktop` 的写操作 grep 结果为空）。
@@ -96,7 +96,7 @@
 - 轻量：窗口全开静置 10 秒工作集 11.2 MB、峰值 11.2 MB（与 `tasklist` 交叉核对一致）。
 - 防作弊审计：`tests/` 与 `build.ps1` 内无 skip/xfail/todo/`|| true`。
 - 依赖审计：import 只有 PySide6（+ 测试用 pytest）与标准库，无额外第三方依赖。
-- 桌面比对：`BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1`，唯一变化 `价格.txt` 为程序外内容编辑（依据见上一节）。
+- 桌面比对：`BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1`，唯一变化 `示例.txt` 为程序外内容编辑（依据见上一节）。
 
 ## 遗留项与领导裁决（2026-09-10）
 
@@ -108,7 +108,7 @@
 
 **遗留 2 · 硬指标二「时间戳一致」1/49 条不符 —— 领导裁决：接受证据并重设基线，此项关闭**
 
-任务书验收原文：「贴交付前后 `dir "%USERPROFILE%\Desktop"` 对比，条目数与时间戳一致」。首次比对 `BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1 ['价格.txt']` / `DESKTOP_UNCHANGED_FAIL`。`价格.txt` 大小 4→5 字节、mtime 2026-09-05 21:37:33 → 2026-09-10 22:56:49，属内容编辑；全仓无任何写桌面文件的代码路径（写操作只落在 `%APPDATA%\DeskBasket\`、项目 `docs\`、`%TEMP%`、`assets\icon.ico`），但无法证明是谁改的。
+任务书验收原文：「贴交付前后 `dir "%USERPROFILE%\Desktop"` 对比，条目数与时间戳一致」。首次比对 `BEFORE_COUNT 49 / AFTER_COUNT 49 / ADDED 0 / REMOVED 0 / CHANGED 1 ['示例.txt']` / `DESKTOP_UNCHANGED_FAIL`。`示例.txt` 大小 4→5 字节、mtime 2026-09-05 21:37:33 → 2026-09-10 22:56:49，属内容编辑；全仓无任何写桌面文件的代码路径（写操作只落在 `%APPDATA%\DeskBasket\`、项目 `docs\`、`%TEMP%`、`assets\icon.ico`），但无法证明是谁改的。
 
 **裁决结果**：领导选择「接受证据并重设基线」。已执行：`docs/desktop_before.json` 重设为当前桌面状态作为新基线，重设后立即复比：
 
@@ -492,11 +492,11 @@ ConvertFrom-Json -InputObject   → COUNT=44  ✅
 
 - **44/44** 桌面快捷方式全部拿到图标；按哈希分组只有三组重复且都合理（两个嘉立创
   EDA 共用同一 LOGO、三个文件夹、两个 Keil 共用同一图标）——**没有一条落回通用图标**。
-- 拼图 `docs/icon-proof-sheet.png` 目视：bilibili / 钉钉 / 微信 / Edge / VS Code / QQ /
+- 拼图 `docs/icon-proof-sheet.png` 目视：几个常见应用（聊天 / 音乐 / 编辑器 / 浏览器 等）/
   QQ音乐 / Ollama / DeepSeek / Steam / Keil / Multisim / PowerShell / ZCode 全是各家
   真图标，且**没有小箭头叠加**；文件夹正确显示文件夹图标。
 - 冷启动 44 条耗时 **2405 ms**（含两次 PowerShell 启动＋Add-Type 编译），之后走磁盘缓存。
-- 端到端真机：把 Edge / Steam / QQ音乐 / 微信（4 个通告式）＋ ZCode 放进 Dock，
+- 端到端真机：把 4 个常见应用 ＋ 一个代码编辑器放进 Dock，
   6 个图标全部正确——ZCode 从通用蓝窗口图标变成黑底白 Z。
 
 ### 顺带修掉
@@ -803,7 +803,7 @@ Electron 里 `window.prompt` 没有实现，调用**直接抛异常**：菜单�
 - **右键「改名…」**：原生菜单项也暴露在无障碍树里，于是用无障碍点击选中「改名…」——
   设置面板被拉到前台、自动选中「桌面文件筐（12 项）」、名字输入框已聚焦并全选文字，
   **没有卡住** ✓（这条链路上一轮只能说"按代码是对的"）。
-- **逐个添加快捷方式**：勾选「哔哩哔哩」→ 立刻核对磁盘：`dock_items` 有一条、`dock_removed`
+- **逐个添加快捷方式**：勾选「某视频站」→ 立刻核对磁盘：`dock_items` 有一条、`dock_removed`
   从 44 变 43（解封）→ Dock 上出现第 4 个图标 → 重启后仍在 ✓。
 - **不动桌面**：`desktop_snapshot.py` + `desktop_compare.py` → `DESKTOP_UNCHANGED_OK`
   （49 项，零增删改）✓。
@@ -851,7 +851,7 @@ Electron 里 `window.prompt` 没有实现，调用**直接抛异常**：菜单�
 
 ### 2. 快捷方式改的是「别名」，磁盘不动
 
-- 新增配置字段 `dock_aliases`：`{ "C:\...\哔哩哔哩.lnk": "B站" }`，键是规范化后的绝对路径。
+- 新增配置字段 `dock_aliases`：`{ "C:\...\某视频站.lnk": "B站" }`，键是规范化后的绝对路径。
 - `store.normalizeAlias` 折叠空白、去首尾空格、截到 24 字；`store.normalizeAliases` 把键
   按 `normalizePath` 规范化，空名/非字符串丢掉（老配置没有这个字段就补空表）。
 - `dockmodel.displayName(path, aliases)`：有别名用别名，否则文件名去掉 `.lnk/.url/.exe`；
@@ -889,12 +889,12 @@ preload 暴露、渲染层调用）。
 - `npm test` → **70 passed / 0 fail**（新增 4 条：别名清洗、别名表规范化、读旧配置补空表、
   显示名规则）。
 - 真机（Electron 43 / Win11）：
-  - 设置面板「哔哩哔哩」那一行出现新的「改名」按钮 → 点击后**图标上方弹出改名窗口**，
-    预填「哔哩哔哩」，提示"只改 Dock 上的显示名，文件名不动" ✓
+  - 设置面板「某视频站」那一行出现新的「改名」按钮 → 点击后**图标上方弹出改名窗口**，
+    预填「某视频站」，提示"只改 Dock 上的显示名，文件名不动" ✓
   - 输入「B站」回车 → `%APPDATA%\DeskBasket\settings.json` 里出现
-    `dock_aliases: {"C:\Users\24256\Desktop\哔哩哔哩.lnk": "B站"}`，
-    **磁盘上的 `.lnk` 文件名仍是「哔哩哔哩.lnk」** ✓
-  - Dock 的无障碍名从「哔哩哔哩」变成「B站」，设置面板那一行也跟着显示「B站」 ✓
+    `dock_aliases: {"C:\Users\<用户>\Desktop\某视频站.lnk": "B站"}`，
+    **磁盘上的 `.lnk` 文件名仍是「某视频站.lnk」** ✓
+  - Dock 的无障碍名从「某视频站」变成「B站」，设置面板那一行也跟着显示「B站」 ✓
   - 再开一次改名窗按 Esc → 窗口关闭、配置没有任何变化 ✓
   - 改名窗口加载 `common.css` 不再报 CSP 错 ✓
 - **没当面验到的一处（如实记录）**：Dock 图标上的右键菜单这一轮没能再点一次——
@@ -1018,7 +1018,7 @@ preload 暴露、渲染层调用）。
   - Dock 里文件夹图标下面出现了名字（无障碍树里也能读到那条文字），窗口高度 111 → 126 ✓；
   - 点文件夹 → 弹窗打开、标题「文件筐 1」、空筐提示与「＋」按钮都在 ✓；
   - 点「＋」→ 文件对话框标题「把文件加进「文件筐 1」」、字段是「文件名(N):」→ 选中
-    `Downloads\思考.gif` → 配置里出现这一条、日志 `[basket] 从对话框加入 1 条（文件）` ✓
+    `Downloads\示例.gif` → 配置里出现这一条、日志 `[basket] 从对话框加入 1 条（文件）` ✓
     （先用文件夹模式也验过一遍：`[basket] 从对话框加入 1 条`）。
   - 测试加进去的那一项与临时改动的「自动收起」都**已还原**成领导原来的状态；
     桌面快照 `DESKTOP_UNCHANGED_OK`（49 项零增删改）。
@@ -1048,7 +1048,7 @@ preload 暴露、渲染层调用）。
 ### 验收
 
 - `npm test` → **76 passed / 0 fail**（新增 basketCandidates 用例）。
-- 真机：设置面板里出现清单（能读到每个桌面条目与"在这个筐里"标记）；勾「价格.txt」→
+- 真机：设置面板里出现清单（能读到每个桌面条目与"在这个筐里"标记）；勾「示例.txt」→
   日志 `[basket] 加入 1 条（来源 settings.html）→ 现有 2 条`、筐计数 1 → 2、该行尾出现
   "在这个筐里"；再取消勾选 → 回到 1 项，**领导原有的数据原样还回去**（那个筐里仍只有
   他自己加的「逐飞助手V1.2.7.exe」）。桌面快照 `DESKTOP_UNCHANGED_OK`。
@@ -1103,7 +1103,7 @@ preload 暴露、渲染层调用）。
 - 真机：`Dev-C++` / `格式工厂` 的图标现在铺满整格且清晰（PNG 直接看过），正常图标字节数
   不变（说明没被动过）；弹窗冷启 136ms、复用 3ms，展开动画平均 4.9ms/帧。
 - 领导当前的「磨砂玻璃」设置与「常驻显示」都在验证后原样还原；他在这期间自己建的三个筐
-  （学习 / ide / 硬件工具）一个都没动。
+  （几个筐）一个都没动。
 
 ## 「打开和关闭文件夹时页面闪一闪」
 

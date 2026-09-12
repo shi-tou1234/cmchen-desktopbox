@@ -126,7 +126,7 @@ test('筐颜色：已有的合法颜色原样保留；非法的重新分配', ()
 test('筐颜色：新建的筐立刻拿到一个没被占用的颜色', () => {
   const { baskets: list, basket } = baskets.createBasket(
     baskets.normalizeBaskets([{ id: 'b1' }, { id: 'b2' }]),
-    '硬件工具'
+    '示例筐'
   );
   assert.ok(/^#[0-9a-f]{6}$/.test(basket.color));
   assert.ok(!list.slice(0, 2).some((b) => b.color === basket.color));
