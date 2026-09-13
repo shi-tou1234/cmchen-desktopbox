@@ -42,9 +42,16 @@ test('路径判据：同盘、在内、大小写与末尾斜杠都不影响', ()
   assert.strictEqual(basketfiles.isInside(dir, path.join('E:', '文件筐', '资料', 'a.txt')), true);
   assert.strictEqual(basketfiles.isInside(dir, dir), true);
   assert.strictEqual(basketfiles.isInside(dir, path.join('E:', '文件筐', '资料备份', 'a.txt')), false);
-  assert.strictEqual(basketfiles.samePath('E:\\A\\b.txt', 'e:/a/b.txt'), true);
-  assert.strictEqual(basketfiles.sameVolume('E:\\x\\a.txt', 'e:\\文件筐'), true);
-  assert.strictEqual(basketfiles.sameVolume('C:\\x\\a.txt', 'E:\\文件筐'), false);
+  // 反斜杠与盘符是 Windows 语义：POSIX 上 '\\' 只是普通字符，这里按平台分别断言
+  if (process.platform === 'win32') {
+    assert.strictEqual(basketfiles.samePath('E:\\A\\b.txt', 'e:/a/b.txt'), true);
+    assert.strictEqual(basketfiles.sameVolume('E:\\x\\a.txt', 'e:\\文件筐'), true);
+    assert.strictEqual(basketfiles.sameVolume('C:\\x\\a.txt', 'E:\\文件筐'), false);
+  } else {
+    // POSIX 没有盘符概念：sameVolume 一律为真（跨挂载点的 rename 会抛 EXDEV，由 placeInto 兜）
+    assert.strictEqual(basketfiles.samePath('/A/b.txt', '/a/B.txt'), true);
+    assert.strictEqual(basketfiles.sameVolume('/x/a.txt', '/mnt/文件筐'), true);
+  }
 });
 
 test('决策：已在筐目录里 / 源文件没了 / 被 Dock 或别的筐引用 / 可以搬', () => {

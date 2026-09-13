@@ -49,14 +49,15 @@ function makeLinks(dir, names) {
 // ---------------------------------------------------------------- 配置
 
 test('筐候选清单：列桌面上的所有条目（不筛后缀）、标出已在筐里的、按名称排序', () => {
+  // 夹具一律用正斜杠：Windows 与 POSIX 的 path 实现都会把它当分隔符，两端语义一致
   const desktop = [
-    'C:\\Users\\me\\Desktop\\示例.txt',
-    'C:\\Users\\me\\Desktop\\示例音乐.lnk',
-    'C:\\Users\\me\\Desktop\\学业',
-    'C:\\Users\\me\\Desktop\\示例音乐.lnk', // 重复
+    'C:/Users/me/Desktop/示例.txt',
+    'C:/Users/me/Desktop/示例音乐.lnk',
+    'C:/Users/me/Desktop/学业',
+    'C:/Users/me/Desktop/示例音乐.lnk', // 重复
     ''
   ];
-  const rows = dockmodel.basketCandidates(desktop, ['C:\\Users\\me\\Desktop\\示例音乐.lnk']);
+  const rows = dockmodel.basketCandidates(desktop, ['C:/Users/me/Desktop/示例音乐.lnk']);
   assert.deepStrictEqual(
     rows.map((row) => row.name),
     [...rows.map((row) => row.name)].sort((a, b) => a.localeCompare(b, 'zh'))
@@ -341,29 +342,27 @@ test('同步桌面快捷方式：不重复、不复活被移除的', () => {
 test('换收录来源目录：黑名单按文件名迁到新目录，冲突条目请出 Dock', () => {
   // 旧目录里手动移除过的，换了目录之后路径对不上、但意愿还在：
   // 新目录里同名文件对应的路径要补进黑名单，旧条目原样保留
-  const removed = ['C:\\Users\\me\\Desktop\\某工具.lnk', 'C:\\Users\\me\\Desktop\\查无此文件.lnk'];
-  const newDir = ['E:\\shortcuts\\某工具.lnk', 'E:\\shortcuts\\示例甲.lnk', 'E:\\shortcuts\\示例.txt'];
+  // 夹具走应用自己的规范化（Windows 上会把 '/' 统一成 '\'）：断言比的是"同一个路径"，
+  // 不是某一种分隔符写法，所以三个平台都成立。
+  const P = (value) => store.normalizePath(value);
+  const removed = [P('C:/Users/me/Desktop/某工具.lnk'), P('C:/Users/me/Desktop/查无此文件.lnk')];
+  const newDir = [P('E:/shortcuts/某工具.lnk'), P('E:/shortcuts/示例甲.lnk'), P('E:/shortcuts/示例.txt')];
   const migrated = dockmodel.migrateRemoved(removed, newDir);
-  assert.ok(migrated.includes('E:\\shortcuts\\某工具.lnk'), '同名文件的新路径进黑名单');
+  assert.ok(
+    migrated.some((p) => store.pathKey(p) === store.pathKey(newDir[0])),
+    '同名文件的新路径进黑名单'
+  );
   assert.ok(migrated.includes(removed[0]) && migrated.includes(removed[1]), '旧黑名单条目保留');
   assert.strictEqual(migrated.length, 3, '不同名的不受牵连');
   assert.deepStrictEqual(dockmodel.migrateRemoved([], newDir), [], '空黑名单原样返回');
   assert.deepStrictEqual(dockmodel.migrateRemoved(removed, null), removed, '无新目录可迁时原样返回');
 
   // 与黑名单冲突的现存条目被请出 Dock，其余与顺序保持不变
-  const items = ['E:\\shortcuts\\某工具.lnk', 'E:\\shortcuts\\示例甲.lnk', 'E:\\shortcuts\\示例乙.lnk'];
-  assert.deepStrictEqual(
-    dockmodel.removeItems(items, migrated),
-    ['E:\\shortcuts\\示例甲.lnk', 'E:\\shortcuts\\示例乙.lnk']
-  );
+  const items = [newDir[0], newDir[1], P('E:/shortcuts/示例乙.lnk')];
+  assert.deepStrictEqual(dockmodel.removeItems(items, migrated), [items[1], items[2]]);
   assert.deepStrictEqual(dockmodel.removeItems([], migrated), []);
-  // win32 上路径键不区分大小写
-  if (process.platform === 'win32') {
-    assert.deepStrictEqual(
-      dockmodel.removeItems(['e:\\SHORTCUTS\\某工具.lnk'], migrated),
-      []
-    );
-  }
+  // 路径键在所有平台都不区分大小写（配置里大小写打错的同一文件要能对上）
+  assert.deepStrictEqual(dockmodel.removeItems(['e:/SHORTCUTS/某工具.lnk'], migrated), []);
 });
 
 test('排序：越界与同位置都是原样返回', () => {
@@ -466,9 +465,10 @@ test('面包屑最后一段就是当前目录', () => {
   assert.strictEqual(parts[parts.length - 1].label, '资料');
 });
 
-test('盘符根没有上一级', () => {
-  assert.strictEqual(filebrowse.parentOf('C:\\'), null);
-  assert.strictEqual(filebrowse.isRoot('C:\\'), true);
+test('系统根没有上一级', () => {
+  const root = process.platform === 'win32' ? 'C:\\' : '/';
+  assert.strictEqual(filebrowse.parentOf(root), null);
+  assert.strictEqual(filebrowse.isRoot(root), true);
 });
 
 test('上级目录正确', () => {
@@ -682,14 +682,14 @@ test('虚拟项：天气指向 Windows 自带的天气应用（图标与打开�
 
 test('快捷方式候选：只列可收录的、去重、标出是否已在 Dock 上', () => {
   const desktop = [
-    'C:\\Users\\me\\Desktop\\示例音乐.lnk',
-    'C:\\Users\\me\\Desktop\\示例.txt',
-    'C:\\Users\\me\\Desktop\\ZCode.lnk',
-    'C:\\Users\\me\\Desktop\\某网站.url',
-    'C:\\Users\\me\\Desktop\\万用表.exe',
-    'C:\\Users\\me\\Desktop\\示例音乐.lnk' // 重复项
+    'C:/Users/me/Desktop/示例音乐.lnk',
+    'C:/Users/me/Desktop/示例.txt',
+    'C:/Users/me/Desktop/ZCode.lnk',
+    'C:/Users/me/Desktop/某网站.url',
+    'C:/Users/me/Desktop/万用表.exe',
+    'C:/Users/me/Desktop/示例音乐.lnk' // 重复项
   ];
-  const rows = dockmodel.shortcutCandidates(desktop, ['C:\\Users\\me\\Desktop\\ZCode.lnk']);
+  const rows = dockmodel.shortcutCandidates(desktop, ['C:/Users/me/Desktop/ZCode.lnk']);
   assert.deepStrictEqual(
     rows.map((row) => row.name).sort(),
     ['示例音乐.lnk', 'ZCode.lnk', '某网站.url', '万用表.exe'].sort()
@@ -714,12 +714,12 @@ test('别名：空白折叠、首尾去空格、超长截断到 24 字', () => {
 
 test('别名表：键按绝对路径规范化，空名与非字符串丢掉', () => {
   const aliases = store.normalizeAliases({
-    'C:\\Users\\me\\Desktop\\sample.lnk': '示例视频',
-    'C:\\Users\\me\\Desktop\\empty.lnk': '   ',
-    'C:\\Users\\me\\Desktop\\num.lnk': 7
+    'C:/Users/me/Desktop/sample.lnk': '示例视频',
+    'C:/Users/me/Desktop/empty.lnk': '   ',
+    'C:/Users/me/Desktop/num.lnk': 7
   });
   assert.deepStrictEqual(Object.values(aliases), ['示例视频']);
-  assert.strictEqual(aliases[path.normalize('C:\\Users\\me\\Desktop\\sample.lnk')], '示例视频');
+  assert.strictEqual(aliases[path.normalize('C:/Users/me/Desktop/sample.lnk')], '示例视频');
   // 脏输入不抛，回空表
   assert.deepStrictEqual(store.normalizeAliases(null), {});
   assert.deepStrictEqual(store.normalizeAliases(['x']), {});
@@ -735,17 +735,17 @@ test('别名：读旧配置时补上空表，写回后仍在', () => {
 });
 
 test('显示名：有别名用别名，没有就用文件名去后缀，大小写不敏感', () => {
-  const target = 'C:\\Users\\me\\Desktop\\sample.lnk';
+  const target = 'C:/Users/me/Desktop/sample.lnk';
   assert.strictEqual(dockmodel.displayName(target, {}), 'sample');
   assert.strictEqual(dockmodel.displayName(target, { [target]: '示例视频' }), '示例视频');
-  // 键的大小写不同也要认出来（Windows 路径本来就大小写不敏感）
+  // 键的大小写不同也要认出来（路径键在所有平台都折叠大小写）
   assert.strictEqual(
-    dockmodel.displayName(target, { 'C:\\Users\\me\\Desktop\\Sample.lnk': '示例视频' }),
+    dockmodel.displayName(target, { 'C:/Users/me/Desktop/Sample.lnk': '示例视频' }),
     '示例视频'
   );
-  assert.strictEqual(dockmodel.displayName('C:\\d\\某网站.url', {}), '某网站');
-  assert.strictEqual(dockmodel.displayName('C:\\d\\万用表.exe', {}), '万用表');
-  assert.strictEqual(dockmodel.displayName('C:\\d\\示例.txt', {}), '示例.txt');
+  assert.strictEqual(dockmodel.displayName('C:/d/某网站.url', {}), '某网站');
+  assert.strictEqual(dockmodel.displayName('C:/d/万用表.exe', {}), '万用表');
+  assert.strictEqual(dockmodel.displayName('C:/d/示例.txt', {}), '示例.txt');
   assert.strictEqual(dockmodel.displayName('', {}), '');
   assert.strictEqual(dockmodel.displayName(null, null), '');
 });
