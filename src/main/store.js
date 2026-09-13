@@ -113,7 +113,9 @@ function normalizePath(raw) {
 function pathKey(value) {
   if (typeof value !== 'string') return '';
   const normalized = path.normalize(value);
-  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  // 路径键在所有平台都折叠大小写：配置里大小写打错的同一文件要能对上
+  // （去重、别名、移出都靠这个键；大小写敏感文件系统上同目录大小写变体极少见，可接受）
+  return normalized.toLowerCase();
 }
 
 // 去重 + 绝对化，保持原顺序
