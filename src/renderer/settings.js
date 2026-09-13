@@ -21,6 +21,7 @@ let weatherState = null;
 
 // 系统虚拟项的固定顺序：Dock 上就是这个次序（此电脑 → 回收站 → 天气）
 const SPECIAL_ORDER = [
+  ['windows', 'specialWindows'],
   ['thispc', 'specialThisPc'],
   ['recyclebin', 'specialRecycle'],
   ['weather', 'specialWeather']
@@ -140,7 +141,7 @@ function render() {
   el('basketDir').value = settings.basket_dir || '';
   el('dockCount').textContent =
     'Dock 现有 ' + settings.dock_items.length + ' 个快捷方式 ＋ ' +
-    (settings.dock_specials || []).length + ' 个系统图标（此电脑/回收站/天气）＋ ' +
+    (settings.dock_specials || []).length + ' 个系统图标（开始菜单/此电脑/回收站/天气）＋ ' +
     settings.baskets.filter((b) => b.visible !== false).length + ' 个文件夹' +
     '；自动收录来源目录里的 .lnk / .url / .exe，也可直接拖进去';
   renderTheme();

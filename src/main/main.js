@@ -678,10 +678,39 @@ async function iconFor(target, size = 48) {
 // 系统虚拟项（此电脑 / 回收站）的图标与打开方式。它们没有磁盘路径：
 // 图标让 shell 按解析名换成 PIDL 去取（固定 128px，渲染层按需缩放），
 // 打开交给 ShellExecute 的 shell: URI。
+// 「开始菜单」的图标：Windows 四格窗标没有 shell 来源，内置一张同款配色的 SVG
+const START_ICON_DATA_URL =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">' +
+      '<rect x="6" y="6" width="17" height="17" rx="2.5" fill="#0078D4"/>' +
+      '<rect x="25" y="6" width="17" height="17" rx="2.5" fill="#0078D4"/>' +
+      '<rect x="6" y="25" width="17" height="17" rx="2.5" fill="#0078D4"/>' +
+      '<rect x="25" y="25" width="17" height="17" rx="2.5" fill="#0078D4"/>' +
+    '</svg>'
+  );
+
 function specialIconFor(id) {
   const special = specials.findSpecial(id);
   if (!special) return Promise.resolve('');
+  if (id === specials.WINDOWS_ID) return Promise.resolve(START_ICON_DATA_URL);
   return shellIcons.parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX);
+}
+
+// 打开开始菜单：模拟按一下 Win 键（keybd_event 注入，全局生效，不需要窗口焦点）。
+// Ctrl+Esc 也等价，但真 Win 键连带搜索体验更完整。
+const PS_START_MENU = `
+$ErrorActionPreference = 'Stop'
+Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);' -Name K -Namespace DB | Out-Null
+[DB.K]::keybd_event(0x5B, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 30
+[DB.K]::keybd_event(0x5B, 0, 2, [UIntPtr]::Zero)
+`;
+
+async function openStartMenu() {
+  const res = await runPowerShell(PS_START_MENU);
+  if (!res.ok) return { ok: false, error: (res.err || '打不开开始菜单').trim() };
+  return { ok: true, error: '' };
 }
 
 async function openSpecial(id) {
@@ -2143,7 +2172,11 @@ function registerIpc() {
 
   // 天气项不走 shell 打开（要三层兜底 + 应用是否装着的判断），单独一条路
   ipcMain.handle('special:open', (_event, { id }) =>
-    id === specials.WEATHER_ID ? openWeatherApp() : openSpecial(id)
+    id === specials.WEATHER_ID
+      ? openWeatherApp()
+      : id === specials.WINDOWS_ID
+        ? openStartMenu()
+        : openSpecial(id)
   );
 
   // 天气：快照（Dock 图标下的气温、悬浮卡片都读它）／立刻刷新／打开天气应用／悬浮卡片

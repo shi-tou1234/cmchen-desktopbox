@@ -15,12 +15,20 @@
 //
 // 与 store / dockmodel 互不依赖，避免出现 require 环。
 
+const WINDOWS_ID = 'windows';   // Windows 开始菜单：图标内置 SVG，打开靠模拟 Win 键
 const WEATHER_ID = 'weather';
 const WEATHER_APP_URI = 'shell:AppsFolder\\Microsoft.BingWeather_8wekyb3d8bbwe!App';
 // 天气应用装不上/被卸掉时的兜底：MSN 天气网页（同样能看当前天气与未来几天）
 const WEATHER_WEB_FALLBACK = 'https://www.msn.com/zh-cn/weather';
 
 const DOCK_SPECIALS = [
+  {
+    id: WINDOWS_ID,
+    label: '开始菜单',
+    kind: 'start',
+    parsingName: '',   // 没有 shell 解析名：图标走 special:icon 的内置 SVG，打开走键盘模拟
+    openUri: ''
+  },
   {
     id: 'thispc',
     label: '此电脑',
@@ -68,6 +76,7 @@ function normalizeSpecials(raw) {
 module.exports = {
   DOCK_SPECIALS,
   SPECIAL_IDS,
+  WINDOWS_ID,
   WEATHER_APP_URI,
   WEATHER_ID,
   WEATHER_WEB_FALLBACK,

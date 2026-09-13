@@ -825,9 +825,9 @@ test('菜单尺寸：宽度跟着最长的标签走，并且收在上下限内',
   assert.deepStrictEqual(dockmodel.menuLayout(null), empty);
 });
 
-test('配置：dock_specials 默认是此电脑＋回收站＋天气（没写过这一项的老配置也是这三个）', () => {
-  assert.deepStrictEqual(store.DEFAULTS.dock_specials, ['thispc', 'recyclebin', 'weather']);
-  assert.deepStrictEqual(store.mergedSettings({}).dock_specials, ['thispc', 'recyclebin', 'weather']);
+test('配置：dock_specials 默认是开始菜单＋此电脑＋回收站＋天气（老配置以用户写的为准）', () => {
+  assert.deepStrictEqual(store.DEFAULTS.dock_specials, ['windows', 'thispc', 'recyclebin', 'weather']);
+  assert.deepStrictEqual(store.mergedSettings({}).dock_specials, ['windows', 'thispc', 'recyclebin', 'weather']);
   // 显式写过这一项的（比如在设置里撤下了天气）：以用户写的为准，不硬塞默认值
   assert.deepStrictEqual(store.mergedSettings({ dock_specials: ['thispc', 'recyclebin'] }).dock_specials, [
     'thispc',

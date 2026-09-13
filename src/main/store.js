@@ -35,7 +35,7 @@ const DEFAULTS = {
   popup_height: 460,
   dock_items: [],
   dock_aliases: {},            // 快捷方式在 Dock 上的显示名：只存设置，绝不动磁盘上的文件名
-  dock_specials: ['thispc', 'recyclebin', 'weather'],  // 系统虚拟项：此电脑、回收站、天气
+  dock_specials: ['windows', 'thispc', 'recyclebin', 'weather'],   // windows = 开始菜单（最左）  // 系统虚拟项：此电脑、回收站、天气
   dock_removed: [],
   // 天气城市：只存一个名字，经纬度每次启动重新查（一次地理编码请求，代价极低，
   // 省得设置里留一堆坐标字段要去校验）。空 = 用 weather.DEFAULT_CITY。
