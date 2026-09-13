@@ -368,7 +368,9 @@ test('换收录来源目录：黑名单按文件名迁到新目录，冲突条�
   assert.deepStrictEqual(dockmodel.removeItems(items, migrated), [items[1], items[2]]);
   assert.deepStrictEqual(dockmodel.removeItems([], migrated), []);
   // 路径键在所有平台都不区分大小写（配置里大小写打错的同一文件要能对上）
-  assert.deepStrictEqual(dockmodel.removeItems(['e:/SHORTCUTS/某工具.lnk'], migrated), []);
+  // 大小写变体也要对上（含盘符/目录名的大小写）：基址同样按平台取
+  const SCUT_UPPER = process.platform === 'win32' ? 'E:/SHORTCUTS' : '/SHORTCUTS';
+  assert.deepStrictEqual(dockmodel.removeItems([`${SCUT_UPPER}/某工具.lnk`], migrated), []);
 });
 
 test('排序：越界与同位置都是原样返回', () => {
