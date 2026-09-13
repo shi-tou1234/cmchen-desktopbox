@@ -678,17 +678,23 @@ async function iconFor(target, size = 48) {
 // 系统虚拟项（此电脑 / 回收站）的图标与打开方式。它们没有磁盘路径：
 // 图标让 shell 按解析名换成 PIDL 去取（固定 128px，渲染层按需缩放），
 // 打开交给 ShellExecute 的 shell: URI。
-// 「开始菜单」的图标：Windows 四格窗标没有 shell 来源，内置一张同款配色的 SVG
-const START_ICON_DATA_URL =
-  'data:image/svg+xml;utf8,' +
-  encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">' +
-      '<rect x="6" y="6" width="17" height="17" rx="2.5" fill="#0078D4"/>' +
-      '<rect x="25" y="6" width="17" height="17" rx="2.5" fill="#0078D4"/>' +
-      '<rect x="6" y="25" width="17" height="17" rx="2.5" fill="#0078D4"/>' +
-      '<rect x="25" y="25" width="17" height="17" rx="2.5" fill="#0078D4"/>' +
-    '</svg>'
-  );
+// 「开始菜单」的图标：Windows 四格窗标没有 shell 来源，内置一张 Win11 风格的 SVG
+// （四格圆角 ＋ 上浅下深的蓝色渐变——纯平面色块和旁边的系统原图放一起会显生）。
+const START_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">' +
+    '<defs>' +
+      '<linearGradient id="g" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#4FC3F7"/>' +
+        '<stop offset="0.55" stop-color="#2196F3"/>' +
+        '<stop offset="1" stop-color="#0D5BD4"/>' +
+      '</linearGradient>' +
+    '</defs>' +
+    '<rect x="5.5" y="5.5" width="18" height="18" rx="3.5" fill="url(#g)"/>' +
+    '<rect x="24.5" y="5.5" width="18" height="18" rx="3.5" fill="url(#g)"/>' +
+    '<rect x="5.5" y="24.5" width="18" height="18" rx="3.5" fill="url(#g)"/>' +
+    '<rect x="24.5" y="24.5" width="18" height="18" rx="3.5" fill="url(#g)"/>' +
+  '</svg>';
+const START_ICON_DATA_URL = 'data:image/svg+xml;utf8,' + encodeURIComponent(START_ICON_SVG);
 
 function specialIconFor(id) {
   const special = specials.findSpecial(id);
