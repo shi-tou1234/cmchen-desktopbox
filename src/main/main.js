@@ -683,20 +683,16 @@ async function iconFor(target, size = 48) {
 const START_ICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">' +
     '<defs>' +
-      '<linearGradient id="g" x1="0" y1="0" x2="0.25" y2="1">' +
+      '<linearGradient id="g" x1="0" y1="0" x2="0" y2="1">' +
         '<stop offset="0" stop-color="#4FC3F7"/>' +
         '<stop offset="0.55" stop-color="#2196F3"/>' +
         '<stop offset="1" stop-color="#0D5BD4"/>' +
       '</linearGradient>' +
     '</defs>' +
-    // 四格整体带一点透视（从左下方看窗户的微倾）：矩阵把竖边往左带、上排略缩，
-    // 48px 下刚好能看出"倾斜"，又不至于变成卡通。三个强度里选了中间偏明显的这档。
-    '<g transform="matrix(0.92 -0.05 -0.09 0.93 5.6 2.4)">' +
-      '<rect x="6" y="6" width="15.5" height="15.5" rx="3.4" fill="url(#g)"/>' +
-      '<rect x="27" y="6" width="15.5" height="15.5" rx="3.4" fill="url(#g)"/>' +
-      '<rect x="6" y="27" width="15.5" height="15.5" rx="3.4" fill="url(#g)"/>' +
-      '<rect x="27" y="27" width="15.5" height="15.5" rx="3.4" fill="url(#g)"/>' +
-    '</g>' +
+    '<rect x="5.5" y="5.5" width="18" height="18" rx="3.5" fill="url(#g)"/>' +
+    '<rect x="24.5" y="5.5" width="18" height="18" rx="3.5" fill="url(#g)"/>' +
+    '<rect x="5.5" y="24.5" width="18" height="18" rx="3.5" fill="url(#g)"/>' +
+    '<rect x="24.5" y="24.5" width="18" height="18" rx="3.5" fill="url(#g)"/>' +
   '</svg>';
 const START_ICON_DATA_URL = 'data:image/svg+xml;utf8,' + encodeURIComponent(START_ICON_SVG);
 
