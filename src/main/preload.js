@@ -150,4 +150,8 @@ contextBridge.exposeInMainWorld('deskbasket', {
     ipcRenderer.invoke('basket:rename-item', { basketId, oldPath, newName }),
   copyToClipboard: (paths) => ipcRenderer.invoke('basket:copy-clipboard', { paths }),
   pasteFromClipboard: (basketId) => ipcRenderer.invoke('basket:paste-clipboard', { basketId }),
+  // 行内改名前先把弹窗推到前台（右键菜单关掉后键盘焦点不一定回来）
+  popupFocus: () => ipcRenderer.invoke('popup:focus'),
+  // 把筐里的文件作为系统拖拽源拖出去（落点收到的是一份复制）
+  startItemDrag: (target) => ipcRenderer.send('basket:item-drag', { path: target }),
 });

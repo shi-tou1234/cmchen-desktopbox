@@ -2329,6 +2329,41 @@ function registerIpc() {
     return true;
   });
 
+  // 弹窗要吃键盘（行内改名等）：推到前台并聚焦。弹窗平时 showInactive 不抢焦点，
+  // 但右键菜单（另一个小窗口）关掉之后焦点不一定回来——改名输入框没有键盘焦点就是摆设。
+  // focus 事件会取消失焦自动关的定时器，这里不会和"鼠标离开就收"打架。
+  ipcMain.handle('popup:focus', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed() || win !== popupWindow) return false;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    return true;
+  });
+
+  // 从筐里把文件拖出去（格子 dragstart → 这里）：作为系统拖拽源交给资源管理器/桌面。
+  // 拖出去 = 复制一份到落点，筐里那份保留——startDrag 拿不到"拖到哪了/放没放下"的回执，
+  // 做不到"拖出去就从筐里消失"；真要移出用右键「移出到桌面」。
+  ipcMain.on('basket:item-drag', async (event, { path: target } = {}) => {
+    if (!target || !fs.existsSync(target)) return;
+    let icon = nativeImage.createEmpty();
+    try {
+      const url = await shellIcons.iconDataUrl(target, settings.icon_size || 48);
+      if (url) icon = nativeImage.createFromDataURL(url);
+    } catch (_) {
+      /* 取不到就退兜底图标 */
+    }
+    if (icon.isEmpty()) {
+      icon = nativeImage.createFromPath(path.join(__dirname, '..', '..', 'assets', 'icon.ico'));
+    }
+    if (icon.isEmpty()) return;
+    try {
+      event.sender.startDrag({ file: target, icon });
+    } catch (error) {
+      console.log(`[basket] 拖出失败：${String((error && error.message) || error)}`);
+    }
+  });
+
   // 渲染层报"有东西正拖在弹窗上"（dragover 起、dragleave 出窗或 drop 止）：
   // 拖拽期间弹窗不许自动收——它就是这个文件唯一可能的落点
   ipcMain.on('popup:drag-state', (_event, payload = {}) => {

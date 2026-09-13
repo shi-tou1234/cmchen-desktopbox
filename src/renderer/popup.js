@@ -96,6 +96,20 @@ function makeCell(entry, index) {
 
   cell.append(img, name);
 
+  // 拖出去 = 把真文件作为系统拖拽源（落点收到一份复制，筐里保留——startDrag 拿不到
+  // "拖到哪了"的回执，做不到拖出去就从筐里消失；真要移出用右键「移出到桌面」）。
+  // 拖进来 = 移动进筐。两个方向合起来才是"鼠标直接移进移出"。
+  if (view.kind === 'basket') {
+    cell.draggable = true;
+    cell.addEventListener('dragstart', (event) => {
+      event.preventDefault();   // 别让页面自己拖图片/文字，交给主进程发起系统拖拽
+      api.startItemDrag(entry.path);
+    });
+    cell.addEventListener('dragend', () => {
+      setStatus('已复制一份到落点（筐里保留）；要真正移出请右键「移出到桌面」');
+    });
+  }
+
   cell.addEventListener('click', (event) => {
     if (event.ctrlKey || event.metaKey) toggleSelect(entry, index);
     else if (event.shiftKey && anchorIndex >= 0) selectRange(anchorIndex, index);
@@ -233,6 +247,11 @@ async function moveOutSelection() {
 
 // 行内改名：把格子上的名字换成输入框，Enter 提交、Esc 取消（改的是筐目录里的真文件名）
 function startRename(entry, cell) {
+  // 右键菜单开着的那几秒里视图可能自动重画过：挂到脱节格子上的输入框用户看不见
+  if (!cell.isConnected) {
+    reloadHome();
+    return;
+  }
   const nameEl = cell.querySelector('.name');
   if (!nameEl || cell.querySelector('input')) return;
   const editor = document.createElement('input');
@@ -240,8 +259,13 @@ function startRename(entry, cell) {
   editor.className = 'rename-editor';
   editor.setAttribute('spellcheck', 'false');
   nameEl.replaceWith(editor);
-  editor.focus();
-  editor.select();
+  // 右键菜单路径：菜单窗口关掉后键盘焦点不一定回到弹窗——不聚焦的话打字/回车全是空气。
+  // popupFocus 把弹窗推到前台，再把焦点交给输入框。
+  const ready = api.popupFocus ? api.popupFocus() : Promise.resolve();
+  ready.then(() => {
+    editor.focus();
+    editor.select();
+  });
   let settled = false;
   const finish = async (commit) => {
     if (settled) return;
@@ -249,18 +273,21 @@ function startRename(entry, cell) {
     const value = editor.value.trim();
     if (commit && value && value !== entry.name) {
       const result = await api.renameItem(view.basketId, entry.path, value);
+      await reloadHome();   // 成败都先把格子刷新；render 会用"N 项"盖掉状态行，提示要放在重画之后
       if (result && result.ok) {
-        await reloadHome();
         setStatus('已改名为 ' + baseName(result.path));
         return;
       }
       setStatus('改名失败：' + ((result && result.error) || '未知原因'), true);
+      return;
     }
-    reloadHome();   // 取消/失败也把格子画回去
+    await reloadHome();   // 取消：把格子画回去
   };
   editor.addEventListener('keydown', (event) => {
     // 输入框里的事件不再往下传（全局快捷键不该在改名时触发）
     event.stopPropagation();
+    // 中文输入法组词期间 Enter 是"确认候选"，不是"提交改名"
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === 'Enter') finish(true);
     else if (event.key === 'Escape') finish(false);
   });

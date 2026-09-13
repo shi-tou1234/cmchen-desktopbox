@@ -103,7 +103,8 @@ function snapshotTree(root, io = fs) {
       const rel = prefix ? prefix + '/' + name : name;
       let stat = null;
       try {
-        stat = io.statSync(full);
+        // lstat：不跟随符号链接/联接点——目录环会无限递归；两端按链接本身记录、校验依然对称
+        stat = io.lstatSync ? io.lstatSync(full) : io.statSync(full);
       } catch (_) {
         continue;
       }
@@ -213,7 +214,8 @@ async function placeInto(destDir, src, { mode = 'move' } = {}) {
       await fs.promises.copyFile(src, dest, fs.constants.COPYFILE_EXCL);
     }
   } catch (error) {
-    dropQuietly(dest);
+    // EEXIST = 目标位被并发操作抢先占了：那不是我们的半成品，绝不能删
+    if (!error || error.code !== 'EEXIST') dropQuietly(dest);
     return { ok: false, error: errorText(error) };
   }
 
