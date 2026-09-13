@@ -15,6 +15,12 @@ const dockmodel = require('../src/main/dockmodel');
 const filebrowse = require('../src/main/filebrowse');
 const behavior = require('../src/main/windowBehavior');
 
+// 夹具基址：必须是**该平台的绝对路径**（Windows 盘符 / POSIX 前导斜杠）。
+// store.normalizePath 会把相对路径拼上工作目录，而 pathKey 不会——夹具若不是绝对的，
+// 两种写法在 mac/Linux 上就会对不上键（Windows 上因为盘符恰好是绝对的，看不出问题）。
+const DESK = process.platform === 'win32' ? 'C:/Users/me/Desktop' : '/Users/me/Desktop';
+const SCUT = process.platform === 'win32' ? 'E:/shortcuts' : '/shortcuts';
+
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'deskbasket-test-'));
 }
@@ -51,13 +57,13 @@ function makeLinks(dir, names) {
 test('筐候选清单：列桌面上的所有条目（不筛后缀）、标出已在筐里的、按名称排序', () => {
   // 夹具一律用正斜杠：Windows 与 POSIX 的 path 实现都会把它当分隔符，两端语义一致
   const desktop = [
-    'C:/Users/me/Desktop/示例.txt',
-    'C:/Users/me/Desktop/示例音乐.lnk',
-    'C:/Users/me/Desktop/学业',
-    'C:/Users/me/Desktop/示例音乐.lnk', // 重复
+    `${DESK}/示例.txt`,
+    `${DESK}/示例音乐.lnk`,
+    `${DESK}/学业`,
+    `${DESK}/示例音乐.lnk`, // 重复
     ''
   ];
-  const rows = dockmodel.basketCandidates(desktop, ['C:/Users/me/Desktop/示例音乐.lnk']);
+  const rows = dockmodel.basketCandidates(desktop, [`${DESK}/示例音乐.lnk`]);
   assert.deepStrictEqual(
     rows.map((row) => row.name),
     [...rows.map((row) => row.name)].sort((a, b) => a.localeCompare(b, 'zh'))
@@ -345,8 +351,8 @@ test('换收录来源目录：黑名单按文件名迁到新目录，冲突条�
   // 夹具走应用自己的规范化（Windows 上会把 '/' 统一成 '\'）：断言比的是"同一个路径"，
   // 不是某一种分隔符写法，所以三个平台都成立。
   const P = (value) => store.normalizePath(value);
-  const removed = [P('C:/Users/me/Desktop/某工具.lnk'), P('C:/Users/me/Desktop/查无此文件.lnk')];
-  const newDir = [P('E:/shortcuts/某工具.lnk'), P('E:/shortcuts/示例甲.lnk'), P('E:/shortcuts/示例.txt')];
+  const removed = [P(`${DESK}/某工具.lnk`), P(`${DESK}/查无此文件.lnk`)];
+  const newDir = [P(`${SCUT}/某工具.lnk`), P(`${SCUT}/示例甲.lnk`), P(`${SCUT}/示例.txt`)];
   const migrated = dockmodel.migrateRemoved(removed, newDir);
   assert.ok(
     migrated.some((p) => store.pathKey(p) === store.pathKey(newDir[0])),
@@ -358,7 +364,7 @@ test('换收录来源目录：黑名单按文件名迁到新目录，冲突条�
   assert.deepStrictEqual(dockmodel.migrateRemoved(removed, null), removed, '无新目录可迁时原样返回');
 
   // 与黑名单冲突的现存条目被请出 Dock，其余与顺序保持不变
-  const items = [newDir[0], newDir[1], P('E:/shortcuts/示例乙.lnk')];
+  const items = [newDir[0], newDir[1], P(`${SCUT}/示例乙.lnk`)];
   assert.deepStrictEqual(dockmodel.removeItems(items, migrated), [items[1], items[2]]);
   assert.deepStrictEqual(dockmodel.removeItems([], migrated), []);
   // 路径键在所有平台都不区分大小写（配置里大小写打错的同一文件要能对上）
@@ -682,14 +688,14 @@ test('虚拟项：天气指向 Windows 自带的天气应用（图标与打开�
 
 test('快捷方式候选：只列可收录的、去重、标出是否已在 Dock 上', () => {
   const desktop = [
-    'C:/Users/me/Desktop/示例音乐.lnk',
-    'C:/Users/me/Desktop/示例.txt',
-    'C:/Users/me/Desktop/ZCode.lnk',
-    'C:/Users/me/Desktop/某网站.url',
-    'C:/Users/me/Desktop/万用表.exe',
-    'C:/Users/me/Desktop/示例音乐.lnk' // 重复项
+    `${DESK}/示例音乐.lnk`,
+    `${DESK}/示例.txt`,
+    `${DESK}/ZCode.lnk`,
+    `${DESK}/某网站.url`,
+    `${DESK}/万用表.exe`,
+    `${DESK}/示例音乐.lnk` // 重复项
   ];
-  const rows = dockmodel.shortcutCandidates(desktop, ['C:/Users/me/Desktop/ZCode.lnk']);
+  const rows = dockmodel.shortcutCandidates(desktop, [`${DESK}/ZCode.lnk`]);
   assert.deepStrictEqual(
     rows.map((row) => row.name).sort(),
     ['示例音乐.lnk', 'ZCode.lnk', '某网站.url', '万用表.exe'].sort()
@@ -714,12 +720,12 @@ test('别名：空白折叠、首尾去空格、超长截断到 24 字', () => {
 
 test('别名表：键按绝对路径规范化，空名与非字符串丢掉', () => {
   const aliases = store.normalizeAliases({
-    'C:/Users/me/Desktop/sample.lnk': '示例视频',
-    'C:/Users/me/Desktop/empty.lnk': '   ',
-    'C:/Users/me/Desktop/num.lnk': 7
+    [`${DESK}/sample.lnk`]: '示例视频',
+    [`${DESK}/empty.lnk`]: '   ',
+    [`${DESK}/num.lnk`]: 7
   });
   assert.deepStrictEqual(Object.values(aliases), ['示例视频']);
-  assert.strictEqual(aliases[path.normalize('C:/Users/me/Desktop/sample.lnk')], '示例视频');
+  assert.strictEqual(aliases[path.normalize(`${DESK}/sample.lnk`)], '示例视频');
   // 脏输入不抛，回空表
   assert.deepStrictEqual(store.normalizeAliases(null), {});
   assert.deepStrictEqual(store.normalizeAliases(['x']), {});
@@ -735,12 +741,12 @@ test('别名：读旧配置时补上空表，写回后仍在', () => {
 });
 
 test('显示名：有别名用别名，没有就用文件名去后缀，大小写不敏感', () => {
-  const target = 'C:/Users/me/Desktop/sample.lnk';
+  const target = `${DESK}/sample.lnk`;
   assert.strictEqual(dockmodel.displayName(target, {}), 'sample');
   assert.strictEqual(dockmodel.displayName(target, { [target]: '示例视频' }), '示例视频');
   // 键的大小写不同也要认出来（路径键在所有平台都折叠大小写）
   assert.strictEqual(
-    dockmodel.displayName(target, { 'C:/Users/me/Desktop/Sample.lnk': '示例视频' }),
+    dockmodel.displayName(target, { [`${DESK}/Sample.lnk`]: '示例视频' }),
     '示例视频'
   );
   assert.strictEqual(dockmodel.displayName('C:/d/某网站.url', {}), '某网站');
