@@ -171,7 +171,13 @@ function attachDiagnostics(win, tag) {
 }
 
 function broadcastState() {
-  const payload = { settings, theme: resolvedTheme, displays: displaySummaries() };
+  const payload = {
+    settings,
+    theme: resolvedTheme,
+    displays: displaySummaries(),
+    platform: process.platform,
+    autostartSupported: process.platform === 'win32' || process.platform === 'darwin'
+  };
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send('state:changed', payload);
   }
@@ -662,6 +668,12 @@ async function electronIcon(target, size) {
 async function iconFor(target, size = 48) {
   const key = `${size}:${store.pathKey(target)}`;
   if (iconCache.has(key)) return iconCache.get(key);
+  // 非 Windows：app.getFileIcon 就是系统原生文件图标，直接用
+  if (process.platform !== 'win32') {
+    const dataUrl = await electronIcon(target, size);
+    iconCache.set(key, dataUrl);
+    return dataUrl;
+  }
   const sources = shellIcons.iconSources(target, declaredIconSource(target), iconExists);
   let dataUrl = '';
   for (const source of sources) {
@@ -696,10 +708,26 @@ const START_ICON_SVG =
   '</svg>';
 const START_ICON_DATA_URL = 'data:image/svg+xml;utf8,' + encodeURIComponent(START_ICON_SVG);
 
+// 非 Windows 没有系统天气应用可取图标：内置一张太阳＋云的 SVG 兜底
+const WEATHER_FALLBACK_ICON_DATA_URL =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">' +
+      '<circle cx="19" cy="19" r="10" fill="#FDB813"/>' +
+      '<g fill="#ECEFF4">' +
+        '<ellipse cx="30" cy="30" rx="11" ry="7.5"/>' +
+        '<ellipse cx="21" cy="32" rx="8" ry="6"/>' +
+      '</g>' +
+    '</svg>'
+  );
+
 function specialIconFor(id) {
   const special = specials.findSpecial(id);
   if (!special) return Promise.resolve('');
   if (id === specials.WINDOWS_ID) return Promise.resolve(START_ICON_DATA_URL);
+  if (process.platform !== 'win32') {
+    return Promise.resolve(id === specials.WEATHER_ID ? WEATHER_FALLBACK_ICON_DATA_URL : '');
+  }
   return shellIcons.parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX);
 }
 
@@ -714,6 +742,7 @@ Start-Sleep -Milliseconds 30
 `;
 
 async function openStartMenu() {
+  if (process.platform !== 'win32') return { ok: false, error: '开始菜单仅 Windows 支持' };
   const res = await runPowerShell(PS_START_MENU);
   if (!res.ok) return { ok: false, error: (res.err || '打不开开始菜单').trim() };
   return { ok: true, error: '' };
@@ -2162,6 +2191,7 @@ function registerIpc() {
   // 隐藏的筐不上 Dock。快捷方式的名字在这里就定好（别名优先），渲染层只管画
   ipcMain.handle('dock:get', () => ({
     specials: settings.dock_specials
+      .filter((id) => process.platform === 'win32' || id === 'weather')   // 开始菜单等是 Windows 概念
       .map((id) => specials.findSpecial(id))
       .filter(Boolean)
       .map((item) => ({ id: item.id, label: item.label, kind: item.kind || 'shell' })),

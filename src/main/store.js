@@ -10,6 +10,7 @@ const path = require('node:path');
 const specials = require('./specials');
 const weather = require('./weather');
 const basketfiles = require('./basketfiles');
+const platform = require('./platform');
 
 const SETTINGS_FILENAME = 'settings.json';
 const SETTINGS_BACKUP_SUFFIX = '.bak';
@@ -72,6 +73,13 @@ let injectedRoot = null;
 
 function settingsDir() {
   if (injectedRoot) return injectedRoot;
+  // Windows 用 %APPDATA%；mac/Linux 与 Electron userData 的约定一致
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', APP_DIR_NAME);
+  }
+  if (process.platform === 'linux') {
+    return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), APP_DIR_NAME);
+  }
   return path.join(process.env.APPDATA || os.homedir(), APP_DIR_NAME);
 }
 

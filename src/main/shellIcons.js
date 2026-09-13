@@ -535,11 +535,13 @@ function requestIcon(request, px = ICON_PX) {
 
 // 文件 / 快捷方式的图标
 function iconDataUrl(target, px = ICON_PX) {
+  if (process.platform !== 'win32') return Promise.resolve('');   // 非 Windows：图标由 app.getFileIcon 兜底
   return requestIcon(encodeFileRequest(target), px);
 }
 
 // 虚拟项的图标（此电脑、回收站…）——载荷是 shell 解析名，如 ::{CLSID}
 function parsingNameIconDataUrl(parsingName, px = ICON_PX) {
+  if (process.platform !== 'win32') return Promise.resolve('');   // 非 Windows：图标由 app.getFileIcon 兜底
   return requestIcon(encodeParsingNameRequest(parsingName), px);
 }
 

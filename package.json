@@ -1,7 +1,7 @@
 {
   "name": "deskbasket",
   "productName": "DeskBasket",
-  "version": "3.6.0",
+  "version": "3.7.0",
   "description": "桌面磨砂文件筐 ＋ 底部 Dock ＋ 实时天气（Electron 版，与 token 监测同架构）",
   "main": "src/main/main.js",
   "private": true,
@@ -20,7 +20,22 @@
     "appId": "com.cmchen.deskbasket",
     "productName": "DeskBasket",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg" },
+        { "target": "zip" }
+      ],
+      "category": "public.app-category.utilities"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility"
     },
     "files": [
       "src/**/*",

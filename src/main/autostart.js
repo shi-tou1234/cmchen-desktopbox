@@ -1,7 +1,8 @@
 'use strict';
 
-// 开机自启：Windows 写 HKCU\Software\Microsoft\Windows\CurrentVersion\Run（登录静默启动）。
-// 写入目标固定、幂等、开关可查。
+// 开机自启：Windows 写 HKCU\Software\Microsoft\Windows\CurrentVersion\Run（登录静默启动）；
+// macOS 走 Electron 的 setLoginItemSettings（同一套开关语义）。Linux 的 DE 各写各的，
+// 暂不支持（isSupported 返回 false，设置面板会如实说明）。写入目标固定、幂等、开关可查。
 
 const { execFileSync } = require('node:child_process');
 
@@ -9,7 +10,7 @@ const WIN_VALUE_NAME = 'DeskBasket';
 const WIN_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 
 function isSupported() {
-  return process.platform === 'win32';
+  return process.platform === 'win32' || process.platform === 'darwin';
 }
 
 function launchCommand() {
@@ -19,8 +20,24 @@ function launchCommand() {
   return `"${process.execPath}" "${app.getAppPath()}"`;
 }
 
+// ---- macOS：Electron 的 setLoginItemSettings（各版 Mac 通用的机制）----
+function macSetLoginItem(enabled) {
+  const { app } = require('electron');
+  app.setLoginItemSettings({ openAtLogin: enabled });
+  return true;
+}
+
+function macLoginItemEnabled() {
+  try {
+    const { app } = require('electron');
+    return Boolean(app.getLoginItemSettings().openAtLogin);
+  } catch (_) {
+    return false;
+  }
+}
+
 function currentCommand() {
-  if (!isSupported()) return '';
+  if (process.platform !== 'win32') return '';
   try {
     const out = execFileSync(
       'reg',
@@ -37,10 +54,12 @@ function currentCommand() {
 }
 
 function isEnabled() {
+  if (process.platform === 'darwin') return macLoginItemEnabled();
   return currentCommand() !== '';
 }
 
 function enable() {
+  if (process.platform === 'darwin') return macSetLoginItem(true);
   if (!isSupported()) return false;
   execFileSync(
     'reg',
@@ -51,6 +70,7 @@ function enable() {
 }
 
 function disable() {
+  if (process.platform === 'darwin') return macSetLoginItem(false);
   if (!isSupported()) return false;
   try {
     execFileSync('reg', ['delete', WIN_RUN_KEY, '/v', WIN_VALUE_NAME, '/f'], {

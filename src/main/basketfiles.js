@@ -14,8 +14,10 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const platform = require('./platform');
 
-const DEFAULT_DIR = 'E:\\文件筐';
+// 各平台的默认筐目录（Windows: E:\文件筐；mac/Linux 见 platform.js）
+const DEFAULT_DIR = platform.defaultBasketDir();
 
 // Windows 文件名里的非法字符与保留名
 const ILLEGAL = /[<>:"/\\|?*\u0000-\u001f]/g;

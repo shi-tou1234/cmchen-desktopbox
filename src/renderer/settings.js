@@ -466,8 +466,10 @@ async function refreshAutostart() {
   const info = await api.getAutostart();
   el('autostart').checked = info.enabled;
   el('autostartInfo').textContent = info.supported
-    ? '当前注册表内容：' + (info.command || '（未启用）')
-    : '当前平台不支持（仅 Windows）';
+    ? (process.platform === 'win32'
+        ? '当前注册表内容：' + (info.command || '（未启用）')
+        : (info.enabled ? '已开启（跟随系统登录）' : '未开启'))
+    : '当前平台不支持';
 }
 
 async function refresh() {
