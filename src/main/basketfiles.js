@@ -158,6 +158,21 @@ function ensureDir(dir) {
   return dir;
 }
 
+// 改名用：Windows 文件名里不能出现的字符换成空格、去掉结尾的点和空格；
+// 保留名（con / nul / com1…）即使带扩展名也不行，加前缀绕开。返回空串 = 名字不合法。
+function sanitizeFileName(raw) {
+  const cleaned = String(raw === undefined || raw === null ? '' : raw)
+    .replace(ILLEGAL, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/, '');
+  const short = cleaned.slice(0, 120).trim();
+  if (!short) return '';
+  const stem = short.includes('.') ? short.slice(0, short.indexOf('.')) : short;
+  if (RESERVED.test(stem)) return '文件-' + short;
+  return short;
+}
+
 // 筐目录里给这个文件名找一个空位（磁盘上已经有的名字都算占用）
 function targetInDir(dir, baseName) {
   let taken = [];
@@ -169,24 +184,22 @@ function targetInDir(dir, baseName) {
   return path.join(dir, uniqueName(baseName || '文件', taken));
 }
 
-// 把一个文件/文件夹弄进筐目录。返回：
-//   { action:'move'|'copy'|'inside'|'missing'|'failed', src, dest, note, error }
-async function moveInto(dir, src, { protect } = {}) {
-  if (!src) return { action: 'missing', src };
-  if (isInside(dir, src)) return { action: 'inside', src, dest: src };
-  if (!fs.existsSync(src)) return { action: 'missing', src };
-
-  const wantsCopy = Boolean(protect && protect.has(keyOf(src)));
-  const dest = targetInDir(dir, path.basename(src));
+// 把 src 落到 destDir 里去。mode='move'：同盘 rename（原子），跨盘先复制、
+// 逐层校验名字与大小、通过才删源；mode='copy'：只复制，源文件一个字节不动。
+// 失败时只清理"这次刚建出来的半成品"，源文件永远保留，原因写进 error。
+// 返回 { ok, action:'move'|'copy', dest, note } 或 { ok:false, error }。
+async function placeInto(destDir, src, { mode = 'move' } = {}) {
+  if (!src || !fs.existsSync(src)) return { ok: false, error: '源文件不存在' };
+  const dest = targetInDir(destDir, path.basename(src));
 
   // 同盘先试 rename：原子、不涉及删除，也就没有"复制一半"的中间态
-  if (!wantsCopy && sameVolume(src, dir)) {
+  if (mode === 'move' && sameVolume(src, destDir)) {
     try {
       await fs.promises.rename(src, dest);
-      return { action: 'move', src, dest };
+      return { ok: true, action: 'move', dest };
     } catch (error) {
       if (error && error.code !== 'EXDEV') {
-        return { action: 'failed', src, error: errorText(error) };
+        return { ok: false, error: errorText(error) };
       }
       /* EXDEV：跨盘，落到下面的复制路径 */
     }
@@ -201,7 +214,7 @@ async function moveInto(dir, src, { protect } = {}) {
     }
   } catch (error) {
     dropQuietly(dest);
-    return { action: 'failed', src, error: errorText(error) };
+    return { ok: false, error: errorText(error) };
   }
 
   let problem = '';
@@ -212,18 +225,35 @@ async function moveInto(dir, src, { protect } = {}) {
   }
   if (problem) {
     dropQuietly(dest);   // 半成品是我们刚建的，删掉；源文件一个字节没动
-    return { action: 'failed', src, error: '复制校验没过：' + problem };
+    return { ok: false, error: '复制校验没过：' + problem };
   }
 
-  if (wantsCopy) return { action: 'copy', src, dest };
+  if (mode === 'copy') return { ok: true, action: 'copy', dest };
 
   try {
     await fs.promises.rm(src, { recursive: true, force: false });
   } catch (error) {
-    // 源文件被占用之类：副本已经在筐里了，原文件留着，如实说明
-    return { action: 'copy', src, dest, note: '原文件没能删掉（' + errorText(error) + '）' };
+    // 源文件被占用之类：副本已经在了，原文件留着，如实说明
+    return { ok: true, action: 'copy', dest, note: '原文件没能删掉（' + errorText(error) + '）' };
   }
-  return { action: 'move', src, dest };
+  return { ok: true, action: 'move', dest };
+}
+
+// 把一个文件/文件夹弄进筐目录（"加进筐"的入口：被 Dock/别的筐引用着的只复制）。
+// 返回 { action:'move'|'copy'|'inside'|'missing'|'failed', src, dest, note, error }
+async function moveInto(dir, src, { protect } = {}) {
+  if (!src) return { action: 'missing', src };
+  if (isInside(dir, src)) return { action: 'inside', src, dest: src };
+  if (!fs.existsSync(src)) return { action: 'missing', src };
+  const mode = protect && protect.has(keyOf(src)) ? 'copy' : 'move';
+  const result = await placeInto(dir, src, { mode });
+  if (!result.ok) return { action: 'failed', src, error: result.error };
+  return {
+    action: result.action,
+    src,
+    dest: result.dest,
+    ...(result.note ? { note: result.note } : {})
+  };
 }
 
 module.exports = {
@@ -231,6 +261,8 @@ module.exports = {
   NAME_MAX,
   compareTrees,
   errorText,
+  placeInto,
+  sanitizeFileName,
   ensureDir,
   isInside,
   keyOf,

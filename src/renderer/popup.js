@@ -6,8 +6,43 @@ const el = (id) => document.getElementById(id);
 let view = null;       // 当前视图：{ kind, name, path?, parent?, basketId?, view?, entries, error }
 let homeView = null;   // 初始视图（从筐导航出去后能回来）
 let iconSize = 48;
-let selectedPath = null;
+let selection = new Set();   // 选中的条目路径（筐视图支持多选：Ctrl 点选、Shift 连选、Ctrl+A 全选）
+let anchorIndex = -1;        // Shift 连选的起点
 let staggerNext = false;   // 下一次 render 要不要给格子做交错进场（只有"打开"那一次要）
+
+function currentEntries() {
+  return (view && view.entries) || [];
+}
+
+function applySelection() {
+  for (const node of el('grid').children) {
+    node.classList.toggle('selected', selection.has(node.dataset.path));
+  }
+}
+
+function selectSingle(entry, index) {
+  selection = new Set([entry.path]);
+  anchorIndex = index;
+  applySelection();
+}
+
+function toggleSelect(entry, index) {
+  if (selection.has(entry.path)) selection.delete(entry.path);
+  else selection.add(entry.path);
+  anchorIndex = index;
+  applySelection();
+}
+
+function selectRange(fromIndex, toIndex) {
+  const [a, b] = fromIndex <= toIndex ? [fromIndex, toIndex] : [toIndex, fromIndex];
+  selection = new Set(currentEntries().slice(a, b + 1).map((entry) => entry.path));
+  applySelection();
+}
+
+// 当前操作的对象：选区 ∩ 现有条目（翻页/删除后选区里的死路径自动不算数）
+function selectedEntries() {
+  return currentEntries().filter((entry) => selection.has(entry.path));
+}
 
 function isDirEntry(entry) {
   return Boolean(entry && entry.isDir);
@@ -32,7 +67,9 @@ function fallbackIcon() {
 
 function makeCell(entry, index) {
   const cell = document.createElement('div');
-  cell.className = 'cell' + (entry.exists === false ? ' missing' : '');
+  cell.className = 'cell';
+  cell.dataset.path = entry.path;
+  cell.dataset.index = String(index);
   cell.title = entry.path;
   // 交错进场的节拍：每个格子按序号延后一点（上限 20 格，再多就不至于等太久）
   cell.style.setProperty('--i', Math.min(index, 20));
@@ -59,10 +96,10 @@ function makeCell(entry, index) {
 
   cell.append(img, name);
 
-  cell.addEventListener('click', () => {
-    for (const node of el('grid').children) node.classList.remove('selected');
-    cell.classList.add('selected');
-    selectedPath = entry.path;
+  cell.addEventListener('click', (event) => {
+    if (event.ctrlKey || event.metaKey) toggleSelect(entry, index);
+    else if (event.shiftKey && anchorIndex >= 0) selectRange(anchorIndex, index);
+    else selectSingle(entry, index);
   });
 
   cell.addEventListener('dblclick', async () => {
@@ -76,12 +113,20 @@ function makeCell(entry, index) {
 
   cell.addEventListener('contextmenu', (event) => {
     event.preventDefault();
+    // 右键没在选区里的格子：先把它变成当前选中（Windows 的习惯），操作作用于整个选区
+    if (!selection.has(entry.path)) selectSingle(entry, index);
     const items = [
       { key: 'open', label: isDirEntry(entry) ? '打开文件夹' : '打开' },
       { key: 'reveal', label: '在系统资源管理器中显示' }
     ];
     if (view.kind === 'basket') {
-      items.push({ separator: true }, { key: 'remove', label: '从筐里移出（不删文件）' });
+      items.push(
+        { separator: true },
+        { key: 'copy', label: '复制' },
+        { key: 'trash', label: '删除（进回收站）' },
+        { key: 'rename', label: '重命名' },
+        { key: 'moveout', label: '移出到桌面' }
+      );
     }
     window.showContextMenu(items, event).then(async (picked) => {
       if (!picked) return;
@@ -90,9 +135,14 @@ function makeCell(entry, index) {
         else api.openPath(entry.path);
       } else if (picked === 'reveal') {
         api.revealPath(entry.path);
-      } else if (picked === 'remove') {
-        await api.removeItem(view.basketId, entry.path);
-        reloadHome();
+      } else if (picked === 'copy') {
+        await copySelection();
+      } else if (picked === 'trash') {
+        await trashSelection();
+      } else if (picked === 'rename') {
+        startRename(entry, cell);
+      } else if (picked === 'moveout') {
+        await moveOutSelection();
       }
     });
   });
@@ -117,6 +167,126 @@ function addStatus(result) {
   return text;
 }
 
+// ------------------------------------------------- 选中项的操作（真文件）
+//
+// 右键菜单与 Ctrl+C / Ctrl+V / Delete / F2 都走这里。操作对象是"选区 ∩ 现有条目"，
+// 所以翻页、自动清理之后选区里残留的死路径不会误伤。
+
+function opTargets() {
+  if (!view || view.kind !== 'basket') return [];
+  const list = selectedEntries();
+  if (!list.length) setStatus('先选中要操作的条目', true);
+  return list;
+}
+
+async function copySelection() {
+  const list = opTargets();
+  if (!list.length) return;
+  const result = await api.copyToClipboard(list.map((entry) => entry.path));
+  if (result.ok) setStatus('已复制 ' + list.length + ' 项（去资源管理器 Ctrl+V 可粘贴出来）');
+  else setStatus('复制失败：' + result.error, true);
+}
+
+async function pasteClipboard() {
+  if (!view || view.kind !== 'basket') return;
+  setStatus('粘贴中…');
+  const result = await api.pasteFromClipboard(view.basketId);
+  await reloadHome();
+  if (result && result.error) {
+    setStatus('粘贴失败：' + result.error, true);
+    return;
+  }
+  if (!result || !result.added) {
+    setStatus('剪贴板里没有可粘贴的文件', true);
+    return;
+  }
+  const how = result.moved ? '（剪切来的已移入）' : '（复制了一份）';
+  setStatus('已粘贴 ' + result.added + ' 项' + how + '，筐里共 ' + result.total + ' 项');
+}
+
+async function trashSelection() {
+  const list = opTargets();
+  if (!list.length) return;
+  const names = list.map((entry) => entry.name);
+  const result = await api.trashItems(view.basketId, list.map((entry) => entry.path));
+  await reloadHome();
+  if (result.failed && result.failed.length) {
+    setStatus('有 ' + result.failed.length + ' 项没能删：' + result.failed[0].reason, true);
+    return;
+  }
+  setStatus('已删除（进回收站，可恢复）：' + names.slice(0, 3).join('、') + (names.length > 3 ? ' 等' : ''));
+}
+
+async function moveOutSelection() {
+  const list = opTargets();
+  if (!list.length) return;
+  const result = await api.moveOutItems(view.basketId, list.map((entry) => entry.path));
+  await reloadHome();
+  const ok = (result.results || []).filter((r) => r.ok);
+  const bad = (result.results || []).filter((r) => !r.ok);
+  if (!ok.length) {
+    setStatus('没能移出：' + ((bad[0] && bad[0].error) || '未知原因'), true);
+    return;
+  }
+  setStatus('已移出到桌面 ' + ok.length + ' 项' + (bad.length ? '；' + bad.length + ' 项失败' : '') + '，筐里共 ' + result.total + ' 项');
+}
+
+// 行内改名：把格子上的名字换成输入框，Enter 提交、Esc 取消（改的是筐目录里的真文件名）
+function startRename(entry, cell) {
+  const nameEl = cell.querySelector('.name');
+  if (!nameEl || cell.querySelector('input')) return;
+  const editor = document.createElement('input');
+  editor.value = entry.name;
+  editor.className = 'rename-editor';
+  editor.setAttribute('spellcheck', 'false');
+  nameEl.replaceWith(editor);
+  editor.focus();
+  editor.select();
+  let settled = false;
+  const finish = async (commit) => {
+    if (settled) return;
+    settled = true;
+    const value = editor.value.trim();
+    if (commit && value && value !== entry.name) {
+      const result = await api.renameItem(view.basketId, entry.path, value);
+      if (result && result.ok) {
+        await reloadHome();
+        setStatus('已改名为 ' + baseName(result.path));
+        return;
+      }
+      setStatus('改名失败：' + ((result && result.error) || '未知原因'), true);
+    }
+    reloadHome();   // 取消/失败也把格子画回去
+  };
+  editor.addEventListener('keydown', (event) => {
+    // 输入框里的事件不再往下传（全局快捷键不该在改名时触发）
+    event.stopPropagation();
+    if (event.key === 'Enter') finish(true);
+    else if (event.key === 'Escape') finish(false);
+  });
+  editor.addEventListener('blur', () => finish(false));
+}
+
+// 弹窗开着时，资源管理器那边删掉/改名/加进来的，2 秒内跟上：取一次筐视图，变了就重画。
+// 主进程取视图时会顺手清掉"文件已不在"的登记。只在筐首页且窗口可见时轮询。
+setInterval(async () => {
+  if (!view || view.kind !== 'basket' || view !== homeView) return;
+  if (document.querySelector('input.rename-editor')) return;   // 正在改名，别打断
+  if (document.visibilityState !== 'visible') return;          // 窗口藏着就不白问
+  try {
+    const fresh = await api.basketGet(view.basketId);
+    if (!fresh) return;
+    const paths = (a) => JSON.stringify((a.entries || []).map((entry) => entry.path));
+    if (paths(view) !== paths(fresh)) {
+      view = fresh;
+      homeView = fresh;
+      render();
+    }
+  } catch (_) {
+    /* 取不到就这一拍不刷 */
+  }
+}, 2000);
+
 // 翻目录的方向：给网格加一次性动画类，动画放完自动摘掉（避免下次布局也吃这个动画）
 function playNav(direction) {
   const grid = el('grid');
@@ -137,7 +307,6 @@ function render(navDirection) {
 
   const grid = el('grid');
   grid.innerHTML = '';
-  selectedPath = null;
 
   const entries = view.entries || [];
   for (let i = 0; i < entries.length; i += 1) grid.append(makeCell(entries[i], i));
@@ -178,6 +347,7 @@ function render(navDirection) {
       ? '这个筐还是空的：点上面的「＋」添加文件，或者把文件直接拖进来 / 拖到 Dock 的文件夹图标上（文件会移动进筐的文件夹，原来那处不再保留）'
       : '这个文件夹是空的';
   setStatus(entries.length ? entries.length + ' 项' : '');
+  applySelection();
 }
 
 // ---------------------------------------------------------------- 导航
@@ -225,7 +395,38 @@ el('btnAdd').addEventListener('click', async () => {
 });
 el('btnClose').addEventListener('click', () => api.popupClose());
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') api.popupClose();
+  if (event.key === 'Escape') {
+    api.popupClose();
+    return;
+  }
+  // 正在改名时事件不往下走（startRename 里已经 stopPropagation，这里是双保险）
+  if (event.target && event.target.tagName === 'INPUT') return;
+  if (!view || view.kind !== 'basket') return;
+  const mod = event.ctrlKey || event.metaKey;
+  if (mod && (event.key === 'c' || event.key === 'C')) {
+    event.preventDefault();
+    copySelection();
+  } else if (mod && (event.key === 'v' || event.key === 'V')) {
+    event.preventDefault();
+    pasteClipboard();
+  } else if (mod && (event.key === 'a' || event.key === 'A')) {
+    event.preventDefault();
+    selection = new Set(currentEntries().map((entry) => entry.path));
+    applySelection();
+  } else if (event.key === 'Delete') {
+    event.preventDefault();
+    trashSelection();
+  } else if (event.key === 'F2') {
+    event.preventDefault();
+    const list = selectedEntries();
+    if (list.length !== 1) {
+      setStatus('先选中一个要改名的条目', true);
+      return;
+    }
+    const index = currentEntries().findIndex((entry) => entry.path === list[0].path);
+    const cell = el('grid').children[index];
+    if (cell) startRename(list[0], cell);
+  }
 });
 
 // 把文件直接拖进弹窗 = 加到这个筐里（拖动时给一圈高亮）。
@@ -310,6 +511,8 @@ grip.addEventListener('pointercancel', endGrip);
 function showPayload(payload) {
   view = payload;
   homeView = payload;
+  selection = new Set();
+  anchorIndex = -1;
   iconSize = payload.iconSize || 48;
   // 磨砂模式的窗口底是一整块系统材质，动画得换个做法（见下面的 CSS）
   document.body.classList.toggle('glass', payload.glass === true);

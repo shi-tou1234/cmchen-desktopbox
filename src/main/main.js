@@ -187,6 +187,87 @@ function replaceBasket(basket) {
   return basket;
 }
 
+// ---------------------------------------------------------------- 剪贴板（真文件）
+//
+// Electron 的 clipboard 模块只能放文本/图片，放不了资源管理器认的文件列表（CF_HDROP），
+// 所以复制/粘贴真文件这两步交给一次性 PowerShell。走行式输出，不依赖编码。
+
+const POWERSHELL_EXE = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+
+const PS_CLIP_COPY = `
+$ErrorActionPreference = 'Stop'
+$paths = $env:DESKBASKET_CLIP_PATHS -split "\n" | Where-Object { $_ }
+if (-not $paths) { [Console]::Out.WriteLine('EMPTY'); exit }
+Set-Clipboard -Path $paths
+[Console]::Out.WriteLine('OK ' + $paths.Count)
+`;
+
+// 路径用 base64 传回来：控制台输出编码（GBK/代码页）在 -EncodedCommand + 隐藏窗口下
+// 靠不住，连 [Console]::OutputEncoding = UTF8 都会抛"句柄无效"——与 shellIcons 同一个坑。
+const PS_CLIP_PASTE = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+$data = [System.Windows.Forms.Clipboard]::GetDataObject()
+if ($null -eq $data -or -not $data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) {
+    [Console]::Out.WriteLine('EMPTY'); exit
+}
+$effect = 2
+if ($data.GetDataPresent('Preferred DropEffect')) {
+    $stream = $data.GetData('Preferred DropEffect')
+    if ($stream) {
+        $bytes = New-Object byte[] 4
+        [void]$stream.Read($bytes, 0, 4)
+        $effect = [BitConverter]::ToInt32($bytes, 0)
+    }
+}
+[Console]::Out.WriteLine('EFFECT ' + $effect)
+foreach ($p in $data.GetData([System.Windows.Forms.DataFormats]::FileDrop)) {
+    [Console]::Out.WriteLine('FILE ' + [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($p)))
+}
+`;
+
+// 一次性 PowerShell：8 秒没回来就放弃（剪贴板被别的程序占着时会卡）
+function runPowerShell(script, env = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(
+        POWERSHELL_EXE,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-EncodedCommand',
+          Buffer.from(script, 'utf16le').toString('base64')
+        ],
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } }
+      );
+    } catch (error) {
+      resolve({ ok: false, out: '', err: String((error && error.message) || error) });
+      return;
+    }
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk) => { out += chunk.toString('utf8'); });
+    child.stderr.on('data', (chunk) => { err += chunk.toString('utf8'); });
+    const finish = (value) => {
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch (_) {
+        /* 可能已退出 */
+      }
+      finish({ ok: false, out, err: (err + ' (超时)').trim() });
+    }, 8000);
+    child.on('error', (error) => finish({ ok: false, out, err: String((error && error.message) || error) }));
+    child.on('close', () => finish({ ok: true, out, err }));
+  });
+}
+
 // 筐的文件目录（3.3.0 起）：每个筐在磁盘上有一个真实文件夹，加进来的文件会被移动进去，
 // 从此归筐所有 —— 原始位置删掉也照样打得开。边界见 src/main/basketfiles.js 的文件头。
 function basketRoot() {
@@ -213,8 +294,9 @@ function protectedKeysFor(basketId) {
 }
 
 // 往筐里加东西：先把文件搬进筐目录，再把**筐里的那份**登记进清单。
-// 搬不动的（被占用、源文件没了）原样登记原路径并如实报数，绝不让"东西不知去向"。
-async function addPathsToBasket(basket, paths, tag) {
+// mode 缺省按"拖进来 = 移动"处理（Dock/别的筐在用的自动降级成复制）；粘贴会显式传。
+// 搬不动的（被占用）原样保留源文件并如实报数，绝不让"东西不知去向"。
+async function addPathsToBasket(basket, paths, tag, { mode } = {}) {
   const list = (paths || []).filter(Boolean);
   const failed = [];
   let next = basket;
@@ -243,21 +325,29 @@ async function addPathsToBasket(basket, paths, tag) {
   for (const item of list) {
     let target = item;
     if (dir) {
-      const result = await basketfiles.moveInto(dir, item, { protect });
-      if (result.action === 'move') {
-        moved += 1;
-        target = result.dest;
-      } else if (result.action === 'copy') {
-        copied += 1;
-        target = result.dest;
-        if (result.note) console.log(`[basket] ${result.note}：${item}`);
-      } else if (result.action === 'inside') {
-        target = result.dest || item;
-      } else if (result.action === 'failed') {
-        failed.push({ name: path.basename(item), reason: result.error });
+      // 已经在筐目录里的不用搬；源文件都不在了就别登记死条目（页面上不会再有灰色残影）
+      if (basketfiles.isInside(dir, item)) {
         target = item;
+      } else if (!fs.existsSync(item)) {
+        failed.push({ name: path.basename(item), reason: '源文件不存在' });
+        target = '';   // 源文件都没了：不登记死条目（页面上不会再有灰色残影）
+      } else {
+        // 拖进来/加进来默认是"移动"；被 Dock 或别的筐引用着的只复制，免得把那边弄坏。
+        // 剪贴板粘贴会显式给 mode（剪切=移动、复制=复制），但保护规则两种模式都生效。
+        let useMode = mode || 'move';
+        if (useMode === 'move' && protect.has(basketfiles.keyOf(item))) useMode = 'copy';
+        const result = await basketfiles.placeInto(dir, item, { mode: useMode });
+        if (result.ok) {
+          if (result.action === 'move') moved += 1;
+          else copied += 1;
+          target = result.dest;
+          if (result.note) console.log(`[basket] ${result.note}：${item}`);
+        } else {
+          failed.push({ name: path.basename(item), reason: result.error });
+        }
       }
     }
+    if (!target) continue;
     const outcome = basketModel.addItem(next, target);
     if (outcome.result === 'added') {
       next = outcome.basket;
@@ -355,6 +445,15 @@ async function migrateBasketFiles() {
 // 把一个筐转成渲染层直接可用的视图：带上每个条目是否存在、是不是目录
 function basketView(basket) {
   if (!basket) return null;
+  // 文件管理器里删掉的条目：清单里直接消失（不留灰色残影）。只在筐目录本身 accessible 时才清：
+  // 盘不在/目录被占用时整筐都不能动，免得一次误判把清单清光。清掉的只是登记，磁盘本来就没这个文件了。
+  if (basket.dir && fs.existsSync(basket.dir)) {
+    const { items, removed } = basketModel.dropMissing(basket.items, (item) => fs.existsSync(item));
+    if (removed.length) {
+      basket = replaceBasket(basketModel.updateItems(basket, items));
+      console.log(`[basket] 「${basket.name}」清掉 ${removed.length} 条已不存在的登记`);
+    }
+  }
   return {
     ...basket,
     entries: (basket.items || []).map((item) => {
@@ -1893,6 +1992,124 @@ function registerIpc() {
     persist();
     syncDock();
     return created.basket;
+  });
+
+  // ---------------------------------------------------------------- 选中项的操作
+
+  // 右键「移出到桌面」：真把文件从筐目录搬回桌面（重名自动加 (2)），清单里同步去掉
+  ipcMain.handle('basket:move-out', async (_event, { basketId, paths } = {}) => {
+    const basket = findBasket(basketId);
+    if (!basket) return null;
+    const destDir = app.getPath('desktop');
+    const results = [];
+    for (const item of paths || []) {
+      const result = await basketfiles.placeInto(destDir, item, { mode: 'move' });
+      results.push({ path: item, ok: Boolean(result.ok), dest: result.dest || '', error: result.error || '' });
+    }
+    const movedKeys = new Set(results.filter((r) => r.ok).map((r) => basketfiles.keyOf(r.path)));
+    const saved = replaceBasket(
+      basketModel.updateItems(basket, (basket.items || []).filter((it) => !movedKeys.has(basketfiles.keyOf(it))))
+    );
+    syncDock();
+    prewarmBasketIcons();
+    console.log(
+      `[basket] 移出到桌面 ${movedKeys.size} 条、失败 ${results.length - movedKeys.size}` +
+        `（目录 ${destDir}）→ 现有 ${saved.items.length} 条`
+    );
+    return { results, total: saved.items.length };
+  });
+
+  // Delete / 右键「删除」：进系统回收站（可恢复），清单同步去掉
+  ipcMain.handle('basket:trash', async (_event, { basketId, paths } = {}) => {
+    const basket = findBasket(basketId);
+    if (!basket) return null;
+    const done = [];
+    const failed = [];
+    for (const item of paths || []) {
+      try {
+        await shell.trashItem(item);
+        done.push(item);
+      } catch (error) {
+        failed.push({ path: item, reason: String((error && error.message) || error) });
+      }
+    }
+    const saved = replaceBasket(
+      basketModel.updateItems(basket, (basket.items || []).filter((it) => !done.includes(it)))
+    );
+    syncDock();
+    prewarmBasketIcons();
+    console.log(`[basket] 删除（进回收站）${done.length} 条、失败 ${failed.length} → 现有 ${saved.items.length} 条`);
+    return { done, failed, total: saved.items.length };
+  });
+
+  // F2 / 右键「重命名」：改的是筐目录里的真实文件名（同盘 rename，原子）
+  ipcMain.handle('basket:rename-item', (_event, { basketId, oldPath, newName } = {}) => {
+    const basket = findBasket(basketId);
+    if (!basket) return { ok: false, error: '筐不存在' };
+    const clean = basketfiles.sanitizeFileName(newName);
+    if (!clean) return { ok: false, error: '这个名字用不了' };
+    if (!fs.existsSync(oldPath)) return { ok: false, error: '文件已经不在了' };
+    const dest = path.join(path.dirname(oldPath), clean);
+    if (basketfiles.samePath(oldPath, dest)) return { ok: true, path: oldPath };
+    if (fs.existsSync(dest)) return { ok: false, error: '已经有同名的了' };
+    try {
+      fs.renameSync(oldPath, dest);
+    } catch (error) {
+      return { ok: false, error: String((error && error.message) || error) };
+    }
+    replaceBasket(
+      basketModel.updateItems(basket, (basket.items || []).map((it) => (basketfiles.samePath(it, oldPath) ? dest : it)))
+    );
+    syncDock();
+    prewarmBasketIcons();
+    console.log(`[basket] 重命名：${path.basename(oldPath)} → ${clean}`);
+    return { ok: true, path: dest };
+  });
+
+  // Ctrl+C / 右键「复制」：把真文件放进系统剪贴板（Electron 的 clipboard 模块给不了
+  // 资源管理器认的文件列表，这一步交给 PowerShell 的 Set-Clipboard -Path）
+  ipcMain.handle('basket:copy-clipboard', async (_event, { paths } = {}) => {
+    const list = (paths || []).filter((item) => {
+      try {
+        return fs.existsSync(item);
+      } catch (_) {
+        return false;
+      }
+    });
+    if (!list.length) return { ok: false, error: '没有可复制的文件' };
+    const res = await runPowerShell(PS_CLIP_COPY, { DESKBASKET_CLIP_PATHS: list.join('\n') });
+    const ok = res.ok && res.out.includes('OK');
+    return { ok, error: ok ? '' : (res.err || res.out || '剪贴板被别的程序占着').trim() };
+  });
+
+  // Ctrl+V：读剪贴板里的文件列表（带"剪切/复制"的意图），复制或移动进筐目录再登记。
+  // 剪切来的也遵守保护规则：被 Dock/别的筐引用着的只复制，不搬。
+  ipcMain.handle('basket:paste-clipboard', async (_event, { basketId } = {}) => {
+    const basket = findBasket(basketId);
+    if (!basket) return null;
+    const res = await runPowerShell(PS_CLIP_PASTE);
+    if (!res.ok) return { added: 0, total: basket.items.length, moved: 0, copied: 0, failed: [], error: res.err || '读不到剪贴板' };
+    let effect = 2;
+    const paths = [];
+    for (const line of res.out.split(/\r?\n/)) {
+      if (line.startsWith('EFFECT ')) effect = Number(line.slice(7)) || 2;
+      else if (line.startsWith('FILE ')) {
+        try {
+          paths.push(Buffer.from(line.slice(5), 'base64').toString('utf8'));
+        } catch (_) {
+          /* 解不出的一行放弃 */
+        }
+      }
+    }
+    console.log(`[basket] 粘贴：剪贴板读到 ${paths.length} 个文件（effect=${effect}）`);
+    if (!paths.length) {
+      console.log(`[basket] 粘贴：剪贴板原始输出=${JSON.stringify(res.out.slice(0, 200))} stderr=${JSON.stringify(res.err.slice(0, 200))}`);
+      return { added: 0, total: basket.items.length, moved: 0, copied: 0, failed: [], error: '剪贴板里没有文件' };
+    }
+    const mode = effect === 5 ? 'move' : 'copy';   // 5 = 剪切，2 = 复制
+    const tag = mode === 'move' ? '粘贴（剪切）' : '粘贴（复制）';
+    const result = await addPathsToBasket(basket, paths, tag, { mode });
+    return { ...result, error: '' };
   });
 
   ipcMain.handle('basket:delete', (_event, { basketId }) => {

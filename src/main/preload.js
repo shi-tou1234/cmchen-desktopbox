@@ -141,5 +141,13 @@ contextBridge.exposeInMainWorld('deskbasket', {
   menuDismiss: () => ipcRenderer.invoke('menu:dismiss'),
 
   // 拖放：取刚才那次真实拖放的本地路径（preload 在 drop 的捕获阶段已经算好，见文件头）
-  pathsFromFiles: () => droppedPaths.slice()
+  pathsFromFiles: () => droppedPaths.slice(),
+
+  // 筐里选中项的操作（真文件）
+  moveOutItems: (basketId, paths) => ipcRenderer.invoke('basket:move-out', { basketId, paths }),
+  trashItems: (basketId, paths) => ipcRenderer.invoke('basket:trash', { basketId, paths }),
+  renameItem: (basketId, oldPath, newName) =>
+    ipcRenderer.invoke('basket:rename-item', { basketId, oldPath, newName }),
+  copyToClipboard: (paths) => ipcRenderer.invoke('basket:copy-clipboard', { paths }),
+  pasteFromClipboard: (basketId) => ipcRenderer.invoke('basket:paste-clipboard', { basketId }),
 });

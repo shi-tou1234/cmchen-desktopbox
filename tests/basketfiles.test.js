@@ -8,6 +8,7 @@ const assert = require('node:assert');
 const path = require('node:path');
 
 const basketfiles = require('../src/main/basketfiles');
+const baskets = require('../src/main/baskets');
 
 test('筐名 → 文件夹名：非法字符换空格、去掉结尾的点和空格、限长', () => {
   assert.strictEqual(basketfiles.sanitizeFolderName('资料'), '资料');
@@ -108,4 +109,32 @@ test('复制校验：一致通过；少项/多项/大小不同/类型不同都�
   assert.match(basketfiles.compareTrees(base, { ...base, sub: 12 }), /sub 不是目录/);
   assert.match(basketfiles.compareTrees({ '': -1 }, { '': 10 }), /不是目录/);
   assert.match(basketfiles.compareTrees({ '': 10 }, { '': -1 }), /大小不一致/);
+});
+
+test('改名用的文件名清洗：非法字符换空格、去掉结尾的点、保留名加前缀', () => {
+  assert.strictEqual(basketfiles.sanitizeFileName('新建 BMP 图像.bmp'), '新建 BMP 图像.bmp');
+  assert.strictEqual(basketfiles.sanitizeFileName('a<b>c|.txt'), 'a b c .txt');
+  assert.strictEqual(basketfiles.sanitizeFileName('报告. '), '报告');
+  // 中文句号不是 Windows 的结尾点，保留
+  assert.strictEqual(basketfiles.sanitizeFileName('报告。'), '报告。');
+  assert.strictEqual(basketfiles.sanitizeFileName('con'), '文件-con');
+  assert.strictEqual(basketfiles.sanitizeFileName('CON.txt'), '文件-CON.txt');
+  assert.strictEqual(basketfiles.sanitizeFileName(''), '');
+  assert.strictEqual(basketfiles.sanitizeFileName('   '), '');
+  assert.strictEqual(basketfiles.sanitizeFileName('x'.repeat(200)).length, 120);
+});
+
+test('清掉"文件已不在"的登记：删掉的就从清单消失，不动还活着的', () => {
+  const items = ['E:\\文件筐\\学习\\a.txt', 'E:\\文件筐\\学习\\b.txt', 'E:\\文件筐\\学习\\c.txt'];
+  const { items: kept, removed } = baskets.dropMissing(items, (item) => item !== items[1]);
+  assert.deepStrictEqual(kept, [items[0], items[2]]);
+  assert.deepStrictEqual(removed, [items[1]]);
+  // 全都活着：原样返回，一项不动
+  const all = baskets.dropMissing(items, () => true);
+  assert.deepStrictEqual(all.items, items);
+  assert.deepStrictEqual(all.removed, []);
+  // 全都没了：清单清空（调用方要保证筐目录本身是好的才会走到这）
+  const none = baskets.dropMissing(items, () => false);
+  assert.deepStrictEqual(none.items, []);
+  assert.deepStrictEqual(none.removed.length, 3);
 });

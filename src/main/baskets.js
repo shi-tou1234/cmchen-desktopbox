@@ -163,6 +163,18 @@ function updateItems(basket, items) {
   return { ...basket, items: [...items] };
 }
 
+// 文件管理器里删掉的条目：清单里直接消失（不留灰色残影——这是领导定的语义）。
+// exists 注入便于单测。只在调用方确认"筐目录本身是好的"之后再调，盘不在时整筐都不能动。
+function dropMissing(items, exists) {
+  const kept = [];
+  const removed = [];
+  for (const item of items || []) {
+    if (exists(item)) kept.push(item);
+    else removed.push(item);
+  }
+  return { items: kept, removed };
+}
+
 function createBasket(baskets, name, x = 80, y = 80) {
   const list = baskets || [];
   const existing = new Set(list.map((basket) => basket.id));
@@ -185,6 +197,7 @@ function dropBasket(baskets, id) {
 
 module.exports = {
   BASKET_NAME_MAX,
+  dropMissing,
   BASKET_PALETTE,
   COLOR_RE,
   DEFAULT_HEIGHT,

@@ -186,6 +186,21 @@ html, body {
 .cell.missing { opacity: 0.55; }
 .cell.missing .name { text-decoration: line-through; }
 
+/* 行内改名（F2 / 右键「重命名」）：输入框长得像名字本身，能看出来在改 */
+.cell .rename-editor {
+  width: 100%;
+  font-size: 12px;
+  line-height: 14px;
+  text-align: center;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  padding: 0 2px;
+  box-sizing: border-box;
+  outline: none;
+}
+
 /* 打开弹窗时格子依次"落位"（#6）：给网格加 .stagger，格子上设 --i 决定延迟。
    减弱动画（#7）：body.reduce-motion 或系统"减少动效"时整段关掉，直接到位。 */
 .cell { opacity: 1; }
