@@ -252,6 +252,17 @@ function startRename(entry, cell) {
     reloadHome();
     return;
   }
+  if (cell.querySelector('input')) return;
+  // **先把弹窗拿到前台，再挂输入框**：右键菜单是另一个小窗口，菜单关掉后焦点还在它身上；
+  // 顺序反过来（先挂输入框再去抢焦点）时，"窗口刚拿到焦点"这一下会让刚挂上的输入框瞬间失焦，
+  // 而失焦被当成"用户放弃"——改名就这么无声无息地没了。这就是"重命名失效"的真凶。
+  const focused = api.popupFocus ? api.popupFocus().catch(() => false) : Promise.resolve(false);
+  focused.then(() => attachRenameEditor(entry, cell));
+}
+
+const RENAME_GRACE_MS = 500;   // 刚打开这几百毫秒里的失焦不算"放弃"（窗口正在做前后台切换）
+
+function attachRenameEditor(entry, cell) {
   const nameEl = cell.querySelector('.name');
   if (!nameEl || cell.querySelector('input')) return;
   const editor = document.createElement('input');
@@ -259,13 +270,7 @@ function startRename(entry, cell) {
   editor.className = 'rename-editor';
   editor.setAttribute('spellcheck', 'false');
   nameEl.replaceWith(editor);
-  // 右键菜单路径：菜单窗口关掉后键盘焦点不一定回到弹窗——不聚焦的话打字/回车全是空气。
-  // popupFocus 把弹窗推到前台，再把焦点交给输入框。
-  const ready = api.popupFocus ? api.popupFocus() : Promise.resolve();
-  ready.then(() => {
-    editor.focus();
-    editor.select();
-  });
+  const openedAt = Date.now();
   let settled = false;
   const finish = async (commit) => {
     if (settled) return;
@@ -291,7 +296,17 @@ function startRename(entry, cell) {
     if (event.key === 'Enter') finish(true);
     else if (event.key === 'Escape') finish(false);
   });
-  editor.addEventListener('blur', () => finish(false));
+  editor.addEventListener('blur', () => {
+    const elapsed = Date.now() - openedAt;
+    // 刚打开这一下：窗口正在前后台切换，不是用户放弃——把焦点抢回来，别把改名判死
+    if (!settled && elapsed < RENAME_GRACE_MS) {
+      editor.focus();
+      return;
+    }
+    finish(false);
+  });
+  editor.focus();
+  editor.select();
 }
 
 // 弹窗开着时，资源管理器那边删掉/改名/加进来的，2 秒内跟上：取一次筐视图，变了就重画。
