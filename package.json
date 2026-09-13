@@ -35,7 +35,9 @@
         "AppImage",
         "deb"
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "maintainer": "DeskBasket <shi-tou1234@users.noreply.github.com>",
+      "synopsis": "Desktop file baskets + dock"
     },
     "files": [
       "src/**/*",
