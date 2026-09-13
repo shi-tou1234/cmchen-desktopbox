@@ -1,0 +1,31 @@
+name: release
+
+# 推 v* 标签时，在三个系统上构建免安装产物并发布 Release。
+# 产物：Windows（portable exe）、macOS（dmg + zip）、Linux（AppImage + deb）。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+      # electron-builder 在哪个系统上跑就打哪个系统的包；
+      # 推 tag 时 --publish always 会自动创建/补充同名的 draft release
+      - run: npx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
