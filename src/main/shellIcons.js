@@ -17,9 +17,17 @@
 // 「此电脑 / 回收站」这类虚拟项没有文件路径，`::{CLSID}` 形式 SHGetFileInfo 也不认，
 // 所以走 SHGetStockIconInfo 取系统内置图标（同样用系统图标列表下标）。
 //
+// 包应用（Store / MSIX）快捷方式是第三种：.lnk 里没有文件目标，目标是一串 AUMID
+// （<包族名>!<应用 id>），而 **shell 根本渲染不出它们的图标** —— SHGetFileInfo 对
+// .lnk 和对 shell:AppsFolder\<AUMID> 都只回通用「白纸」，缩略图接口
+// （IShellItemImageFactory）同样（实测 Watt Toolkit / Fluent Reader / Snipaste
+// 三个 Store 应用都是白纸，而计算器这类正经注册了图标的 UWP 应用正常）。
+// 所以这类链接改读**应用包里的 logo 素材** —— 开始菜单磁贴用的就是同一套图。
+// 请求行因此多了第四种前缀：a=包应用的 AUMID。
+//
 // 与 PowerShell 之间是「纯行式、全 base64」协议：不用 JSON（PS 5.1 的 ConvertFrom-Json
 // 在管道形式下会把数组并成一个字符串），也不依赖长行不被折行（PNG 按固定宽度分块）。
-// 每行载荷的第一位是请求种类：f=文件路径，s=系统内置图标号。
+// 每行载荷的第一位是请求种类：f=文件路径，p=shell 解析名，a=包应用 AUMID。
 //
 // 本模块不依赖 Electron（只用 child_process / fs），node --test 可直接测。
 
@@ -85,10 +93,39 @@ function encodeParsingNameRequest(parsingName) {
   return 'p' + String(parsingName || '');
 }
 
+function encodePackageRequest(aumid) {
+  return 'a' + String(aumid || '');
+}
+
+// AUMID = <包族名>!<应用 id>：包族名是 <名字>_<13 位发布者哈希>（与版本无关，
+// 应用升级后不变），应用 id 是清单里那条 Application 的 Id。
+const AUMID_PATTERN = /(?:^|[^\w.!-])([A-Za-z0-9][\w.-]*_[a-z0-9]{13}![A-Za-z0-9.-]{1,64})/g;
+
+// 从 .lnk 的字节里认出包应用：这类链接没有 LinkInfo，目标全在目标 ID 列表里，
+// AUMID 以 UTF-16 存在其中（形如 `4651ED44255E.47979655102CE_k6txddmbb6c52!App`）。
+// 认不出就回空串 —— 调用方据此退回 shell 那条路，所以这里宁可漏认不可错认成别的字符串。
+// 只扫目标 ID 列表这一段；UTF-16 对齐未知，0/1 两个相位都扫一遍。
+function aumidFromLink(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 78) return '';
+  if (!(buffer.readUInt32LE(20) & 0x1)) return '';        // 没有 HasLinkTargetIDList
+  const start = 78;
+  const end = Math.min(start + buffer.readUInt16LE(76), buffer.length);
+  if (end - start < 8) return '';
+  const idList = buffer.subarray(start, end);
+  for (const phase of [0, 1]) {
+    const text = idList.subarray(phase).toString('utf16le');
+    AUMID_PATTERN.lastIndex = 0;
+    const hit = AUMID_PATTERN.exec(text);
+    if (hit) return hit[1];
+  }
+  return '';
+}
+
 function decodeRequest(request) {
   const value = String(request || '');
   const kind = value.slice(0, 1);
   if (kind === 'p') return { kind: 'parsing', value: value.slice(1) };
+  if (kind === 'a') return { kind: 'package', value: value.slice(1) };
   return { kind: 'file', value: value.slice(1) };
 }
 
@@ -239,6 +276,75 @@ function Draw-IconFilled($graphics, $native, $size) {
     $graphics.DrawImage($native, $dest, $box, [System.Drawing.GraphicsUnit]::Pixel)
 }
 
+# Logo file of a packaged (Store / MSIX) app. The shell cannot draw these apps'
+# icons - it hands out the generic "white page" for both the .lnk and
+# shell:AppsFolder\<AUMID>, and the thumbnail interface agrees - so the image has
+# to come out of the package itself.
+#
+# Pick the asset by *pixel size*, with every sort key explicit and the path last:
+# a name-pattern guess once picked a 16x16 asset for a 128px icon and it came out
+# a blurry mess (the names differ per vendor: Square150x150Logo, LargeTile,
+# Snipaste_44.targetsize-256_altform-unplated ~). Rules, in order:
+#   * square PNGs only, skipping lightunplated / white / black / contrast variants
+#     (they are for light or monochrome surfaces) and Badge / Wide / SplashScreen;
+#   * prefer the "unplated" family - that is the set Windows itself uses when it
+#     draws an app icon without a tile plate;
+#   * then the smallest asset that still covers the wanted size (never upscale a
+#     16x16 into a 128px dock icon), or the largest if none is big enough.
+function Get-PackageLogoPath($aumid, $wanted) {
+    $family = $aumid.Split('!')[0]
+    $pkg = $null
+    if ($family.Length -gt 14) {
+        $name = $family.Substring(0, $family.Length - 14)
+        $pkg = Get-AppxPackage -Name $name -ErrorAction SilentlyContinue |
+            Where-Object { $_.PackageFamilyName -eq $family } | Select-Object -First 1
+    }
+    if ($null -eq $pkg) {
+        $pkg = Get-AppxPackage -ErrorAction SilentlyContinue |
+            Where-Object { $_.PackageFamilyName -eq $family } | Select-Object -First 1
+    }
+    if ($null -eq $pkg) { throw ('package-not-found: ' + $family) }
+
+    $dir = $pkg.InstallLocation
+    try {
+        $logo = (Get-AppxPackageManifest $pkg).Package.Properties.Logo
+        if ($logo) {
+            $candidate = Join-Path $pkg.InstallLocation (Split-Path $logo -Parent)
+            if (Test-Path -LiteralPath $candidate) { $dir = $candidate }
+        }
+    } catch { }
+
+    $files = @(Get-ChildItem -LiteralPath $dir -Filter '*.png' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch 'lightunplated|white|black|contrast|Badge|Wide|SplashScreen' })
+    if ($files.Count -eq 0) { throw ('no-logo-assets: ' + $dir) }
+
+    $squares = @()
+    foreach ($f in $files) {
+        try {
+            $img = [System.Drawing.Image]::FromFile($f.FullName)
+            $width = $img.Width
+            $isSquare = ($width -eq $img.Height)
+            $img.Dispose()
+        } catch { continue }
+        if (-not $isSquare) { continue }
+        $unplated = 0
+        if ($f.Name -match 'unplated') { $unplated = 1 }
+        $squares += [pscustomobject]@{ Path = $f.FullName; Size = $width; Unplated = $unplated }
+    }
+    if ($squares.Count -eq 0) { throw ('no-square-logo: ' + $dir) }
+
+    $pool = @($squares | Where-Object { $_.Unplated -eq 1 })
+    if ($pool.Count -eq 0) { $pool = $squares }
+
+    $covering = @($pool | Where-Object { $_.Size -ge $wanted })
+    if ($covering.Count -gt 0) {
+        $pick = $covering | Sort-Object -Property Size, Path | Select-Object -First 1
+    } else {
+        $pick = $pool | Sort-Object -Property Size, Path -Descending | Select-Object -First 1
+    }
+    return $pick.Path
+}
+
 $requests = @()
 $payload = $env:DESKBASKET_ICON_PATHS
 if (-not [string]::IsNullOrEmpty($payload)) {
@@ -256,18 +362,22 @@ foreach ($item in $requests) {
     try {
         if ($compileError -ne '') { throw ('add-type: ' + $compileError) }
         if (-not $typeReady) { throw 'type-missing' }
-        if ($kind -eq 'p') {
-            $index = [DeskBasketShellIcon]::ParsingNameIndexOf($value)
+        if ($kind -eq 'a') {
+            $native = New-Object System.Drawing.Bitmap((Get-PackageLogoPath $value $size))
         } else {
-            $index = [DeskBasketShellIcon]::IndexOf($value)
+            if ($kind -eq 'p') {
+                $index = [DeskBasketShellIcon]::ParsingNameIndexOf($value)
+            } else {
+                $index = [DeskBasketShellIcon]::IndexOf($value)
+            }
+            if ($index -lt 0) { throw ('index-failed kind=' + $kind) }
+            $handle = [DeskBasketShellIcon]::IconFrom(4, $index)
+            if ($handle -eq [IntPtr]::Zero) { $handle = [DeskBasketShellIcon]::IconFrom(2, $index) }
+            if ($handle -eq [IntPtr]::Zero) { $handle = [DeskBasketShellIcon]::IconFrom(0, $index) }
+            if ($handle -eq [IntPtr]::Zero) { throw 'image-list-failed' }
+            $icon = [System.Drawing.Icon]::FromHandle($handle)
+            $native = $icon.ToBitmap()
         }
-        if ($index -lt 0) { throw ('index-failed kind=' + $kind) }
-        $handle = [DeskBasketShellIcon]::IconFrom(4, $index)
-        if ($handle -eq [IntPtr]::Zero) { $handle = [DeskBasketShellIcon]::IconFrom(2, $index) }
-        if ($handle -eq [IntPtr]::Zero) { $handle = [DeskBasketShellIcon]::IconFrom(0, $index) }
-        if ($handle -eq [IntPtr]::Zero) { throw 'image-list-failed' }
-        $icon = [System.Drawing.Icon]::FromHandle($handle)
-        $native = $icon.ToBitmap()
         if ($native.Width -le 0) { throw 'empty-icon' }
         $bitmap = New-Object System.Drawing.Bitmap($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -280,7 +390,7 @@ foreach ($item in $requests) {
         $b64png = [Convert]::ToBase64String($stream.ToArray())
         $stream.Dispose()
         $bitmap.Dispose()
-        [DeskBasketShellIcon]::DestroyIcon($handle) | Out-Null
+        if ($null -ne $handle) { [DeskBasketShellIcon]::DestroyIcon($handle) | Out-Null }
     } catch { $problem = $_.Exception.Message }
 
     if ($b64png -eq '') {
@@ -533,9 +643,40 @@ function requestIcon(request, px = ICON_PX) {
   });
 }
 
-// 文件 / 快捷方式的图标
-function iconDataUrl(target, px = ICON_PX) {
+// 文件 / 快捷方式的图标。
+// 包应用快捷方式（.lnk 里带 AUMID 的那种）先走包里的 logo 素材 —— shell 只会回白纸；
+// 拿不到（包已卸载、素材被裁掉）再退回老路，至少不比从前差。
+const linkAumidCache = new Map();   // `${路径}|${mtime}:${size}` -> AUMID 或 ''
+
+function aumidOf(target) {
+  const value = String(target || '');
+  if (!value.toLowerCase().endsWith('.lnk')) return '';
+  let signature;
+  try {
+    const stat = fs.statSync(value);
+    signature = `${Math.round(stat.mtimeMs)}:${stat.size}`;
+  } catch (_) {
+    return '';                       // 读不到就不猜，交给后面那条路去报错
+  }
+  const key = `${value.toLowerCase()}|${signature}`;
+  if (linkAumidCache.has(key)) return linkAumidCache.get(key);
+  let aumid = '';
+  try {
+    aumid = aumidFromLink(fs.readFileSync(value));
+  } catch (_) {
+    aumid = '';
+  }
+  linkAumidCache.set(key, aumid);
+  return aumid;
+}
+
+async function iconDataUrl(target, px = ICON_PX) {
   if (process.platform !== 'win32') return Promise.resolve('');   // 非 Windows：图标由 app.getFileIcon 兜底
+  const aumid = aumidOf(target);
+  if (aumid) {
+    const packaged = await requestIcon(encodePackageRequest(aumid), px);
+    if (packaged) return packaged;
+  }
   return requestIcon(encodeFileRequest(target), px);
 }
 
@@ -548,7 +689,10 @@ function parsingNameIconDataUrl(parsingName, px = ICON_PX) {
 module.exports = {
   ICON_PX,
   MARKER,
+  aumidFromLink,
+  aumidOf,
   decodeRequest,
+  encodePackageRequest,
   iconDataUrl,
   iconSources,
   parseOutput,

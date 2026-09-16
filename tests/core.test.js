@@ -592,6 +592,60 @@ test('图标来源：任何快捷方式最后一条兜底都是 .lnk 自己，�
   assert.strictEqual(last.path, lnk);
 });
 
+// ---------------------------------------------------------------- 包应用（Store）快捷方式
+// 这类 .lnk 里没有文件目标，目标是一串 AUMID（<包族名>!<应用 id>），而 **shell 渲染不出
+// 它们的图标**：SHGetFileInfo 对 .lnk 和对 shell:AppsFolder\<AUMID> 都只回通用「白纸」，
+// 缩略图接口（IShellItemImageFactory）同样 —— 实测 Watt Toolkit / Fluent Reader /
+// Snipaste 三个 Store 应用都是白纸，而计算器这类正经注册了图标的 UWP 应用正常。
+// 所以识别出 AUMID 后改读应用包里的 logo 素材（开始菜单磁贴用的同一套图）。
+// 下面锁住「认得出、不误认」两件事，认错的代价是白跑一趟 PS 再退回老路。
+
+// 拼一个最小可用的 .lnk：76 字节头 ＋ 目标 ID 列表（AUMID 以 UTF-16 躺在里面）
+function linkBytes({ aumid = '', oddAlign = false, flags = 0x81, filler = 4 } = {}) {
+  const parts = [Buffer.alloc(filler, 0x41)];
+  if (aumid) parts.push(Buffer.from(aumid, 'utf16le'), Buffer.from([0, 0]));
+  if (oddAlign) parts.unshift(Buffer.from([0x7f]));
+  const idList = Buffer.concat(parts);
+  const head = Buffer.alloc(78);
+  head.writeUInt32LE(flags, 20);
+  head.writeUInt16LE(idList.length, 76);
+  return Buffer.concat([head, idList]);
+}
+
+test('包应用识别：目标 ID 列表里的 AUMID 认得出来', () => {
+  const aumid = '4651ED44255E.47979655102CE_k6txddmbb6c52!App';
+  assert.strictEqual(shellIcons.aumidFromLink(linkBytes({ aumid })), aumid);
+});
+
+test('包应用识别：UTF-16 落在奇数偏移上也要认得出', () => {
+  const aumid = '45479liulios.17062D84F7C46_p7pnf6hceqser!Snipaste';
+  assert.strictEqual(shellIcons.aumidFromLink(linkBytes({ aumid, oddAlign: true })), aumid);
+});
+
+test('包应用识别：普通快捷方式（ID 列表里是文件路径）不误认', () => {
+  const path = 'C:\\Program Files\\App\\app.exe';
+  assert.strictEqual(shellIcons.aumidFromLink(linkBytes({ aumid: path })), '');
+});
+
+test('包应用识别：MSI 通告式（没有目标 ID 列表）不误认', () => {
+  const bogus = linkBytes({ aumid: 'acme.Tool_abcdefghijklm!App', flags: 0x0 });
+  assert.strictEqual(shellIcons.aumidFromLink(bogus), '');
+});
+
+test('包应用识别：不是 .lnk 的东西一律交给 shell 那条路', () => {
+  assert.strictEqual(shellIcons.aumidFromLink(Buffer.alloc(0)), '');
+  assert.strictEqual(shellIcons.aumidFromLink(Buffer.from('MZ 这不是快捷方式')), '');
+  assert.strictEqual(shellIcons.aumidFromLink(null), '');
+});
+
+test('包应用识别：AUMID 后面还跟着别的令牌时只取 AUMID 本身', () => {
+  const aumid = 'Microsoft.WindowsCalculator_8wekyb3d8bbwe!App';
+  const bytes = linkBytes({ aumid });
+  const withTrailer = Buffer.concat([bytes, Buffer.from('extrastuff', 'utf16le')]);
+  withTrailer.writeUInt16LE(withTrailer.length - 78, 76);
+  assert.strictEqual(shellIcons.aumidFromLink(withTrailer), aumid);
+});
+
 // ---------------------------------------------------------------- shellIcons 行式协议
 // 与 PowerShell 之间不用 JSON：PS 5.1 的 ConvertFrom-Json 在管道形式下会把整个数组
 // 并成一个字符串（实测 COUNT=1），所以改成「base64 请求行 + 分块 base64 PNG」逐行传。
@@ -601,7 +655,7 @@ test('图标来源：任何快捷方式最后一条兜底都是 .lnk 自己，�
 const encode = (text) => Buffer.from(text, 'utf8').toString('base64');
 const marker = shellIcons.MARKER;
 
-test('请求编码：文件与虚拟项各有种类前缀', () => {
+test('请求编码：文件 / 虚拟项 / 包应用各有种类前缀', () => {
   assert.deepStrictEqual(shellIcons.decodeRequest('fC:\\Desktop\\a.lnk'), {
     kind: 'file',
     value: 'C:\\Desktop\\a.lnk'
@@ -609,6 +663,10 @@ test('请求编码：文件与虚拟项各有种类前缀', () => {
   assert.deepStrictEqual(shellIcons.decodeRequest('p::{645FF040-5081-101B-9F08-00AA002F954E}'), {
     kind: 'parsing',
     value: '::{645FF040-5081-101B-9F08-00AA002F954E}'
+  });
+  assert.deepStrictEqual(shellIcons.decodeRequest(shellIcons.encodePackageRequest('A.B_cdefghijklmn!App')), {
+    kind: 'package',
+    value: 'A.B_cdefghijklmn!App'
   });
 });
 
