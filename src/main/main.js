@@ -112,7 +112,7 @@ let weatherCardWindow = null;
 let weatherCardPainted = false;
 let weatherCardWanted = false;     // 想要卡片显示（页面还没画出第一帧时先记下，画完再浮出来）
 let weatherCardPollTimer = null;
-let weatherCardLeftAt = 0;
+let weatherIconScreenX = null;      // 天气图标中心的屏幕 x（showWeatherCard 记）：离开判定只认图标格子与卡片两块
 let weatherCardHideTimer = null;   // 退出动画播完再隐藏窗口的定时器（AN-4）
 let weatherCardHiding = false;     // 正在播退出：防重入（AN-4）
 
@@ -940,8 +940,7 @@ function dirTargetForShortcut(target) {
 //
 // 取天气失败一律**不弹窗**：保留上一次的数据，只把错误记进快照、日志里记一条。
 const WEATHER_REFRESH_MS = 15 * 60 * 1000;   // 15 分钟刷一次（实时性够用，又不至于频繁打接口）
-const WEATHER_CARD_CHECK_MS = 250;           // 悬浮卡片"鼠标还在不在"的轮询间隔
-const WEATHER_CARD_AWAY_MS = 500;            // 鼠标离开 Dock 与卡片多久后收起
+const WEATHER_CARD_CHECK_MS = 50;            // 悬浮卡片"鼠标还在不在"的轮询间隔（要「移开就收」，50ms 内必须发现离开）
 const WEATHER_CARD_CLOSE_MS = 160;           // 卡片退场：weather.html 的 .closing 淡出 140ms ＋ 20ms 消息送达余量（AN-4）
 
 function weatherCity() {
@@ -1120,7 +1119,6 @@ function weatherCardGeometry(anchorCenterX, size) {
 function stopWeatherCardWatch() {
   if (weatherCardPollTimer) clearInterval(weatherCardPollTimer);
   weatherCardPollTimer = null;
-  weatherCardLeftAt = 0;
 }
 
 // 取消进行中的退场（重新悬停/窗口没了时用，AN-4）
@@ -1134,6 +1132,7 @@ function stopWeatherCardHide() {
 
 function hideWeatherCard() {
   weatherCardWanted = false;
+  weatherIconScreenX = null;
   stopWeatherCardWatch();
   const win = weatherCardWindow;
   if (!win || win.isDestroyed() || !win.isVisible()) {
@@ -1162,9 +1161,10 @@ function hideWeatherCard() {
   }, closeMs);
 }
 
-// 鼠标还在 Dock 附近或卡片上就留着，两边都离开了才收。
-// 这条轮询同时兜住"Dock 自动收起把卡片留在屏幕中间"的情况：Dock 一滑走，
-// 鼠标就不在它的矩形里了，卡片跟着收。
+// 鼠标必须停在「天气图标格子」或「卡片」上——离开就收，没有任何宽限（领导要求：一旦移开就消失）。
+// 图标→卡片的穿行不会踏空：卡片锚在图标中心、比格子宽得多（正常布局下横向包住图标格子），
+// 纵向两块在图标行上沿相接（卡片底边 16px 包络压进图标行区 22px），直线/斜线过去都落在其中一块里。
+// 这条轮询同时兜住「Dock 自动收起把卡片留在屏幕中间」：Dock 一滑走，鼠标不在这些矩形里，卡片跟着收。
 function startWeatherCardWatch() {
   if (weatherCardPollTimer) return;
   weatherCardPollTimer = setInterval(() => {
@@ -1174,25 +1174,25 @@ function startWeatherCardWatch() {
       return;
     }
     const point = screen.getCursorScreenPoint();
-    // 只认「图标行 + 16px」：窗口顶部那条放大余量空白带不算「Dock 附近」——鼠标穿行去卡片
-    // 由卡片自己的 16px 包络接住（卡片锚在图标行上沿，与图标只隔 10px，两块包络是接上的）；
-    // 停在空白带里超过 500ms 就收（那不是该停留的地方），底边缝也不再豁免
-    // （沿底边离开＝明确走人，与旧行为「离开图标即收」对齐）。
-    const row =
-      dockWindow && !dockWindow.isDestroyed()
-        ? dockmodel.dockContentBounds(dockWindow.getBounds(), settings.dock_icon_size, settings.dock_magnify)
-        : null;
-    const onDock = Boolean(row) && dockmodel.pointNearBounds(point, row, 16);
+    // 图标格子：中心 x 由 showWeatherCard 记下；纵向用剪掉放大余量带后的图标行范围
+    let onIcon = false;
+    if (weatherIconScreenX !== null && dockWindow && !dockWindow.isDestroyed()) {
+      const row = dockmodel.dockContentBounds(
+        dockWindow.getBounds(),
+        settings.dock_icon_size,
+        settings.dock_magnify
+      );
+      const cell = {
+        x: weatherIconScreenX - settings.dock_icon_size / 2,
+        y: row.y,
+        width: settings.dock_icon_size,
+        height: row.height
+      };
+      onIcon = dockmodel.pointNearBounds(point, cell, 16);
+    }
     const onCard = dockmodel.pointNearBounds(point, win.getBounds(), 16);
-    if (onDock || onCard) {
-      weatherCardLeftAt = 0;
-      return;
-    }
-    if (!weatherCardLeftAt) {
-      weatherCardLeftAt = Date.now();
-      return;
-    }
-    if (Date.now() - weatherCardLeftAt >= WEATHER_CARD_AWAY_MS) hideWeatherCard();
+    if (onIcon || onCard) return;
+    hideWeatherCard();   // 一离开就收：50ms 轮询发现 ＋ 160ms 淡出 ≈ 210ms 内消失
   }, WEATHER_CARD_CHECK_MS);
 }
 
@@ -1234,6 +1234,10 @@ function showWeatherCard(anchorCenterX) {
   const spot = weatherCardGeometry(Number(anchorCenterX) || 0, size);
   if (!spot) return false;
   weatherCardWanted = true;
+  // 记下图标中心的屏幕 x：离开判定只认这个格子（图标宽 ±16 呼吸）与卡片两块，一移开就收
+  weatherIconScreenX =
+    (dockWindow && !dockWindow.isDestroyed() ? dockWindow.getBounds().x : spot.x) +
+    (Number(anchorCenterX) || 0);
   stopWeatherCardHide();   // 正在退场又被悬停上：取消退场，别让旧定时器把窗口藏掉（AN-4）
   const win = ensureWeatherCardWindow(size);
   win.setBounds(spot);
