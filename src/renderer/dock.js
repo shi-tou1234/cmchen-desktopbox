@@ -1,7 +1,7 @@
 'use strict';
 
 // Dock 页面：条目渲染 + Nexus 式悬停放大 + 点击弹跳/回弹 + 拖拽排序 + 拖入落筐 + FLIP 进出场。
-// 动画全部由一个会自己停歇的逐帧循环（tick）驱动：静止且鼠标不在 Dock 上就停，省得占着合成器。
+// 动画全部由一个会自己停歇的逐帧循环（tick）驱动：全部静止就停（mousemove 会用 ensureTick 唤醒），省得占着合成器。
 
 const api = window.deskbasket;
 const dockEl = document.getElementById('dock');
@@ -52,6 +52,15 @@ function fallbackIcon() {
 
 let iconSize = 48;
 let reduceMotion = false;   // 减弱动画开关（#7）：来自设置 reduce_motion
+// 减弱动效的二合一判定：设置开关与系统级「减少动效」偏好取或，任一命中就不播装饰动画。
+//（CSS 侧同理：dock.html 里 @media (prefers-reduced-motion: reduce) 和 body.reduce-motion 各管各的入口）
+const systemReduceMotion =
+  typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-reduced-motion: reduce)')
+    : null;
+function motionOff() {
+  return reduceMotion || Boolean(systemReduceMotion && systemReduceMotion.matches);
+}
 let entries = [];       // { type:'special', id, name } | { type:'weather', id, name } | { type:'basket', id, name, color } | { type:'shortcut', path }
 let nodes = [];         // 与 entries 对齐的动画节点
 // 天气快照（主进程每 15 分钟刷一次）：天气条目的图标与那行气温都读它
@@ -154,15 +163,16 @@ function makeNode(entry) {
   // 不画悬停名称气泡（领导要求）：视觉名称只留给无障碍用
   item.setAttribute('aria-label', entry.type === 'weather' ? '天气' : displayName(entry));
 
-  // 天气：鼠标靠近就在图标上方浮出未来几天的预报卡片，离开就收。
+  // 天气：鼠标靠近就在图标上方浮出未来几天的预报卡片。
   // （卡片由主进程单独开一个小窗——Dock 只有一条窄带，装不下预报。
   //   图标放大是以底边中心为原点的，中心横坐标不变，所以不用跟着重算锚点。）
+  // 这里**不**监听 pointerleave 立刻收卡：鼠标从图标挪到卡片上必然先离开图标，
+  // 立刻收就永远看不成卡片；收卡由主进程的轮询接管（鼠标离开 Dock 与卡片 500ms 才收）。
   if (entry.type === 'weather') {
     item.addEventListener('pointerenter', () => {
       const rect = item.getBoundingClientRect();
       api.showWeatherCard(rect.left + rect.width / 2);
     });
-    item.addEventListener('pointerleave', () => api.hideWeatherCard());
   }
 
   // 按下压一下、松手弹回来（弹簧在 tick 里积分），点开时再向上跳一下
@@ -180,7 +190,7 @@ function makeNode(entry) {
   item.addEventListener('dragstart', releasePress);
 
   item.addEventListener('click', () => {
-    if (!reduceMotion) {
+    if (!motionOff()) {
       node.hopAt = performance.now();
       ensureTick();
     }
@@ -348,10 +358,44 @@ function shortcutIndexOf(entry) {
   return -1;
 }
 
+// 量条目在布局里的本征位置。tick 每帧都往 el 上写内联 transform（悬停放大/弹跳会把矩形抬高），
+// 直接 getBoundingClientRect 量到的是被抬过的矩形——拿它当 FLIP 基线，新节点会从错误的
+// 放大位滑回来、肉眼可见抖一下。所以量之前临时清掉 inline transform、量完立刻恢复：
+// 整段同步执行，两次绘制之间浏览器没有机会重排上屏，不会闪。
+function layoutRect(el) {
+  const saved = el.style.transform;
+  el.style.transform = '';
+  const rect = el.getBoundingClientRect();
+  el.style.transform = saved;
+  return rect;
+}
+
 function render() {
   document.documentElement.style.setProperty('--icon', iconSize + 'px');
-  // 空 Dock：一条都没有时显示一行拖拽提示（#4）
+  // 空 Dock：一条都没有时显示一行拖拽提示（#4）。
+  // 条目不是"啪"一下全灭：先把现有条目克隆成离场幽灵播缩小淡出（与下面认领分支同一套做法），
+  // 幽灵挂在 document.body 上，随后清空 dockEl 不影响它。
   if (!entries.length) {
+    for (const node of nodes) {
+      const ghost = node.el.cloneNode(true);
+      ghost.classList.add('leaving');
+      ghost.classList.remove('dragging');
+      // 清掉动画帧留下的内联 transform/opacity，否则它们会盖住 .leaving 的缩小淡出
+      ghost.style.transform = '';
+      ghost.style.opacity = '';
+      const rect = layoutRect(node.el);   // 量本征位置（元素还挂在 DOM 上，清空前先量）
+      ghost.style.left = rect.left + 'px';
+      ghost.style.top = rect.top + 'px';
+      ghost.style.width = rect.width + 'px';
+      ghost.style.height = rect.height + 'px';
+      document.body.append(ghost);
+      if (motionOff()) {
+        ghost.remove();
+        continue;
+      }
+      requestAnimationFrame(() => ghost.classList.add('gone'));
+      setTimeout(() => ghost.remove(), 260);
+    }
     dockEl.innerHTML = '';
     nodes = [];
     const hint = document.createElement('div');
@@ -365,7 +409,7 @@ function render() {
   // 新来的淡入放大、走掉的缩小淡出、留下的按位移滑过去（拖拽排序也吃这套）
   const before = new Map();
   for (const node of nodes) {
-    before.set(node.key, { el: node.el, rect: node.el.getBoundingClientRect() });
+    before.set(node.key, { el: node.el, rect: layoutRect(node.el) });
   }
 
   dockEl.innerHTML = '';
@@ -380,13 +424,14 @@ function render() {
   nodes.forEach((node, index) => {
     const old = before.get(node.key);
     if (old) {
+      before.delete(node.key);
+      if (motionOff()) return;   // 减弱动画：直接落位，不播 FLIP 滑动
       const rect = node.el.getBoundingClientRect();
       node.dx = old.rect.left - rect.left;
       node.dy = old.rect.top - rect.top;
-      before.delete(node.key);
       return;
     }
-    if (reduceMotion) return;   // 减弱动画：新条目直接到位，不播进场
+    if (motionOff()) return;   // 减弱动画：新条目直接到位，不播进场
     // 新条目：从小、淡 → 正常。首次铺满时按顺序错开一点，像依次落位
     node.enter = 1;
     node.enterAt = performance.now() + (firstPaint ? index * 26 : 0);
@@ -405,7 +450,7 @@ function render() {
     ghost.style.width = old.rect.width + 'px';
     ghost.style.height = old.rect.height + 'px';
     document.body.append(ghost);
-    if (reduceMotion) {
+    if (motionOff()) {
       ghost.remove();
       continue;
     }
@@ -479,7 +524,7 @@ function applyRuntimeFlags(state) {
 const BOOST_LIFT = 10;     // 中心最大上浮 10px
 const RANGE_X = 2.2;       // x 影响半径 = 图标尺寸 × 2.2
 const RANGE_Y = 1.1;       // y 影响半径 = 图标尺寸 × 1.1
-const EASE = 0.25;         // 每帧缓动系数
+const EASE = 0.25;         // 60Hz 一帧的缓动系数（tick 里按帧间隔归一，时长与帧率无关）
 
 let boostScale = 0.5;      // 中心最大放大比例，由设置 dock_magnify 决定（50 = 放大 50%）
 
@@ -506,14 +551,25 @@ function cosineFalloff(distance, range) {
 const PRESS_SCALE = 0.16;   // 按住时压到 84%
 const HOP_LIFT = 22;        // 点开时向上跳 22px
 const HOP_SCALE = 0.10;     // 同时放大 10%
-const HOP_MS = 420;         // 一次弹跳的时长
-const ENTER_DECAY = 0.84;   // 进场每帧衰减：约 180ms 落位
-const SLIDE_DECAY = 0.80;   // 位移每帧衰减：约 200ms 滑到位
+const HOP_MS = 420;         // 一次弹跳的时长（按 performance.now 走，本来就与帧率无关）
+const ENTER_DECAY = 0.84;   // 进场衰减：60Hz 下每 16.67ms 剩 84%，降到 1% 约 26 帧 ≈ 440ms（下面按帧间隔归一）
+const SLIDE_DECAY = 0.80;   // 位移衰减：60Hz 下每 16.67ms 剩 80%，降到 1% 约 21 帧 ≈ 340ms（下面按帧间隔归一）
 
+const FRAME_REF_MS = 1000 / 60;   // 归一化基准：60Hz 的一帧
+let lastFrameAt = 0;              // 上一帧时间戳（停转时清 0，下次唤醒从基准帧起步）
 let ticking = false;        // 动画循环是否在跑（静止时会停掉，见 tick 末尾）
 
 function tick() {
   const now = performance.now();
+  // 帧间隔归一化：所有逐帧系数都是"60Hz 一帧"的值，这里按实际 dt 折算——
+  // 120Hz 只走半步（不会速度翻倍）、掉帧多走几步（不会被拖慢）。
+  // dt 夹在 [1, 50]ms：后台标签页被挂起再醒来会攒出一个巨大的间隔，不掐断会把动画一口气跳完。
+  const rawDt = lastFrameAt ? now - lastFrameAt : FRAME_REF_MS;
+  lastFrameAt = now;
+  const step = Math.min(Math.max(rawDt, 1), 50) / FRAME_REF_MS;
+  const easeNow = 1 - Math.pow(1 - EASE, step);   // 悬停缓动：剩余差距每步留 (1-EASE)^step
+  const pressDamp = Math.pow(0.62, step);         // 弹簧阻尼：0.62 是 60Hz 一帧的衰减
+  const slideK = Math.pow(SLIDE_DECAY, step);     // 位移衰减
   let busy = false;
   for (const node of nodes) {
     // 悬停联动
@@ -523,16 +579,23 @@ function tick() {
       const dy = Math.abs(pointer.y - node.centerY);
       target = cosineFalloff(dx, iconSize * RANGE_X) * cosineFalloff(dy, iconSize * RANGE_Y);
     }
-    node.influence += (target - node.influence) * EASE;
+    node.influence += (target - node.influence) * easeNow;
     if (Math.abs(target - node.influence) < 0.002) node.influence = target;
 
-    // 按下回弹：欠阻尼弹簧，松手会自己过冲一下，看着是"弹"回来的
+    // 按下回弹：欠阻尼弹簧，松手会自己过冲一下，看着是"弹"回来的。
+    // 系数按 step 缩放（step=1 时与原式逐位相同）。减弱动效：弹簧不播——
+    // 直接贴到目标值，按下不过冲、松手不回弹。
     const pressTarget = node.pressTarget;
-    node.pressV = (node.pressV + (pressTarget - node.press) * 0.35) * 0.62;
-    node.press += node.pressV;
-    if (Math.abs(pressTarget - node.press) < 0.002 && Math.abs(node.pressV) < 0.002) {
+    if (motionOff()) {
       node.press = pressTarget;
       node.pressV = 0;
+    } else {
+      node.pressV = (node.pressV + (pressTarget - node.press) * 0.35 * step) * pressDamp;
+      node.press += node.pressV * step;
+      if (Math.abs(pressTarget - node.press) < 0.002 && Math.abs(node.pressV) < 0.002) {
+        node.press = pressTarget;
+        node.pressV = 0;
+      }
     }
 
     // 点开时的一次弹跳（半个正弦波）
@@ -545,13 +608,13 @@ function tick() {
 
     // 新条目进场
     if (node.enter && now >= node.enterAt) {
-      node.enter *= ENTER_DECAY;
+      node.enter *= Math.pow(ENTER_DECAY, step);
       if (node.enter < 0.01) node.enter = 0;
     }
 
     // 位移缓动回 0
-    node.dx = Math.abs(node.dx) < 0.4 ? 0 : node.dx * SLIDE_DECAY;
-    node.dy = Math.abs(node.dy) < 0.4 ? 0 : node.dy * SLIDE_DECAY;
+    node.dx = Math.abs(node.dx) < 0.4 ? 0 : node.dx * slideK;
+    node.dy = Math.abs(node.dy) < 0.4 ? 0 : node.dy * slideK;
 
     const resting =
       !node.influence && !node.press && !hop && !node.enter && !node.dx && !node.dy;
@@ -570,12 +633,13 @@ function tick() {
       `translate(${node.dx.toFixed(2)}px, ${(-lift + node.dy).toFixed(2)}px) scale(${scale.toFixed(3)})`;
     node.el.style.opacity = node.enter ? (1 - 0.8 * node.enter).toFixed(3) : '';
   }
-  // 全部静止且鼠标不在 Dock 上就停掉循环，等下次交互再唤醒。
+  // 全部静止就停掉循环（mousemove 会调 ensureTick 唤醒，见上面的监听）。
   // 常驻 60fps 空转会把合成器一直占着，别的动画（弹窗、菜单）容易被挤得一顿一顿。
-  if (busy || pointer) {
+  if (busy) {
     requestAnimationFrame(tick);
   } else {
     ticking = false;
+    lastFrameAt = 0;   // 停转的时间不算进下一次唤醒的第一步
   }
 }
 
@@ -638,7 +702,7 @@ document.addEventListener('drop', async (event) => {
   const result = await api.addPathsToBasket(basket.entry.id, paths);
   if (!result) return;
   flashCaption(basket, '＋' + result.added);
-  if (!reduceMotion) {
+  if (!motionOff()) {
     basket.hopAt = performance.now();
     ensureTick();
   }

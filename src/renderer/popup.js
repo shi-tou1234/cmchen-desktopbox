@@ -9,6 +9,8 @@ let iconSize = 48;
 let selection = new Set();   // 选中的条目路径（筐视图支持多选：Ctrl 点选、Shift 连选、Ctrl+A 全选）
 let anchorIndex = -1;        // Shift 连选的起点
 let staggerNext = false;   // 下一次 render 要不要给格子做交错进场（只有"打开"那一次要）
+let staggerTimer = 0;      // 摘 .stagger 的兜底定时器：等不到格子 animationend 时靠它（U-4）
+let focusIndex = -1;       // 键盘光标停在哪个格子（roving tabindex：只有它进 Tab 序列，方向键在它之间挪）
 
 function currentEntries() {
   return (view && view.entries) || [];
@@ -16,8 +18,22 @@ function currentEntries() {
 
 function applySelection() {
   for (const node of el('grid').children) {
-    node.classList.toggle('selected', selection.has(node.dataset.path));
+    const on = selection.has(node.dataset.path);
+    node.classList.toggle('selected', on);
+    node.setAttribute('aria-selected', on ? 'true' : 'false');   // listbox 的 option 要如实上报选中态（U-2）
   }
+}
+
+// roving tabindex（U-2）：整片网格只有一个格子在 Tab 序列里——键盘光标停的那个，
+// 其余一律 -1。光标没设过或越界（重绘后条目变少）就落回第一个。
+function applyRoving() {
+  const cells = el('grid').children;
+  if (!cells.length) {
+    focusIndex = -1;
+    return;
+  }
+  if (focusIndex < 0 || focusIndex >= cells.length) focusIndex = 0;
+  for (let i = 0; i < cells.length; i += 1) cells[i].tabIndex = i === focusIndex ? 0 : -1;
 }
 
 function selectSingle(entry, index) {
@@ -44,6 +60,28 @@ function selectedEntries() {
   return currentEntries().filter((entry) => selection.has(entry.path));
 }
 
+// 键盘光标挪到 index：光标、选区（复用 selectSingle 的高亮）、真实焦点三者一次同步（U-2）
+function moveCursor(index) {
+  const entries = currentEntries();
+  if (!entries.length) return;
+  const next = Math.max(0, Math.min(entries.length - 1, index));
+  focusIndex = next;
+  applyRoving();
+  selectSingle(entries[next], next);
+  const cell = el('grid').children[next];
+  if (cell) cell.focus();
+}
+
+// 格子按行排布、同一行 offsetTop 相同：数第一行有几个就是列数（↑↓ 一次跳一行，←→ 一格一格走）
+function columnCount() {
+  const cells = el('grid').children;
+  if (cells.length < 2) return 1;
+  const top = cells[0].offsetTop;
+  let n = 1;
+  while (n < cells.length && cells[n].offsetTop === top) n += 1;
+  return n;
+}
+
 function isDirEntry(entry) {
   return Boolean(entry && entry.isDir);
 }
@@ -68,6 +106,8 @@ function fallbackIcon() {
 function makeCell(entry, index) {
   const cell = document.createElement('div');
   cell.className = 'cell';
+  cell.setAttribute('role', 'option');   // 容器 #grid 是 role="listbox"（U-2）
+  cell.tabIndex = -1;                    // 基准值：render 收尾的 applyRoving 把键盘光标那格改成 0
   cell.dataset.path = entry.path;
   cell.dataset.index = String(index);
   cell.title = entry.path;
@@ -114,16 +154,12 @@ function makeCell(entry, index) {
     if (event.ctrlKey || event.metaKey) toggleSelect(entry, index);
     else if (event.shiftKey && anchorIndex >= 0) selectRange(anchorIndex, index);
     else selectSingle(entry, index);
+    // 鼠标点哪格，键盘光标跟到哪：Tab / 方向键从这一格接着走（U-2）
+    focusIndex = index;
+    applyRoving();
   });
 
-  cell.addEventListener('dblclick', async () => {
-    if (isDirEntry(entry)) {
-      navigate(entry.path, 'forward');   // 进下一级：新页从右边推进来
-    } else {
-      const result = await api.openPath(entry.path);
-      if (result && result.ok === false) setStatus('打不开：' + entry.name, true);
-    }
-  });
+  cell.addEventListener('dblclick', () => openEntry(entry));
 
   cell.addEventListener('contextmenu', (event) => {
     event.preventDefault();
@@ -162,6 +198,16 @@ function makeCell(entry, index) {
   });
 
   return cell;
+}
+
+// 打开一条（双击与回车共用这一条路径，U-2）：文件夹往里走一级（翻页动画），文件交给系统打开
+async function openEntry(entry) {
+  if (isDirEntry(entry)) {
+    navigate(entry.path, 'forward');   // 进下一级：新页从右边推进来
+  } else {
+    const result = await api.openPath(entry.path);
+    if (result && result.ok === false) setStatus('打不开：' + entry.name, true);
+  }
 }
 
 function setStatus(text, isError = false) {
@@ -319,7 +365,9 @@ setInterval(async () => {
     const fresh = await api.basketGet(view.basketId);
     if (!fresh) return;
     const paths = (a) => JSON.stringify((a.entries || []).map((entry) => entry.path));
-    if (paths(view) !== paths(fresh)) {
+    // 比对里加上 name：别处（设置面板）改了筐名，2 秒内标题与「⌂ 筐名」跟着刷新（C-1）。
+    // 仍在原来这一次请求里比，不新增轮询，叠不出请求循环。
+    if (fresh.name !== view.name || paths(view) !== paths(fresh)) {
       view = fresh;
       homeView = fresh;
       render();
@@ -348,6 +396,12 @@ function render(navDirection) {
   document.title = 'DeskBasket · ' + title;
 
   const grid = el('grid');
+  // 上一轮的交错先摘干净再重建（U-4）：空筐 0 格等不到 animationend，交错播完前重绘
+  // 也会把挂着 listener 的最后一个格子换掉——不摘的话 .stagger 永驻，本次打开内每次
+  // 重绘（加文件/改名/2s 轮询/翻目录）都会永久重播整屏交错进场。
+  clearTimeout(staggerTimer);
+  staggerTimer = 0;
+  grid.classList.remove('stagger');
   grid.innerHTML = '';
 
   const entries = view.entries || [];
@@ -366,6 +420,12 @@ function render(navDirection) {
       if (last) last.removeEventListener('animationend', stop);
     };
     if (last) last.addEventListener('animationend', stop);
+    // 兜底摘除：0 格时没有 last、重绘也会把 last 换掉，等不到 animationend 就靠这个。
+    // 覆盖最长延迟（上限 20 × 16ms = 320ms）+ 时长（200ms）= 520ms，再多留点掉帧余量。
+    staggerTimer = setTimeout(() => {
+      grid.classList.remove('stagger');
+      staggerTimer = 0;
+    }, 600);
   } else if (navDirection) {
     // 方向性翻页（#5）：进下一级从左/回上级从右，配合下面的 playNav
     playNav(navDirection);
@@ -390,6 +450,7 @@ function render(navDirection) {
       : '这个文件夹是空的';
   setStatus(entries.length ? entries.length + ' 项' : '');
   applySelection();
+  applyRoving();   // 格子刚重建完：把 roving tabindex 重新落到键盘光标那一格上（U-2）
 }
 
 // ---------------------------------------------------------------- 导航
@@ -428,6 +489,12 @@ el('btnAdd').addEventListener('click', async () => {
   if (!view || view.kind !== 'basket') return;
   const result = await api.pickBasketFiles(view.basketId, 'files');
   if (!result) return;
+  // 文件对话框里点了「取消」（主进程返回 canceled:true，形状其余不变）：没东西要刷，提一句就行（C-2）。
+  // 主进程还没带上 canceled 时这个分支自然不触发，落到下面的「没有新增」，属正常降级。
+  if (result.canceled) {
+    setStatus('已取消添加');
+    return;
+  }
   if (!result.added && !(result.failed || []).length) {
     setStatus('没有新增（已在这个筐里的会跳过）');
     return;
@@ -443,6 +510,42 @@ document.addEventListener('keydown', (event) => {
   }
   // 正在改名时事件不往下走（startRename 里已经 stopPropagation，这里是双保险）
   if (event.target && event.target.tagName === 'INPUT') return;
+
+  // 方向键 / Home / End 移动选区、Enter 打开（listbox 的键盘语义，U-2）。
+  // 放在「只认筐视图」的早退之前：文件夹视图同样要能键盘走进子目录。
+  if (
+    event.key === 'ArrowLeft' || event.key === 'ArrowRight' ||
+    event.key === 'ArrowUp' || event.key === 'ArrowDown' ||
+    event.key === 'Home' || event.key === 'End'
+  ) {
+    const entries = currentEntries();
+    if (!entries.length) return;
+    event.preventDefault();
+    const cols = columnCount();          // ↑↓ 一次跳一行，←→ 一格一格走
+    const cursor = focusIndex < 0 ? 0 : focusIndex;
+    let next = cursor;
+    if (event.key === 'ArrowLeft') next = cursor - 1;
+    else if (event.key === 'ArrowRight') next = cursor + 1;
+    else if (event.key === 'ArrowUp') next = cursor - cols;
+    else if (event.key === 'ArrowDown') next = cursor + cols;
+    else if (event.key === 'Home') next = 0;
+    else next = entries.length - 1;      // End
+    moveCursor(next);                    // 越界在 moveCursor 里统一钳到 [0, len-1]
+    return;
+  }
+  if (event.key === 'Enter') {
+    // 焦点停在头部按钮上时交给按钮自己原生激活，别再叠一次「打开」
+    if (event.target && event.target.tagName === 'BUTTON') return;
+    const entries = currentEntries();
+    if (!entries.length) return;
+    event.preventDefault();
+    // 单选开选中那个；多选（或还没选）开键盘光标停着的那格——都是双击走的那条路径
+    const picked = selectedEntries();
+    const target = picked.length === 1 ? picked[0] : entries[focusIndex < 0 ? 0 : focusIndex];
+    if (target) openEntry(target);
+    return;
+  }
+
   if (!view || view.kind !== 'basket') return;
   const mod = event.ctrlKey || event.metaKey;
   if (mod && (event.key === 'c' || event.key === 'C')) {

@@ -42,6 +42,10 @@ const MARKER = 'DESKBASKET_ICON ';
 const CHUNK = 76;           // 每行 base64 的宽度，防宿主对长行折行
 const ICON_PX = 128;        // 抽出图标后缩到的边长（够 Dock 悬停放大用）
 const BATCH_SIZE = 64;      // 一个 PowerShell 进程最多处理多少条（一次覆盖整个 Dock，省一次编译开销）
+const PS_CONCURRENCY = 3;   // 批与批之间最多几个 PowerShell 并行（批间无共享状态，见 runBatch）
+const MEMORY_CACHE_MAX = 500;   // 内存图标缓存条数上限，超出按 LRU 淘汰最老的
+const DISK_SWEEP_EVERY = 50;    // 每写这么多次磁盘缓存，后台扫一次（清超龄死条目）
+const DISK_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;  // 磁盘缓存文件超过 30 天即删
 const DEBOUNCE_MS = 30;     // 攒一小会儿再起进程，把同一批请求合成一次调用
 const TIMEOUT_MS = 30000;
 const CACHE_DIR_NAME = 'icon-cache';
@@ -536,6 +540,19 @@ function runPowerShell(requests, px) {
 const memory = new Map();   // `${request}|${signature}|${px}` -> dataURL
 const pending = new Map();  // 同上 key -> { request, signature, px, resolvers }
 let flushTimer = null;
+let diskWriteCount = 0;     // 距上次后台清扫又写了多少次磁盘缓存
+let sweepTimer = null;      // 清扫定时器：同一时刻只挂一个，防止重复排队
+
+// 写内存缓存：Map 的插入序当 LRU 用——已有的键先删再插（刷成最新），
+// 超过上限就删最老的键。签名含 mtime+size，源文件一改旧键就成死条目，
+// 不淘汰会无限堆积（图标请求是热路径，读命中不回写，仅 set 时维护序）。
+function memorySet(key, value) {
+  memory.delete(key);
+  memory.set(key, value);
+  while (memory.size > MEMORY_CACHE_MAX) {
+    memory.delete(memory.keys().next().value);
+  }
+}
 
 function cacheDir() {
   return path.join(store.settingsDir(), CACHE_DIR_NAME);
@@ -581,9 +598,78 @@ function writeDisk(key, base64) {
   } catch (_) {
     /* 缓存写不进去不影响功能 */
   }
+  // 低频清扫：写满 DISK_SWEEP_EVERY 次才排队一次后台扫。
+  // 清扫绝不在这条热路径上同步做——只挂个定时器，等当前同步流程让出后在队列里跑。
+  diskWriteCount += 1;
+  if (diskWriteCount >= DISK_SWEEP_EVERY) {
+    diskWriteCount = 0;
+    scheduleSweep();
+  }
 }
 
-// 一次 flush：把攒下的请求按 px 分组、按批切块，每块起一个 PowerShell
+// 排一次磁盘缓存清扫（同一时刻最多一个在排队）
+function scheduleSweep() {
+  if (sweepTimer) return;
+  sweepTimer = setTimeout(() => {
+    sweepTimer = null;
+    try {
+      sweepDiskCache();
+    } catch (_) {
+      /* 整轮清扫失败也不影响功能，下轮再试 */
+    }
+  }, 0);
+}
+
+// 清掉磁盘缓存里超龄的死条目（签名含 mtime+size，源文件一改旧 .png 永远残留）。
+// 先 readdir 摸清目录（目录还没建出来/列目录失败就当作没什么可清的），
+// 只删 icon-cache 目录内的 *.png，且 mtime 超过 30 天才删；单个文件出错跳过。
+function sweepDiskCache() {
+  const dir = cacheDir();
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch (_) {
+    return;
+  }
+  const cutoff = Date.now() - DISK_CACHE_MAX_AGE_MS;
+  for (const name of names) {
+    if (!name.endsWith('.png')) continue;
+    const file = path.join(dir, name);
+    try {
+      const stat = fs.statSync(file);
+      if (stat.isFile() && stat.mtimeMs < cutoff) fs.unlinkSync(file);
+    } catch (_) {
+      /* 单个文件读/删失败（被占用等）：跳过，下轮再试 */
+    }
+  }
+}
+
+// 单批：起一个 PowerShell，把结果回填给这一批的等待者。
+// 批与批之间没有共享可变状态——runPowerShell 各自 spawn 各自的子进程、env 是新对象，
+// pending 在 flush 开头就已清空且每条 entry 只属于一个 chunk，回填写的 key 互不重叠，
+// 因此每条 key 只被回填一次（幂等），一批失败/超时只让该批回空串，不牵连其它批。
+async function runBatch(px, chunk) {
+  let icons = new Map();
+  try {
+    const result = await runPowerShell(chunk.map((entry) => entry.request), px);
+    icons = result.icons;
+  } catch (_) {
+    icons = new Map();   // 这批失败：这批全回空串（上层退回通用图标），错误照旧被兜底
+  }
+  for (const entry of chunk) {
+    const base64 = icons.get(entry.request) || '';
+    const dataUrl = base64 ? `data:image/png;base64,${base64}` : '';
+    if (base64) writeDisk(entry.key, base64);
+    memorySet(entry.key, dataUrl);
+    for (const resolve of entry.resolvers) resolve(dataUrl);
+  }
+}
+
+// 一次 flush：把攒下的请求按 px 分组、按批切块，批与批之间受控并发——
+// 一次最多 PS_CONCURRENCY(3) 个 PowerShell 并行。串行跑的话，超过 BATCH_SIZE 的部分
+// 每一批都要重付一遍 PowerShell 启动 + Add-Type 编译开销；并发取 3 是因为批间已确认
+// 无共享状态（见 runBatch），而每个子进程都要各自编译 C# 并在内存里持一份图标位图，
+// 开太高只会互相抢 CPU/内存、收益递减。批内 64 条的切法不变。
 async function flushPending() {
   const entries = [...pending.values()];
   pending.clear();
@@ -593,22 +679,14 @@ async function flushPending() {
     groups.get(entry.px).push(entry);
   }
   for (const [px, group] of groups) {
+    const chunks = [];
     for (let start = 0; start < group.length; start += BATCH_SIZE) {
-      const chunk = group.slice(start, start + BATCH_SIZE);
-      let icons = new Map();
-      try {
-        const result = await runPowerShell(chunk.map((entry) => entry.request), px);
-        icons = result.icons;
-      } catch (_) {
-        icons = new Map();
-      }
-      for (const entry of chunk) {
-        const base64 = icons.get(entry.request) || '';
-        const dataUrl = base64 ? `data:image/png;base64,${base64}` : '';
-        if (base64) writeDisk(entry.key, base64);
-        memory.set(entry.key, dataUrl);
-        for (const resolve of entry.resolvers) resolve(dataUrl);
-      }
+      chunks.push(group.slice(start, start + BATCH_SIZE));
+    }
+    for (let i = 0; i < chunks.length; i += PS_CONCURRENCY) {
+      await Promise.all(
+        chunks.slice(i, i + PS_CONCURRENCY).map((chunk) => runBatch(px, chunk))
+      );
     }
   }
 }
@@ -629,7 +707,7 @@ function requestIcon(request, px = ICON_PX) {
   if (memory.has(key)) return Promise.resolve(memory.get(key));
   const cached = readDisk(key);
   if (cached) {
-    memory.set(key, cached);
+    memorySet(key, cached);
     return Promise.resolve(cached);
   }
   return new Promise((resolve) => {

@@ -29,6 +29,14 @@ const SPECIAL_ORDER = [
 
 const el = (id) => document.getElementById(id);
 
+// 正在输入的框不被 render 回写：state:changed 由**任何**窗口触发都会走到这里，
+// 用户还打到一半时把值刷回存储值会直接丢输入（城市 / 收录来源目录 / 筐的文件目录三个文本框）
+function setUnfocused(id, value) {
+  const input = el(id);
+  if (document.activeElement === input) return;   // 焦点在它自己身上：保持用户输入
+  input.value = value;
+}
+
 function flash(text) {
   el('hint').textContent = text;
 }
@@ -69,11 +77,16 @@ function renderBaskets() {
 
 // 桌面条目的勾选清单：一次能勾一堆，不用反复开文件对话框。
 // 图标走 api.getIcon（与 Dock / 弹窗同一条链路：.lnk 由 shell 给不带小箭头的原图）。
+// 「数据变了才重建」：快照没变就不动 DOM——正在勾的复选框不会被别的窗口触发的 render 刷掉焦点。
+let lastBasketKey = null;
 async function renderBasketCandidates() {
   const host = el('basketCandidateList');
-  host.innerHTML = '';
   if (!selectedBasketId) {
-    host.textContent = '先在上面选一个文件夹';
+    if (lastBasketKey !== 'none') {
+      lastBasketKey = 'none';
+      host.innerHTML = '';
+      host.textContent = '先在上面选一个文件夹';
+    }
     return;
   }
   let rows = [];
@@ -82,6 +95,11 @@ async function renderBasketCandidates() {
   } catch (_) {
     rows = [];
   }
+  // 快照带上筐 id：换了筐即使行数据碰巧一样也要重画
+  const key = selectedBasketId + ' ' + JSON.stringify(rows);
+  if (key === lastBasketKey) return;   // 数据没变：清单保持原样（焦点、滚动都还在）
+  lastBasketKey = key;
+  host.innerHTML = '';
   if (!rows.length) {
     host.textContent = '来源目录里没有条目';
     return;
@@ -137,8 +155,8 @@ function render() {
   el('dockIconSize').value = settings.dock_icon_size;
   el('dockMagnify').value = settings.dock_magnify;
   el('dockBottomGap').value = settings.dock_bottom_gap;
-  el('sourceDir').value = settings.shortcuts_dir || '';
-  el('basketDir').value = settings.basket_dir || '';
+  setUnfocused('sourceDir', settings.shortcuts_dir || '');
+  setUnfocused('basketDir', settings.basket_dir || '');
   el('dockCount').textContent =
     'Dock 现有 ' + settings.dock_items.length + ' 个快捷方式 ＋ ' +
     (settings.dock_specials || []).length + ' 个系统图标（开始菜单/此电脑/回收站/天气）＋ ' +
@@ -152,6 +170,9 @@ function render() {
   renderBaskets();
   renderShortcuts();
   loading = false;
+  // 托盘菜单改「开机自启动」后 persist 也会广播 state:changed：并进这条 render 路径顺带刷新
+  // 自启状态（fire-and-forget，初始化同样经 render()，不用再单独调一次）
+  refreshAutostart();
 }
 
 // Dock 上的系统图标（此电脑 / 回收站 / 天气）：勾上就摆到 Dock 上，取消就撤下来
@@ -166,7 +187,7 @@ function specialsFromBoxes() {
 
 // 天气那一块：城市输入框 ＋ 一行状态（解析到的城市、现在几度、什么时候更新的）
 function renderWeather() {
-  el('weatherCity').value = settings.weather_city || '';
+  setUnfocused('weatherCity', settings.weather_city || '');
   const state = weatherState;
   let text;
   if (!state || !state.current) {
@@ -223,6 +244,8 @@ function renderDockDisplay() {
 
 // 快捷方式候选清单：桌面上可收录的条目，勾选＝加入 Dock、取消＝移除。
 // 图标走 api.getIcon（和 Dock 同一条链路：.lnk 由 shell 给原图，不带 Windows 小箭头）。
+// 与筐候选清单同理：快照（行数据＋别名）没变就不重建 DOM，保住正在勾的复选框的焦点。
+let lastShortcutKey = null;
 async function renderShortcuts() {
   const host = el('shortcutList');
   let rows = [];
@@ -231,6 +254,10 @@ async function renderShortcuts() {
   } catch (_) {
     rows = [];
   }
+  // 行里没有别名，改名后行数据不变但显示名要变——所以把 dock_aliases 也编进快照
+  const key = JSON.stringify(rows) + ' ' + JSON.stringify(settings.dock_aliases || {});
+  if (key === lastShortcutKey) return;   // 数据没变：清单保持原样（焦点、滚动都还在）
+  lastShortcutKey = key;
   host.innerHTML = '';
   if (!rows.length) {
     host.textContent = '来源目录里没有可收录的 .lnk / .url / .exe';
@@ -340,8 +367,10 @@ for (const [, boxId] of SPECIAL_ORDER) {
 }
 
 // 天气城市：回车/失焦时提交；主进程收到就重新地理编码并立刻取一次天气
-el('weatherCity').addEventListener('change', (event) => {
-  push({ weather_city: String(event.target.value || '').trim() }, '城市已更新，正在取天气…');
+el('weatherCity').addEventListener('change', async (event) => {
+  await push({ weather_city: String(event.target.value || '').trim() }, '城市已更新，正在取天气…');
+  // 自己这次提交的回写要立刻看得见：render 里 setUnfocused 会跳过仍持有焦点的本框（去空格等归一化结果）
+  el('weatherCity').value = settings.weather_city || '';
 });
 el('btnWeatherRefresh').addEventListener('click', async () => {
   weatherState = await api.refreshWeather();
@@ -350,9 +379,12 @@ el('btnWeatherRefresh').addEventListener('click', async () => {
 });
 
 // 收录来源目录：手输（change 在失焦/回车时触发）与「浏览…」「用回桌面」殊途同归。
-// push 里会 render()，把输入框刷回主进程真正存下的值——非法路径被回退成空串时看得见。
+// push 里会 render()——但渲染层的回写会跳过仍持有焦点的输入框（见 setUnfocused，
+// 防别的窗口的 state:changed 刷掉正在打的字），所以这里提交完自己同步一次：
+// 非法路径被主进程回退成系统桌面时，输入框照样看得见回退结果。
 async function applySourceDir(raw) {
   await push({ shortcuts_dir: raw });
+  el('sourceDir').value = settings.shortcuts_dir || '';
   if (raw && !settings.shortcuts_dir) flash('这个路径无效（需要绝对路径），已回退系统桌面');
   else if (settings.shortcuts_dir) flash('收录来源已切换，自动收录现在看：' + settings.shortcuts_dir);
   else flash('已改回系统桌面');
@@ -372,6 +404,8 @@ el('btnUseDesktop').addEventListener('click', () => applySourceDir(''));
 el('basketDir').addEventListener('change', async (event) => {
   const raw = String(event.target.value || '').trim();
   await push({ basket_dir: raw });
+  // 同 applySourceDir：本框还持有焦点，render 不回写，这里自己同步归一化结果
+  el('basketDir').value = settings.basket_dir || '';
   if (raw && !settings.basket_dir) flash('这个路径无效（需要绝对路径），已回退默认目录');
   else flash('筐的文件目录已改成：' + settings.basket_dir);
 });
@@ -418,12 +452,26 @@ async function addToBasket(mode) {
   if (!selectedBasketId) return;
   const result = await api.pickBasketFiles(selectedBasketId, mode);
   if (!result) return;
+  // 对话框里点了「取消」：主进程返回 canceled，什么都没发生，别报「没有新增」误导。
+  //（该字段尚未落地时此分支不触发，自然降级为下面的计数提示）
+  if (result.canceled === true) {
+    flash('已取消');
+    return;
+  }
   await refresh();
-  flash(
-    result.added
-      ? '已加入 ' + result.added + ' 项，共 ' + result.total + ' 项（磁盘文件未动）'
-      : '没有新增（已在这个筐里的会跳过）'
-  );
+  // 回执按主进程的真实动作说：缺省 mode='move'，文件默认是**移进**筐的文件夹
+  //（措辞对照 popup.js 的 addStatus；下面 prune 那条「只清登记，磁盘文件未动」语义不同，别动）
+  const moved = Number(result.moved) || 0;
+  const copied = Number(result.copied) || 0;
+  const bad = (result.failed || []).length;
+  const how = moved ? '（已移进筐的文件夹）' : copied ? '（Dock 也在用，复制了一份）' : '';
+  if (!result.added && !bad) {
+    flash('没有新增（已在这个筐里的会跳过）');
+    return;
+  }
+  let text = '已加入 ' + (result.added || 0) + ' 项' + how + '，共 ' + result.total + ' 项';
+  if (bad) text += '；' + bad + ' 项没能移进去（原文件留在原处）';
+  flash(text);
 }
 
 el('btnPrune').addEventListener('click', async () => {
@@ -494,6 +542,6 @@ api.onWeatherChanged((state) => {
 });
 
 (async () => {
+  // 初始化只需取一次状态：render() 里已并入 refreshAutostart()（C-3），不再重复调
   await refresh();
-  await refreshAutostart();
 })();

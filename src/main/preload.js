@@ -28,6 +28,12 @@ function rememberDroppedPaths(event) {
 
 window.addEventListener('drop', rememberDroppedPaths, true);
 
+// basket:add 的唯一实现：addPaths / addPathsToBasket 是同一条通道的两个历史名字，
+// 六个页面混着用（调用方一个都不改），这里合并成一个函数、两个键都指向它。
+function addBasketPaths(basketId, paths) {
+  return ipcRenderer.invoke('basket:add', { basketId, paths });
+}
+
 contextBridge.exposeInMainWorld('deskbasket', {
   // 状态
   getState: () => ipcRenderer.invoke('state:get'),
@@ -39,7 +45,7 @@ contextBridge.exposeInMainWorld('deskbasket', {
 
   // 筐
   basketGet: (basketId) => ipcRenderer.invoke('basket:get', { basketId }),
-  addPaths: (basketId, paths) => ipcRenderer.invoke('basket:add', { basketId, paths }),
+  addPaths: addBasketPaths,
   pickBasketFiles: (basketId, mode) => ipcRenderer.invoke('basket:pick-add', { basketId, mode }),
   // 设置面板里的批量勾选清单：桌面上所有条目 + 是否已在这个筐里
   basketCandidates: (basketId) => ipcRenderer.invoke('basket:candidates', { basketId }),
@@ -85,7 +91,6 @@ contextBridge.exposeInMainWorld('deskbasket', {
   getIcon: (target, size) => ipcRenderer.invoke('file:icon', { path: target, size }),
   openPath: (target) => ipcRenderer.invoke('file:open', { path: target }),
   revealPath: (target) => ipcRenderer.invoke('file:reveal', { path: target }),
-  listDir: (target) => ipcRenderer.invoke('file:list', { path: target }),
 
   // 文件夹弹窗（自研磨砂）
   popupReady: () => ipcRenderer.invoke('popup:ready'),
@@ -109,8 +114,8 @@ contextBridge.exposeInMainWorld('deskbasket', {
     ipcRenderer.on('popup:data', listener);
     return () => ipcRenderer.removeListener('popup:data', listener);
   },
-  // 弹窗里把文件拖到筐外/Dock 的场景不需要；反向（往筐里加）走 basket:add
-  addPathsToBasket: (basketId, paths) => ipcRenderer.invoke('basket:add', { basketId, paths }),
+  // 弹窗里把文件拖到筐外/Dock 的场景不需要；反向（往筐里加）走 basket:add（与 addPaths 同一个实现）
+  addPathsToBasket: addBasketPaths,
 
   // 设置
   openSettings: () => ipcRenderer.invoke('window:settings'),
@@ -128,7 +133,6 @@ contextBridge.exposeInMainWorld('deskbasket', {
 
   // 窗口自身的动作
   closeWindow: () => ipcRenderer.invoke('window:close'),
-  startDrag: (offset) => ipcRenderer.send('window:drag-start', offset),
 
   // 提示框交给主进程弹：Dock 窗口不可聚焦，页内 alert 会阻塞渲染进程（和 window.prompt 同一类问题）
   alertMessage: (text) => ipcRenderer.invoke('ui:alert', { text: String(text || '') }),

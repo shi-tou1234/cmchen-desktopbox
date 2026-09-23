@@ -29,6 +29,9 @@
       transform 150ms cubic-bezier(0.34, 1.4, 0.64, 1);
   }
   body.ready .menu { opacity: 1; transform: none; }
+  /* 容器为配合 aria-activedescendant 被程序聚焦（tabindex="-1"）：整圈焦点框会盖掉
+     菜单本身的设计，当前项的 .hot 高亮就是它的可见指示，所以只收掉容器自己的焦点框 */
+  .menu:focus { outline: none; }
   /* 浅色主题里菜单换成浅色底 + 深色字，跟整套配色对齐（#1） */
   @media (prefers-color-scheme: light) {
     .menu {
@@ -87,7 +90,7 @@
 </style>
 </head>
 <body>
-  <div class="menu" id="menu"></div>
+  <div class="menu" id="menu" role="menu" tabindex="-1"></div>
   <script src="menu-view.js"></script>
 </body>
 </html>

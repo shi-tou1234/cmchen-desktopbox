@@ -26,6 +26,14 @@
     transition: opacity 110ms ease-out, transform 160ms cubic-bezier(0.34, 1.3, 0.64, 1);
   }
   body.ready .card { opacity: 1; transform: none; }
+  /* 退场（AN-4）：主进程收窗前发来 closing，页面摘 .ready 挂 .closing —— 卡片按 140ms
+     淡出；主进程在 WEATHER_CARD_CLOSE_MS（140ms＋送达余量）之后才 hide 窗口。
+     收尾比进场干脆：进场有回弹的 cubic-bezier，退场用 ease-in 直接走人。 */
+  body.closing .card {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+    transition: opacity 140ms ease-in, transform 140ms ease-in;
+  }
   @media (prefers-color-scheme: light) {
     .card {
       background: rgba(250, 251, 253, 0.96);

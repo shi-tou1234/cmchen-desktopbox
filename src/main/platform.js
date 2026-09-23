@@ -19,14 +19,4 @@ function defaultBasketDir() {
   return path.join(os.homedir(), 'DeskBasket');
 }
 
-// 设置根目录，与 Electron userData 的约定一致（mac: ~/Library/Application Support，
-// Linux: $XDG_CONFIG_HOME 或 ~/.config）。
-function defaultSettingsRoot() {
-  if (IS_WIN) {
-    return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'DeskBasket');
-  }
-  if (IS_MAC) return path.join(os.homedir(), 'Library', 'Application Support', 'DeskBasket');
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'DeskBasket');
-}
-
-module.exports = { IS_WIN, IS_MAC, IS_LINUX, defaultBasketDir, defaultSettingsRoot };
+module.exports = { IS_WIN, IS_MAC, IS_LINUX, defaultBasketDir };

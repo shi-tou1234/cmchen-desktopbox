@@ -5,7 +5,8 @@ const host = document.getElementById('menu');
 const DANGER = /删除|清空/;
 
 // 主进程开菜单窗时会带 ?rm=1 表示「减弱动画」开着（#7）：那就直接到位，不播展开。
-// CSS 里也有一条 prefers-reduced-motion（跟系统设置），两者任一命中即不弹。
+// 菜单自己的样式（menu.html 内联那段）里也有一条 prefers-reduced-motion（跟系统设置），
+// 两者任一命中即不弹。
 if (new URLSearchParams(location.search).get('rm') === '1') {
   document.body.classList.add('reduce-motion');
   document.body.classList.add('ready');   // 跳过展开动画，直接就位
@@ -16,6 +17,11 @@ let hot = -1;        // 当前高亮的下标
 
 function paint() {
   rows.forEach((row, index) => row.el.classList.toggle('hot', index === hot));
+  // 键盘高亮同步到 aria（A-2）：容器用 aria-activedescendant 指向当前项，
+  // 屏幕阅读器才知道「读到哪了」；鼠标移出菜单（hot = -1）时一并撤掉。
+  const active = rows[hot];
+  if (active) host.setAttribute('aria-activedescendant', active.el.id);
+  else host.removeAttribute('aria-activedescendant');
 }
 
 function move(step) {
@@ -39,11 +45,18 @@ async function pick(index) {
     if (item.separator) {
       const sep = document.createElement('div');
       sep.className = 'menu-sep';
+      sep.setAttribute('role', 'separator');   // role="menu" 里放裸 div 不合规（A-2）
       host.append(sep);
       continue;
     }
     const el = document.createElement('div');
     el.className = 'menu-item' + (DANGER.test(item.label) ? ' danger' : '');
+    el.setAttribute('role', 'menuitem');       // 右键菜单项要有菜单语义（A-2）
+    el.id = 'menu-item-' + rows.length;        // aria-activedescendant 要一个稳定 id
+    // 主进程当前只发 { key, label }；哪天带上 disabled，aria 如实反映（方向键/回车行为不变）
+    if (item.disabled !== undefined) {
+      el.setAttribute('aria-disabled', item.disabled ? 'true' : 'false');
+    }
     el.textContent = item.label;
     const index = rows.length;
     el.addEventListener('mouseenter', () => {
@@ -60,6 +73,8 @@ async function pick(index) {
     hot = 0;
     paint();
   }
+  // 容器拿到焦点，aria-activedescendant 才会被屏幕阅读器读出（role="menu" + tabindex="-1"）
+  host.focus();
   // 下一帧再加 ready，让淡入/展开的 transition 真的跑起来。
   // 兜底那一下是防"窗口还没显示时 rAF 不回调"——那样菜单会一直停在 opacity:0，
   // 看着就是"右键没反应"。

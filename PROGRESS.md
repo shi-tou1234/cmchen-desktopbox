@@ -1672,3 +1672,107 @@ win 的自带右键以及快捷键不能直接使用」。
 - 双击入口本身（`cmd /c 启动DeskBasket.cmd`）也走了一遍：能找到 node、中文路径下的 `%~dp0`
   解析正确、参数透传到应用、退出码原样传回。
 - 收尾：隔离实例进程树已 `taskkill`，临时目录已删，`Get-Process electron` 只剩领导那套（12876 等）。
+
+## 全项目大规模检查（六个领域）＋ 修复 58 项：3.8.0 → 3.8.1（2026-09-23）
+
+领导原话：「帮我优化整个项目，Ui、关闭弹窗逻辑、动画、连贯性、安全、效率等等问题，进行大规模的检查」，
+随后「等待工作流结束，然后开始修复，同时修改电脑桌面上的那个版本的代码，提交 github」。
+
+### 怎么查的
+
+- 用 dynamic workflow 起了六个领域 ×（审查员＋独立复核员）的并行检查：审查员只读走查、
+  每条发现带 path:line 证据；复核员在全新上下文里逐条读码证实或推翻——发现者不复核自己。
+- 结果：**58 条发现，58 条全部 verified，high 1 条**（basket:trash 不校验筐归属）。
+- 门禁两端各跑一次 `npm test`：基线 135 全绿、收尾复跑全绿——同时证明检查过程没碰代码。
+- 产出《DeskBasket 全项目检查报告》：P0/P1/P2 排序＋优化方案（工作流交付物）。
+
+### 怎么修的
+
+五个并行修复代理，文件集互不相交（main.js / dock.* / popup+common+menu.* /
+settings+preload+README / shellIcons+store），逐条落掉发现；集成收尾（测试对齐、门禁、真机重启）我自己做。
+
+**安全（唯一 high 的落点）**
+
+- basket:trash / move-out / rename-item 补筐归属校验：渲染层给任意路径不再能删/搬/改筐外文件
+  （trash 是全应用唯一删除面）。
+- dock:activate 校验 ∈ dock_items；file:open/file:reveal 走归属白名单（筐、桌面、shortcuts、
+  弹窗会话浏览集）；folder:toggle 的 dir 分支同加静态归属。
+- settings:update 加 14 个标量键白名单，baskets / dock_items 明确拒绝——basket:update 的
+  「items/dir 以主进程为准」不再可被这条通道绕过。
+- dock:reorder 集合变了直接拒绝落盘（「重排清空 Dock」那条历史事故路径关死）。
+- 新增可信发送方 guardHandle 包住全部破坏性 IPC，外加 will-navigate 拦截＋setWindowOpenHandler
+  （http(s) 外开、其余 deny）。CSP 六页原本一致；PowerShell 四处经检查为字面量＋环境变量 base64、
+  无注入面（那是检查阶段已核的，未改动）。
+
+**弹窗/菜单关闭**
+
+- 点 Dock / 天气图标这类不可聚焦窗口时统一收掉右键菜单（原先唯一关闭路径是 blur，点它们收不到）。
+- 菜单关闭后补挂 popup 的失焦定时器（原先 menuOpen 期间的 blur 被吞，退化成 6 秒兜底）。
+- popup:present 清关闭动画定时器＋关态守卫（210ms 内再开不被旧定时器盖掉）；
+  改名窗补失焦即关，与弹窗/菜单对齐。
+
+**动画与流畅度**
+
+- Dock 逐帧积分动画全部按 dt 归一（120Hz 不再 2 倍速、掉帧不再拖慢），失真时长注释改准；
+  按下弹簧、FLIP 滑动补进减弱动效门控；系统 prefers-reduced-motion 三处补齐
+  （原先只有注释声称，全仓仅 menu 一条例外）。
+- FLIP 基线先清 inline transform 再量（悬停放大中重画不再错位滑回）；清空 Dock 也播离场淡出。
+- 天气卡进出配对（closing 过渡＋进场可重播）；dock.js pointerleave 立即收卡的抢跑删除，
+  交回主进程「两边离开 500ms」逻辑；弹窗 .stagger 空筐不再永驻（每次重画重播进场的 bug 关死）。
+- withEntryIcons 只等动画真正会显示的 21 格、其余后台补；popup:navigate 的整目录图标预热
+  移到 IPC 返回后分批跑。
+
+**连贯性**
+
+- 设置页 state:changed 不再刷掉正在输入的框；候选清单数据没变不重建（勾选焦点保留）；
+  托盘改开机自启本页会刷新。
+- 「（磁盘文件未动）」错误文案改为按 moved 显示；pick-add 取消返回 canceled:true，
+  弹窗/设置两个入口都给「已取消」。
+- 弹窗 2 秒轮询比筐名（别处改名，开着的标题会刷）；preload 删两条死通道（startDrag/listDir）、
+  addPaths 双别名合一个实现；state 载荷三处统一、四个死字段清掉；README 落盘描述改准；
+  platform.defaultSettingsRoot 死导出删除。
+- 新增 `tests/ipc-symmetry.test.js`：preload↔main 通道差集（认 ipcMain.handle 与 guardHandle
+  两种注册写法），死通道敢复活就红。
+
+**效率**
+
+- basketView 目录 mtime 未变跳过全量逐条扫描（弹窗 2 秒轮询不再每次 O(N) 同步 stat）；
+  protectedKeysFor 提出条目循环（启动迁移不再平方级）；persist+syncDock 双发/三发改单发；
+  壁纸 reg 查询加 5 秒缓存（applyTheme 不再每次 spawn reg 子进程）；iconCache/shortcutCache 加 1024 上限。
+- shellIcons：内存缓存 500 上限 LRU、磁盘缓存每 50 次写入后台清一次 30 天前的旧图标；
+  PowerShell 批次改 3 路并发（回填幂等已核）。
+- store.saveSettings 同一文件只读一遍（备份复用原文，原子写与备份语义不变）。
+
+### 修完之后集成收尾又抓到的两处
+
+1. **新 IPC 对称测试被 guardHandle 写法骗过**：门禁首跑红——测试只认
+   `ipcMain.handle('字面量'`，而可信发送方把一批通道注册成了 `guardHandle('字面量'`。
+   给测试补第二种写法＋锚点断言（guardHandle 注册的 basket:trash 也要抽得到），死通道检测恢复有效。
+2. **顶部余量把「最坏情况」常驻化，真机重启发现窗口长到 271px（实测）**：常驻模式下图标上方
+   那条透明带会挡住底下窗口的点击（修复代理如实报了这个副作用）。改成
+   `dockHeadroom(icon, 当前 dock_magnify)`——按当前档位留余量，不传/传坏值按上限兜底；
+   settings:update 的几何分支补进 dock_magnify（原注释写着「不用主进程管」，现在管了）。
+   真机复测：64px 图标、放大 40% → 窗口 233px（实测），仍盖得住 40%＋弹跳的最坏情况
+   （新增 2 条测试锁住；放大档位改动会实时重算几何）。
+
+### 门禁与真机
+
+- `npm test` → **140 passed / 0 fail**（135 基线 ＋ IPC 对称 2 ＋ 顶部余量 3；
+  core.test.js 3 处 dockmodel 高度断言随公式更新、意图不变）。
+- 桌面版已切到修复后的代码：taskkill 旧实例 → `scripts/launch.js` 起新实例（PID 27792），
+  日志零 Error/Uncaught、Dock 可见、天气正常。
+- 两条观察（如实记，不是本轮引入）：桌面层放置这次走到 `STILL_MOVING steps=200`
+  （windowLayer 的既定上限，该文件本轮未动，日志里 last 全是 GDI+ Hook 窗口——像是别的程序在抢 z 序）；
+  弹窗/动画的真机观感、菜单点 Dock 空白区这类要人工交互的路径本轮没做目验。
+
+### 如实记录：没修的
+
+- windows.js 五处 `sandbox: false` 没翻转：沙箱下 preload 的 webUtils.getPathForFile 可用性
+  没在本机验证，检查报告本身也标它「可评估加固项、不断言可直接翻」。
+- 自绘菜单「点 Dock 空白区域」仍关不掉（要渲染层 pointerdown 上报，超出本轮渲染层授权）；
+  点图标、点其它窗口已能关。
+- 检查报告个别条目的行号与最终代码有 1-2 行漂移，以修复时实际代码为准。
+
+### 版本与提交
+
+3.8.0 → 3.8.1，分两笔提交：一键启动（3.8.0）先入，本轮 58 项修复随后，推 GitHub。

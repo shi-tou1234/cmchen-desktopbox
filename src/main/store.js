@@ -277,13 +277,29 @@ function backupPath() {
   return target;
 }
 
-// 读一份并解析成合法配置；文件缺失/坏 JSON/解析异常都返回 null（不是默认值，交给调用方决定回退哪一层）
-function tryLoadFile(file) {
+// 读一份原始文本；文件缺失/读不出来回 null
+function readTextFile(file) {
   try {
-    return mergedSettings(JSON.parse(fs.readFileSync(file, 'utf8')));
+    return fs.readFileSync(file, 'utf8');
   } catch (_) {
     return null;
   }
+}
+
+// 把原始文本解析成合法配置；空（读失败）/坏 JSON/解析异常都返回 null
+// （不是默认值，交给调用方决定回退哪一层）
+function parseSettings(raw) {
+  if (raw === null) return null;
+  try {
+    return mergedSettings(JSON.parse(raw));
+  } catch (_) {
+    return null;
+  }
+}
+
+// 读一份并解析成合法配置；文件缺失/坏 JSON/解析异常都返回 null（不是默认值，交给调用方决定回退哪一层）
+function tryLoadFile(file) {
+  return parseSettings(readTextFile(file));
 }
 
 function loadSettings() {
@@ -307,12 +323,13 @@ function saveSettings(settings) {
   if (path.dirname(tmp) !== root) throw new Error('临时文件路径越界');
   fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf8');
   // 覆盖主文件之前，把「当前这份还能读出来的主文件」留一份 .bak（loadSettings 认的就是这份好文件）。
-  // 备份失败不影响主写入——它只是多加一道保险，主文件已经原子落盘了。
+  // 原始文本只读一遍：这份 raw 既用来判断好坏（能 parse 才备份），也直接写进备份——
+  // 不再为备份单独再 readFileSync 一次。备份失败不影响主写入——它只是多加一道保险，主文件已经原子落盘了。
   const backup = backupPath();
-  const currentGood = tryLoadFile(target);
-  if (currentGood) {
+  const raw = readTextFile(target);
+  if (parseSettings(raw)) {
     try {
-      fs.writeFileSync(backup, fs.readFileSync(target, 'utf8'), 'utf8');
+      fs.writeFileSync(backup, raw, 'utf8');
     } catch (_) {
       /* 备份写不下去（磁盘满等）：不阻断主保存 */
     }

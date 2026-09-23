@@ -13,6 +13,7 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
+const { fileURLToPath } = require('node:url');
 const { execFileSync, spawn } = require('node:child_process');
 
 const {
@@ -72,8 +73,13 @@ const POPUP_AWAY_CLOSE_MS = 900;
 const POPUP_AWAY_CLOSE_DESKTOP_MS = 6000;
 
 let settings = null;
-let resolvedTheme = 'dark';    // theme_mode=auto 时按壁纸亮度算出来的实际深浅色（dark/light），广播给各页
-let wallpaperCache = { key: '', luminance: null };  // 壁纸路径:修改时间 → 亮度（避免每次 tick 都重读+解码）
+let resolvedTheme = 'dark';    // theme_mode=auto 时按壁纸亮度算出来的实际深浅色（dark/light）；
+                               // 页面配色由 nativeTheme→prefers-color-scheme 跟随，不进 state 载荷（PE-7）
+// 壁纸亮度缓存（PE-4）：三样东西存在一起——上次 reg 查到的壁纸路径（file）、该文件的
+// path+mtime 键（key，命中即免解码）、以及 reg 结果的保鲜时间（regAt）。
+// 换壁纸才会改路径，所以 TTL 内直接复用 reg 结果，不再每次 applyTheme 都 spawn reg；
+// 保鲜期过了或存的壁纸文件对不上（被删/换过）才重查注册表。luminance = 该键对应的亮度。
+let wallpaperCache = { key: '', luminance: null, file: '', regAt: 0 };
 let tray = null;
 let dockWindow = null;
 let settingsWindow = null;
@@ -107,9 +113,20 @@ let weatherCardPainted = false;
 let weatherCardWanted = false;     // 想要卡片显示（页面还没画出第一帧时先记下，画完再浮出来）
 let weatherCardPollTimer = null;
 let weatherCardLeftAt = 0;
+let weatherCardHideTimer = null;   // 退出动画播完再隐藏窗口的定时器（AN-4）
+let weatherCardHiding = false;     // 正在播退出：防重入（AN-4）
 
 const iconCache = new Map();      // `${size}:${pathKey}` -> dataURL
 const shortcutCache = new Map();  // pathKey -> shell.readShortcutLink 结果或 null
+// 缓存上限（PE-5）：Map 保持插入序，超了就淘汰最老的一条。图标种类（大小×路径）
+// 理论上无界，不设限会把主进程内存慢慢吃光；1024 足够盖住 Dock＋几个筐的常用图标。
+const CACHE_MAX = 1024;
+
+// 往缓存里写一条（超出上限就丢弃插入序最老的那条）
+function cacheSet(map, key, value) {
+  map.set(key, value);
+  if (map.size > CACHE_MAX) map.delete(map.keys().next().value);
+}
 
 // ------------------------------------------------------------------ 工具
 
@@ -147,8 +164,76 @@ function pageTag(event) {
   }
 }
 
+// 本应用自己创建的窗口（SEC-7a）：所有 BrowserWindow 都在 attachDiagnostics 里登记，
+// 高权 IPC 通道只认这个集合里的窗口发来的请求。
+const appWindows = new Set();
+
+function rememberWindow(win) {
+  appWindows.add(win);
+  win.once('closed', () => appWindows.delete(win));
+  return win;
+}
+
+// 可信发送方：event.sender 的 webContents 必须属于本应用已创建、且还没销毁的窗口
+function trustedSender(event) {
+  try {
+    const win = BrowserWindow.fromWebContents(event && event.sender);
+    return Boolean(win && !win.isDestroyed() && appWindows.has(win));
+  } catch (_) {
+    return false;
+  }
+}
+
+// 高权通道的包装：不可信来源直接拒绝（handle 必须有返回值，不能让 invoke 悬着），
+// fallback 是拒绝时回给渲染层的形状（与正常返回同型，调用方不用改）。
+// 传函数则在拒绝那一刻求值——注册时 settings 可能还是 null（registerIpc 先于 bootstrap）。
+function guardHandle(channel, handler, fallback = null) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!trustedSender(event)) {
+      console.log(`[ipc] 拒绝非本应用窗口调用 ${channel}（${pageTag(event)}）`);
+      return typeof fallback === 'function' ? fallback() : fallback;
+    }
+    return handler(event, ...args);
+  });
+}
+
+// 本应用自己的页面（SEC-7b）：渲染层发起的导航只允许落在 src/renderer 下的 file: 页面。
+// 页面切换全在主进程 loadPage（windows.js 的 win.loadFile）里做，主进程发起的导航不走
+// will-navigate，所以这条不会把自己拦死（渲染层 grep 过：没有任何 location/window.open 用法）。
+function isOwnPageUrl(target) {
+  try {
+    const text = String(target || '');
+    if (!/^file:/i.test(text)) return false;
+    const file = path.normalize(fileURLToPath(text.split(/[?#]/)[0]));
+    const dir = path.join(__dirname, '..', 'renderer');
+    const rel = path.relative(dir, file);
+    return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
+  } catch (_) {
+    return false;
+  }
+}
+
+// 导航与新窗口收口（SEC-7b）：非本应用页面的导航拦下；window.open 一律不让自己的窗口
+// 变成任意网页的容器——http(s) 交系统浏览器打开，其余直接拒。
+function hardenWebContents(win, tag) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) {
+      shell.openExternal(url).catch(() => {});
+      console.log(`[${tag}] 新窗口请求交给系统浏览器：${url}`);
+    }
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (isOwnPageUrl(url)) return;
+    event.preventDefault();
+    console.log(`[${tag}] 拦下非本应用页面的导航：${url}`);
+  });
+}
+
 // 出问题要看得见：页面加载失败、渲染进程抛错都转发到主进程 stderr
 function attachDiagnostics(win, tag) {
+  rememberWindow(win);        // 本应用的窗口都从这里登记（高权 IPC 的可信发送方，SEC-7a）
+  hardenWebContents(win, tag);   // 导航/新窗口收口（SEC-7b）
   win.webContents.on('did-fail-load', (_event, code, description, url) => {
     console.error(`[${tag}] 页面加载失败 ${code} ${description} ${url}`);
   });
@@ -170,14 +255,16 @@ function attachDiagnostics(win, tag) {
   win.once('ready-to-show', () => console.log(`[${tag}] 已就绪`));
 }
 
+// 状态载荷（PE-7）：broadcastState 与 state:get 共用一份字段。
+// 只留渲染层确有读者的：settings（各页都读）、displays（settings.js 的显示器下拉）。
+// theme / desktop / platform / autostartSupported grep 过 src/renderer 无人读——
+// 页面配色走 prefers-color-scheme（跟 nativeTheme）、平台信息走 autostart:get——删掉。
+function statePayload() {
+  return { settings, displays: displaySummaries() };
+}
+
 function broadcastState() {
-  const payload = {
-    settings,
-    theme: resolvedTheme,
-    displays: displaySummaries(),
-    platform: process.platform,
-    autostartSupported: process.platform === 'win32' || process.platform === 'darwin'
-  };
+  const payload = statePayload();
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send('state:changed', payload);
   }
@@ -404,11 +491,14 @@ async function migrateBasketFiles() {
 
     const previous = basket.items || [];
     const items = [];
+    // 保护集一次算够（PE-2）：这个筐的 items 只会在整段循环结束后才落回 settings，
+    // 中途别的筐的状态也不变，逐条重算是白做的 O(条目×全量登记)
+    const protect = protectedKeysFor(basket.id);
     for (const item of previous) {
       const decision = basketfiles.moveDecision({
         item,
         dir,
-        protectKeys: protectedKeysFor(basket.id),
+        protectKeys: protect,
         exists: fs.existsSync(item)
       });
       if (decision.action === 'inside' || decision.action === 'missing') {
@@ -448,33 +538,77 @@ async function migrateBasketFiles() {
   return { moved, copied, failed };
 }
 
+// 筐视图的扫描缓存（PE-1）：弹窗每 2 秒轮询 basket:get，每次对每个条目做
+// existsSync/statSync 太贵。筐目录自身的 mtime 就是"里面增删过没有"的凭证：
+// 没变、清单也没变 → 直接复用上次的逐条结果；变了才重扫（清残影的语义不变，
+// 依旧在全量扫描那一次里 replaceBasket→persist）。筐目录不可用时不走缓存（老路径）。
+// 注意：登记在筐目录**之外**的老条目被外部删除不会改目录 mtime，会晚一拍才变灰，
+// 点「清理失效项」（basket:prune，仍逐条 existsSync）会立刻纠正。
+const basketScanCache = new Map();   // basketId -> { stamp, keys, entries }
+
+function sameItemList(items, cachedKeys) {
+  const list = items || [];
+  if (list.length !== cachedKeys.length) return false;
+  for (let i = 0; i < list.length; i += 1) {
+    if (basketfiles.keyOf(list[i]) !== cachedKeys[i]) return false;
+  }
+  return true;
+}
+
 // 把一个筐转成渲染层直接可用的视图：带上每个条目是否存在、是不是目录
 function basketView(basket) {
   if (!basket) return null;
+  const dirReady = Boolean(basket.dir) && fs.existsSync(basket.dir);
+  // 目录 mtime：一次 stat 代替逐条 existsSync（PE-1）。读不到就当不可缓存。
+  let stamp = '';
+  if (dirReady) {
+    try {
+      stamp = String(fs.statSync(basket.dir).mtimeMs);
+    } catch (_) {
+      stamp = '';
+    }
+  }
+  const cached = basketScanCache.get(basket.id);
+  if (
+    stamp &&
+    cached &&
+    cached.stamp === stamp &&
+    sameItemList(basket.items, cached.keys)
+  ) {
+    return { ...basket, entries: cached.entries };
+  }
+
   // 文件管理器里删掉的条目：清单里直接消失（不留灰色残影）。只在筐目录本身 accessible 时才清：
   // 盘不在/目录被占用时整筐都不能动，免得一次误判把清单清光。清掉的只是登记，磁盘本来就没这个文件了。
-  if (basket.dir && fs.existsSync(basket.dir)) {
+  if (dirReady) {
     const { items, removed } = basketModel.dropMissing(basket.items, (item) => fs.existsSync(item));
     if (removed.length) {
       basket = replaceBasket(basketModel.updateItems(basket, items));
       console.log(`[basket] 「${basket.name}」清掉 ${removed.length} 条已不存在的登记`);
     }
   }
-  return {
-    ...basket,
-    entries: (basket.items || []).map((item) => {
-      let exists = false;
-      let isDir = false;
-      try {
-        const stat = fs.statSync(item);
-        exists = true;
-        isDir = stat.isDirectory();
-      } catch (_) {
-        exists = false;
-      }
-      return { path: item, name: path.basename(item) || item, exists, isDir };
-    })
-  };
+  const entries = (basket.items || []).map((item) => {
+    let exists = false;
+    let isDir = false;
+    try {
+      const stat = fs.statSync(item);
+      exists = true;
+      isDir = stat.isDirectory();
+    } catch (_) {
+      exists = false;
+    }
+    return { path: item, name: path.basename(item) || item, exists, isDir };
+  });
+  if (stamp) {
+    basketScanCache.set(basket.id, {
+      stamp,
+      keys: (basket.items || []).map((item) => basketfiles.keyOf(item)),
+      entries
+    });
+  } else {
+    basketScanCache.delete(basket.id);   // 目录不可用：不留会误导下次的旧缓存
+  }
+  return { ...basket, entries };
 }
 
 function ensureBasket() {
@@ -527,8 +661,20 @@ function wallpaperPath() {
   }
 }
 
+// reg 结果的保鲜期（PE-4）：壁纸路径只在用户换壁纸时才变，这么短的 TTL 足以挡掉
+// 「display-metrics-changed 连发 / 来回切 theme_mode」这类一串 applyTheme，
+// 又不至于让换壁纸后的深浅色判断迟到超过这几秒。
+const WALLPAPER_REG_TTL_MS = 5000;
+
 function wallpaperLuminance() {
-  const file = wallpaperPath();
+  const now = Date.now();
+  let file = wallpaperCache.file;
+  // 命中：保鲜期内直接用上次 reg 查到的路径（连"查过、没有"也命中，免得失败时反复 spawn）；
+  // miss：过了保鲜期，或存的壁纸文件已经不在了（换过/被删）→ 重查注册表
+  if (now - wallpaperCache.regAt >= WALLPAPER_REG_TTL_MS || (file && !fs.existsSync(file))) {
+    file = wallpaperPath();
+    wallpaperCache = { key: '', luminance: null, file: file || '', regAt: now };
+  }
   if (!file) return null;
   let stamp = '';
   try {
@@ -549,7 +695,7 @@ function wallpaperLuminance() {
   } catch (_) {
     luminance = null;
   }
-  wallpaperCache = { key: cacheKey, luminance };
+  wallpaperCache = { ...wallpaperCache, key: cacheKey, luminance };
   return luminance;
 }
 
@@ -561,7 +707,7 @@ function applyTheme() {
     try {
       nativeTheme.themeSource = next;
     } catch (_) {
-      /* 个别平台/版本不支持：resolvedTheme 仍会广播，页面配色不受影响 */
+      /* 个别平台/版本不支持：忽略即可，页面配色跟随系统深浅色（nativeTheme 的媒体查询） */
     }
   }
   const changed = resolvedTheme !== next;
@@ -607,7 +753,7 @@ function readShortcutCached(target) {
   } catch (_) {
     info = null;
   }
-  shortcutCache.set(key, info);
+  cacheSet(shortcutCache, key, info);
   return info;
 }
 
@@ -671,7 +817,7 @@ async function iconFor(target, size = 48) {
   // 非 Windows：app.getFileIcon 就是系统原生文件图标，直接用
   if (process.platform !== 'win32') {
     const dataUrl = await electronIcon(target, size);
-    iconCache.set(key, dataUrl);
+    cacheSet(iconCache, key, dataUrl);
     return dataUrl;
   }
   const sources = shellIcons.iconSources(target, declaredIconSource(target), iconExists);
@@ -683,7 +829,7 @@ async function iconFor(target, size = 48) {
         : await electronIcon(source.path, size);
     if (dataUrl) break;
   }
-  iconCache.set(key, dataUrl);
+  cacheSet(iconCache, key, dataUrl);
   return dataUrl;
 }
 
@@ -796,6 +942,7 @@ function dirTargetForShortcut(target) {
 const WEATHER_REFRESH_MS = 15 * 60 * 1000;   // 15 分钟刷一次（实时性够用，又不至于频繁打接口）
 const WEATHER_CARD_CHECK_MS = 250;           // 悬浮卡片"鼠标还在不在"的轮询间隔
 const WEATHER_CARD_AWAY_MS = 500;            // 鼠标离开 Dock 与卡片多久后收起
+const WEATHER_CARD_CLOSE_MS = 160;           // 卡片退场：weather.html 的 .closing 淡出 140ms ＋ 20ms 消息送达余量（AN-4）
 
 function weatherCity() {
   // 空 = 自动按网络位置判断（见 weather.resolveAutoPlace）：多数人不必去设置里填城市
@@ -972,11 +1119,43 @@ function stopWeatherCardWatch() {
   weatherCardLeftAt = 0;
 }
 
+// 取消进行中的退场（重新悬停/窗口没了时用，AN-4）
+function stopWeatherCardHide() {
+  if (weatherCardHideTimer) {
+    clearTimeout(weatherCardHideTimer);
+    weatherCardHideTimer = null;
+  }
+  weatherCardHiding = false;
+}
+
 function hideWeatherCard() {
   weatherCardWanted = false;
   stopWeatherCardWatch();
   const win = weatherCardWindow;
-  if (win && !win.isDestroyed() && win.isVisible()) win.hide();
+  if (!win || win.isDestroyed() || !win.isVisible()) {
+    stopWeatherCardHide();   // 没在显示：把可能残留的退场状态一并清掉
+    return;
+  }
+  if (weatherCardHiding) return;   // 已经在收了：别叠第二发（防重入）
+  weatherCardHiding = true;
+  // 先让卡片播退场：weathercard.js 收到后摘 .ready 加 .closing，卡片自己淡出。
+  // 渲染层回执不了（preload 没有为天气卡留回执通道，不能动 preload.js），
+  // 所以用与 CSS 等长的对齐时延让主进程到点再 hide（窗口销毁有守卫）。
+  try {
+    win.webContents.send('weather:changed', { ...weatherPayload(), closing: true });
+  } catch (_) {
+    /* 页面可能还没就绪：直接走下面的隐藏 */
+  }
+  const closeMs = settings && settings.reduce_motion ? 0 : WEATHER_CARD_CLOSE_MS;
+  if (weatherCardHideTimer) clearTimeout(weatherCardHideTimer);
+  weatherCardHideTimer = setTimeout(() => {
+    weatherCardHideTimer = null;
+    weatherCardHiding = false;
+    const card = weatherCardWindow;
+    // 期间又悬停上了（weatherCardWanted 真）就别藏：退场被 showWeatherCard 取消过，
+    // 这里只是兜底再确认一次
+    if (card && !card.isDestroyed() && card.isVisible() && !weatherCardWanted) card.hide();
+  }, closeMs);
 }
 
 // 鼠标还在 Dock 附近或卡片上就留着，两边都离开了才收。
@@ -1024,6 +1203,7 @@ function ensureWeatherCardWindow(size) {
   win.on('closed', () => {
     if (weatherCardWindow === win) weatherCardWindow = null;
     stopWeatherCardWatch();
+    stopWeatherCardHide();   // 窗口没了，退场定时器也别留（AN-4）
   });
   // 页面画出第一帧再浮出来：不然会闪一下空白卡片。
   // 期间鼠标可能已经离开（weatherCardWanted 变 false），那就干脆不显示。
@@ -1047,10 +1227,17 @@ function showWeatherCard(anchorCenterX) {
   const spot = weatherCardGeometry(Number(anchorCenterX) || 0, size);
   if (!spot) return false;
   weatherCardWanted = true;
+  stopWeatherCardHide();   // 正在退场又被悬停上：取消退场，别让旧定时器把窗口藏掉（AN-4）
   const win = ensureWeatherCardWindow(size);
   win.setBounds(spot);
   if (weatherCardPainted) {
     win.showInactive();
+    // 重播进场：推一份不带 closing 的快照让页面走"摘 .ready → reflow → 加 .ready"（AN-4）
+    try {
+      win.webContents.send('weather:changed', weatherPayload());
+    } catch (_) {
+      /* 页面还没就绪：首帧由页面自己的 getWeather 负责 */
+    }
     startWeatherCardWatch();
   }
   return true;
@@ -1065,7 +1252,7 @@ function dockSize() {
     settings.dock_items.length +
     settings.dock_specials.length +
     Math.max(1, settings.baskets.length);
-  const layout = dockmodel.dockLayout(count, settings.dock_icon_size, display.bounds.width, DOCK_PADDING);
+  const layout = dockmodel.dockLayout(count, settings.dock_icon_size, display.bounds.width, DOCK_PADDING, settings.dock_magnify);
   return { width: layout.width, height: layout.height };
 }
 
@@ -1121,6 +1308,9 @@ function dockHiddenGeometry() {
 // "啪"地弹到位。但 easeOutBack 的标准过冲约是距离的 10%——Dock 滑出距离 130~200px，
 // 就是 13~20px，太夸张；所以按 REVEAL_OVERSHOOT_DAMP 打折，只留 ~4%（5~8px）的一下。
 // 收起（往屏外）仍用纯缓出：收尾干脆，不弹。reduce_motion 开着直接一步到位。
+//
+// 进度按 performance.now() 实时算（AN-5），定时器只当节拍：被同步 IO 卡一拍时
+// 整段不会跟着拖长，只是那一拍跨过去；末帧仍精确落在目标位置上。
 const DOCK_SLIDE_STEPS_BACK = 12;       // 带过冲要多给几帧才看得出"冲过头再收回"
 const REVEAL_OVERSHOOT_DAMP = 0.4;      // 过冲幅度打折：eased 超过 1 的那部分 × 0.4
 
@@ -1136,15 +1326,15 @@ function slideDockTo(target) {
   }
   const revealing = target.y < from.y;   // 从屏幕外往回滑出
   const steps = revealing ? DOCK_SLIDE_STEPS_BACK : DOCK_SLIDE_STEPS;
-  let step = 0;
+  const startAt = performance.now();
+  const duration = steps * DOCK_SLIDE_STEP_MS;   // 名义总时长：进度 = 真实经过时间 / 它
   dockSlideTimer = setInterval(() => {
     if (!dockWindow || dockWindow.isDestroyed()) {
       clearInterval(dockSlideTimer);
       dockSlideTimer = null;
       return;
     }
-    step += 1;
-    const t = Math.min(1, step / steps);
+    const t = Math.min(1, (performance.now() - startAt) / duration);   // clamp 0..1
     let eased;
     if (revealing) {
       const raw = dockmodel.easeOutBack(t);
@@ -1159,7 +1349,7 @@ function slideDockTo(target) {
       width: target.width,
       height: target.height
     });
-    if (step >= steps) {
+    if (t >= 1) {
       clearInterval(dockSlideTimer);
       dockSlideTimer = null;
     }
@@ -1346,12 +1536,22 @@ function prewarmBasketIcons() {
 const POPUP_ICON_WAIT_MS = 400;
 // 翻目录时等图标的时间要短得多：先出内容、图标随后补上（后台已经预热过）
 const POPUP_NAVIGATE_ICON_WAIT_MS = 120;
+// 只等"进场动画真正会显示"的那批图标（AN-1）：popup.js 的 makeCell 把交错下标 --i
+// 夹在 20（cell.style.setProperty('--i', Math.min(index, 20))），common.css 每格延后 16ms
+// ——也就是说 21 格之后的格子根本不参与 stagger。其余条目不进 await、转后台预热，
+// 免得冷缓存时几十个 shell 解析把展开+进场的帧抢光。400ms race 保留。
+const POPUP_ICON_ANIM_MAX = 21;
 
 async function withEntryIcons(payload, waitMs = POPUP_ICON_WAIT_MS) {
   const entries = (payload && payload.entries) || [];
   if (!entries.length) return payload;
   const size = payload.iconSize || settings.icon_size;
-  const jobs = entries.map((entry) =>
+  const awaited = entries.slice(0, POPUP_ICON_ANIM_MAX);
+  // 动画范围外的：不等，直接丢进后台预热（renderer 的兜底 getIcon 会命中同一条缓存链）
+  for (const entry of entries.slice(POPUP_ICON_ANIM_MAX)) {
+    shellIcons.iconDataUrl(entry.path, size).catch(() => {});
+  }
+  const jobs = awaited.map((entry) =>
     shellIcons.iconDataUrl(entry.path, size).then(
       (url) => [entry.path, url || ''],
       () => [entry.path, '']
@@ -1364,15 +1564,34 @@ async function withEntryIcons(payload, waitMs = POPUP_ICON_WAIT_MS) {
   if (!icons) return payload;
   return {
     ...payload,
-    entries: entries.map((entry) => ({ ...entry, iconUrl: icons.get(entry.path) || '' }))
+    entries: entries.map((entry, index) =>
+      index < POPUP_ICON_ANIM_MAX
+        ? { ...entry, iconUrl: icons.get(entry.path) || '' }
+        : entry
+    )
   };
 }
 
-// 目录里的图标只做后台预热：缓存热了，翻第二次就是秒开
+// 后台预热的分拍大小：对齐 shellIcons 一个 PowerShell 进程的批量（那边 BATCH_SIZE=64，
+// 未导出，这里写死同值）——一拍登记一批，批与批之间让出事件循环
+const WARM_CHUNK_SIZE = 64;
+
+// 目录图标后台预热（AN-2）：**等 IPC 返回之后**再跑（setImmediate），按批分拍登记；
+// shellIcons 自带 30ms 防抖的批量队列会把登记合并成一次 PowerShell 调用。
+// 原来是同步逐个探测（.lnk 的 statSync+readFileSync）堵在 handler 里，拖慢 navigate 的返回。
 function warmEntryIcons(entries, size) {
-  for (const entry of entries || []) {
-    shellIcons.iconDataUrl(entry.path, size).catch(() => {});
-  }
+  const chunks = filebrowse.chunked(entries || [], WARM_CHUNK_SIZE);
+  let index = 0;
+  const step = () => {
+    const chunk = chunks[index];
+    if (!chunk) return;
+    index += 1;
+    for (const entry of chunk) {
+      shellIcons.iconDataUrl(entry.path, size).catch(() => {});
+    }
+    if (index < chunks.length) setImmediate(step);
+  };
+  setImmediate(step);
 }
 
 function syncDock() {
@@ -1390,7 +1609,9 @@ function syncDock() {
     return;
   }
   applyDockGeometry();
-  dockWindow.webContents.send('state:changed', { settings });
+  // 不再单独给 Dock 发一份 state:changed（PE-3）：走到这里的改动静辄先 persist 过，
+  // broadcastState 已经全窗口发过一遍，dock.js 的 onStateChanged 会跟着刷新；
+  // 新建窗口那条路由页面自己 getState，也不需要补发。
 }
 
 // Dock 条目同步：把来源目录里新出现的快捷方式补进来（用户移除过的不再加回）
@@ -1440,6 +1661,98 @@ function rebuildPopupPayload() {
   return popupPayload;
 }
 
+// ---------------------------------------------------------------- 归属白名单（SEC-2）
+//
+// file:open / file:reveal 只放行"本应用本来就展示过的地方"：
+//   静态归属 = 筐的清单条目 / 任一筐目录之下 / 桌面之下 / 收录来源目录之下 /
+//              Dock 快捷方式（含 .lnk 解析出的目录）之下；
+//   动态归属 = 当前弹窗会话真浏览过的地方（打开根 + 逐级上/下走过一格），
+//              由 canEnterPopupDir / rememberPopupDir 维护（见 popup:navigate）。
+// 调用场景（只读核实）：popup.js 的 open/reveal 只作用于当前视图的条目（筐条目或
+// 正在浏览的目录的子项），dock.js 的 open/reveal 只作用于 dock_items —— 都覆盖得住。
+let popupBrowseDirs = new Set();   // 走过的目录（basketfiles.keyOf 键）
+let popupSessionDir = '';          // 当前所在目录（dir 视图），用于"上溯一格"的相邻判断
+
+function resetPopupBrowseSession(root = '') {
+  popupBrowseDirs = new Set();
+  popupSessionDir = '';
+  if (root) rememberPopupDir(root);
+}
+
+function rememberPopupDir(target) {
+  if (!target) return;
+  popupBrowseDirs.add(basketfiles.keyOf(target));
+  popupSessionDir = target;
+}
+
+// 静态归属：这个路径是不是本应用"本来就拥有"的地方
+function staticFileAllowed(target) {
+  const key = basketfiles.keyOf(target);
+  if (!key) return false;
+  for (const basket of settings.baskets || []) {
+    for (const item of basket.items || []) {
+      if (basketfiles.keyOf(item) === key) return true;
+    }
+    if (basket.dir && basketfiles.isInside(basket.dir, target)) return true;
+  }
+  try {
+    const desktop = app.getPath('desktop');
+    if (desktop && basketfiles.isInside(desktop, target)) return true;
+  } catch (_) {
+    /* app 未就绪等极端情况：跳过这一条 */
+  }
+  const source = sourceDir();
+  if (source && basketfiles.isInside(source, target)) return true;
+  for (const item of settings.dock_items || []) {
+    if (basketfiles.keyOf(item) === key) return true;
+    const dir = dirTargetForShortcut(item);
+    if (dir && basketfiles.isInside(dir, target)) return true;
+  }
+  return false;
+}
+
+// 弹窗里点开/显示所在位置：静态归属 ∪ 会话浏览过的地方（含其直接子项——
+// 页面上列出来的条目永远是"走过目录"的直接子项）
+function fileOpAllowed(target) {
+  const key = basketfiles.keyOf(target);
+  if (!key) return false;
+  if (staticFileAllowed(target)) return true;
+  if (popupBrowseDirs.has(key)) return true;
+  return popupBrowseDirs.has(basketfiles.keyOf(path.dirname(String(target))));
+}
+
+// 弹窗能不能进这个目录：走过/本就归属 → 行；否则只放行与当前目录相邻的一格（上/下）
+function canEnterPopupDir(target) {
+  const key = basketfiles.keyOf(target);
+  if (!key) return false;
+  if (popupBrowseDirs.has(key)) return true;
+  if (staticFileAllowed(target)) return true;
+  // 从走过的地方往下走一格
+  if (popupBrowseDirs.has(basketfiles.keyOf(path.dirname(String(target))))) return true;
+  // 从当前目录往上走一格
+  const parent = popupSessionDir ? filebrowse.parentOf(popupSessionDir) : '';
+  if (parent && basketfiles.keyOf(parent) === key) return true;
+  return false;
+}
+
+// dock:activate 的目标白名单（SEC-2）：必须在 Dock 清单里，或对上某个系统项的
+// 解析名/打开 URI（系统项没有磁盘路径，只能按字符串对）
+function dockTargetAllowed(target) {
+  const key = basketfiles.keyOf(target);
+  if (!key) return false;
+  for (const item of settings.dock_items || []) {
+    if (basketfiles.keyOf(item) === key) return true;
+  }
+  const text = String(target || '').toLowerCase();
+  for (const id of settings.dock_specials || []) {
+    const special = specials.findSpecial(id);
+    if (!special) continue;
+    if (special.parsingName && String(special.parsingName).toLowerCase() === text) return true;
+    if (special.openUri && String(special.openUri).toLowerCase() === text) return true;
+  }
+  return false;
+}
+
 // 关文件夹弹窗：先通知渲染层播"收回"动画，动画放完再隐藏窗口。
 // 立刻隐藏会看到窗口"啪"地消失，和打开时的抽出动画对不上。
 // reason 只进日志：自动收弹窗的路有好几条（鼠标离开、Dock 收起、失焦），
@@ -1453,6 +1766,7 @@ function closeFolderPopup(reason = '?') {
   popupExternalDrag = false;
   popupPayload = null;
   popupKey = null;
+  resetPopupBrowseSession();   // 会话结束：归属白名单的动态部分清掉（SEC-2）
   if (!popupWindow || popupWindow.isDestroyed()) return;
   const win = popupWindow;
   try {
@@ -1463,7 +1777,12 @@ function closeFolderPopup(reason = '?') {
   // 收起动画（内容缩小/淡出）放完就**隐藏**，不销毁：下次打开直接复用这个热窗口——
   // 不用再起一个渲染进程、不用重新加载页面、图标也在解码缓存里。
   // 窗口自己不做透明度动画：材质底跟着 setOpacity 会闪（见文件头的说明）。
-  const closeMs = popupGlass ? POPUP_CLOSE_ANIM_GLASS_MS : POPUP_CLOSE_ANIM_MS;
+  // 减弱动画时不白晾 210/170ms 的空材质底（AN-3，口径同 slideDockTo 的 reduce_motion 分支）。
+  const closeMs = settings.reduce_motion
+    ? 0
+    : popupGlass
+      ? POPUP_CLOSE_ANIM_GLASS_MS
+      : POPUP_CLOSE_ANIM_MS;
   clearTimeout(popupHideTimer);
   popupHideTimer = setTimeout(() => {
     popupHideTimer = null;
@@ -1622,6 +1941,9 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
 
   popupKey = popupKeyFor(kind, payload);
   popupSource = { kind, payload };
+  // 归属会话重新起算（SEC-2）：dir 弹窗从根目录起；筐弹窗从空开始
+  // （筐首页的条目靠静态归属，点进目录那一步由 canEnterPopupDir 的静态分支放行）
+  resetPopupBrowseSession(kind === 'dir' ? payload.path : '');
   // 动画原点：被点开的 Dock 图标中心在弹窗里的横向比例（配合底边原点 = 从图标抽出来）
   const anchorScreenX = (dockBounds ? dockBounds.x : rect.x + rect.width / 2) + (anchorXInDock || 0);
   const originX = Math.max(0, Math.min(1, (anchorScreenX - rect.x) / rect.width));
@@ -1631,8 +1953,9 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
     iconSize: settings.icon_size,
     // 页面按这个挑动画：磨砂模式窗口底是整块材质，内容不能缩得太小（见 popup.html）
     glass: winFactory.glassEnabled(settings),
-    // 主题与减弱动画开关也塞进载荷：弹窗打开这一帧就要用，不等 state:changed
-    theme: resolvedTheme,
+    // 减弱动画开关塞进载荷：弹窗打开这一帧就要用，不等 state:changed（popup.js:562 在读）。
+    // 原来这里还有 theme: resolvedTheme——grep 过渲染层零读者（配色走 prefers-color-scheme），
+    // 随 state 载荷一并删掉（PE-7）。
     reduceMotion: Boolean(settings.reduce_motion)
   };
 
@@ -1753,6 +2076,22 @@ function menuPosition(ownerBounds, clickX, clickY, size) {
   return { x: Math.round(x), y: Math.round(y) };
 }
 
+// 菜单收掉之后，把弹窗被丢掉的"失焦即关"补挂回来（POP-2）：菜单开着期间 popup 的 blur
+// 被无条件丢弃（见下面 win.on('blur')），关了不补就只能等 6 秒 away 兜底。
+// 弹窗还聚焦着就不用补——它压根没失焦。
+function resumePopupBlurAfterMenu() {
+  if (!popupWindow || popupWindow.isDestroyed()) return;
+  if (popupWindow.isFocused()) return;
+  schedulePopupBlurClose();
+}
+
+// 点了会做事的入口先把自绘菜单收掉（POP-1）：Dock/天气卡都是 focusable:false，
+// 点它们不发生焦点转移，菜单窗收不到自己的 blur 就会滞留，还会把弹窗的失焦关闭拦住。
+// 菜单没开时是空操作。
+function closeMenuIfOpen() {
+  if (menuOpen) closeMenuWindow(null);
+}
+
 function closeMenuWindow(picked = null) {
   const resolve = menuResolve;
   menuResolve = null;
@@ -1762,6 +2101,7 @@ function closeMenuWindow(picked = null) {
   menuWindow = null;
   if (win && !win.isDestroyed()) win.destroy();
   if (resolve) resolve(picked);
+  resumePopupBlurAfterMenu();   // POP-2：菜单关了，弹窗的失焦关闭要补回来
 }
 
 function openMenuWindow(event, payload = {}) {
@@ -1813,6 +2153,9 @@ function openMenuWindow(event, payload = {}) {
       menuOpen = false;
       menuFocused = false;
       if (pending) pending(null);
+      // 未经 closeMenuWindow 的关闭路径（连点右键销毁旧窗等）也要补挂弹窗失焦关闭（POP-2）。
+      // schedulePopupBlurClose 自己会清旧定时器，与 closeMenuWindow 里那次重复调用不冲突。
+      resumePopupBlurAfterMenu();
     });
   });
 }
@@ -1906,6 +2249,12 @@ function openRenameWindow(event, payload = {}) {
     win.show();
     win.focus();
   });
+  // 失焦即关（POP-4）：与弹窗/菜单同一口径——点别处就收掉，不留一个 alwaysOnTop 小窗浮着。
+  // Enter/Esc/按钮路径照旧（它们都会先于 blur 走 rename:commit/rename:cancel 关窗）。
+  win.on('blur', () => {
+    if (renameWindow !== win || win.isDestroyed()) return;
+    closeRenameWindow();
+  });
   // 只有"当前这个窗口"关闭时才清状态：连点两次右键时，旧窗口的 closed 不能把新目标抹掉
   win.on('closed', () => {
     if (renameWindow !== win) return;
@@ -1965,18 +2314,15 @@ function installTray() {
 // ------------------------------------------------------------------ IPC
 
 function registerIpc() {
-  ipcMain.handle('state:get', () => ({
-    settings,
-    desktop: sourceDir(),
-    theme: resolvedTheme,
-    displays: displaySummaries()
-  }));
+  ipcMain.handle('state:get', () => statePayload());
 
-  ipcMain.handle('basket:get', (_event, { basketId } = {}) => basketView(findBasket(basketId)));
+  guardHandle('basket:get', (_event, { basketId } = {}) => basketView(findBasket(basketId)));
 
   // 往筐里加东西。四条入口共用：拖到 Dock 的文件夹图标上、拖进文件夹弹窗、弹窗/设置面板里的
   // 「添加文件…」、设置面板的勾选清单。先把文件**移动进筐目录**再登记，所以原位置删掉也打得开。
-  ipcMain.handle('basket:add', async (event, { basketId, paths } = {}) => {
+  // 不加路径白名单（SEC-5）：用户经对话框/拖放本来就能合法加任意路径；
+  // 这里只需要可信发送方校验（guardHandle），mode 逻辑不动。
+  guardHandle('basket:add', async (event, { basketId, paths } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return null;
     return addPathsToBasket(basket, paths, `加入（来源 ${pageTag(event)}）`);
@@ -1984,7 +2330,7 @@ function registerIpc() {
 
   // 设置面板：往选中的筐里批量勾选（来源目录里的条目，勾上就加进去、取消就移出）。
   // 这是"一次加一堆"最省事的入口——不用一层层翻文件对话框。
-  ipcMain.handle('basket:candidates', (_event, { basketId } = {}) => {
+  guardHandle('basket:candidates', (_event, { basketId } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return [];
     return dockmodel.basketCandidates(sourceItems(), basket.items);
@@ -1993,7 +2339,7 @@ function registerIpc() {
   // 「添加文件…」/「添加文件夹…」：选完直接登记进筐。
   // 注意 Windows 上 openFile 与 openDirectory **不能同时传**——同时传时对话框只剩选文件夹
   // （标签都变成「文件夹:」），那就没法加文件了。所以分成两个入口。
-  ipcMain.handle('basket:pick-add', async (_event, { basketId, mode } = {}) => {
+  guardHandle('basket:pick-add', async (_event, { basketId, mode } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return null;
     const wantsDirs = mode === 'dirs';
@@ -2005,17 +2351,19 @@ function registerIpc() {
       properties: wantsDirs ? ['openDirectory', 'multiSelections'] : ['openFile', 'multiSelections']
     });
     const empty = { added: 0, total: basket.items.length, moved: 0, copied: 0, failed: [], dir: basket.dir || '' };
-    if (picked.canceled || !picked.filePaths.length) return empty;
+    // 取消要能和"真没新增"区分开（PE-6）：渲染层分支据此决定提示口径
+    if (picked.canceled) return { ...empty, canceled: true };
+    if (!picked.filePaths.length) return empty;
     return addPathsToBasket(basket, picked.filePaths, `从对话框加入（${wantsDirs ? '文件夹' : '文件'}）`);
   });
 
-  ipcMain.handle('basket:remove', (_event, { basketId, itemPath }) => {
+  guardHandle('basket:remove', (_event, { basketId, itemPath }) => {
     const basket = findBasket(basketId);
     if (!basket) return null;
     return replaceBasket(basketModel.removeItem(basket, itemPath));
   });
 
-  ipcMain.handle('basket:update', (_event, { basket }) => {
+  guardHandle('basket:update', (_event, { basket }) => {
     const current = findBasket(basket && basket.id);
     if (!current) return null;
     // items 与 dir 以主进程为准：这两个字段管着磁盘上的东西，不接受渲染层改写
@@ -2029,7 +2377,7 @@ function registerIpc() {
     return merged;
   });
 
-  ipcMain.handle('basket:prune', (_event, { basketId }) => {
+  guardHandle('basket:prune', (_event, { basketId }) => {
     const basket = findBasket(basketId);
     if (!basket) return null;
     const alive = [];
@@ -2042,7 +2390,7 @@ function registerIpc() {
     return { removed: removed.length };
   });
 
-  ipcMain.handle('basket:create', (_event, { name } = {}) => {
+  guardHandle('basket:create', (_event, { name } = {}) => {
     const created = basketModel.createBasket(settings.baskets, name);
     const taken = new Set(settings.baskets.filter((item) => item.dir).map((item) => path.basename(item.dir)));
     created.basket.dir = resolveBasketDir(created.basket, taken);
@@ -2061,14 +2409,24 @@ function registerIpc() {
   // ---------------------------------------------------------------- 选中项的操作
 
   // 右键「移出到桌面」：真把文件从筐目录搬回桌面（重名自动加 (2)），清单里同步去掉
-  ipcMain.handle('basket:move-out', async (_event, { basketId, paths } = {}) => {
+  guardHandle('basket:move-out', async (_event, { basketId, paths } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return null;
+    // 归属校验（SEC-4）：只动这个筐清单里的路径——渲染层传来的别的路径一律拒绝并报错。
+    // 用 basketfiles.keyOf 归一（绝对化+去尾斜杠+小写），顺带把大小写变体折回清单原文，
+    // 下面 movedKeys 的过滤才对得上。
+    const owned = new Map();
+    for (const item of basket.items || []) owned.set(basketfiles.keyOf(item), item);
     const destDir = app.getPath('desktop');
     const results = [];
     for (const item of paths || []) {
-      const result = await basketfiles.placeInto(destDir, item, { mode: 'move' });
-      results.push({ path: item, ok: Boolean(result.ok), dest: result.dest || '', error: result.error || '' });
+      const canonical = owned.get(basketfiles.keyOf(item));
+      if (!canonical) {
+        results.push({ path: item, ok: false, dest: '', error: '不属于这个筐，拒绝移出' });
+        continue;
+      }
+      const result = await basketfiles.placeInto(destDir, canonical, { mode: 'move' });
+      results.push({ path: canonical, ok: Boolean(result.ok), dest: result.dest || '', error: result.error || '' });
     }
     const movedKeys = new Set(results.filter((r) => r.ok).map((r) => basketfiles.keyOf(r.path)));
     const saved = replaceBasket(
@@ -2083,18 +2441,27 @@ function registerIpc() {
     return { results, total: saved.items.length };
   });
 
-  // Delete / 右键「删除」：进系统回收站（可恢复），清单同步去掉
-  ipcMain.handle('basket:trash', async (_event, { basketId, paths } = {}) => {
+  // Delete / 右键「删除」：进系统回收站（可恢复），清单同步去掉。
+  // 这是全应用唯一的删除面，必须逐条校验归属（SEC-1）：不在这个筐清单里的路径直接拒收，
+  // 计入 failed，绝不交给 shell.trashItem。
+  guardHandle('basket:trash', async (_event, { basketId, paths } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return null;
+    const owned = new Map();
+    for (const item of basket.items || []) owned.set(basketfiles.keyOf(item), item);
     const done = [];
     const failed = [];
     for (const item of paths || []) {
+      const canonical = owned.get(basketfiles.keyOf(item));
+      if (!canonical) {
+        failed.push({ path: item, reason: '不属于这个筐，拒绝删除' });
+        continue;
+      }
       try {
-        await shell.trashItem(item);
-        done.push(item);
+        await shell.trashItem(canonical);
+        done.push(canonical);
       } catch (error) {
-        failed.push({ path: item, reason: String((error && error.message) || error) });
+        failed.push({ path: canonical, reason: String((error && error.message) || error) });
       }
     }
     const saved = replaceBasket(
@@ -2107,9 +2474,14 @@ function registerIpc() {
   });
 
   // F2 / 右键「重命名」：改的是筐目录里的真实文件名（同盘 rename，原子）
-  ipcMain.handle('basket:rename-item', (_event, { basketId, oldPath, newName } = {}) => {
+  guardHandle('basket:rename-item', (_event, { basketId, oldPath, newName } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return { ok: false, error: '筐不存在' };
+    // 归属校验（SEC-3）：oldPath 必须在该筐清单里，否则拒绝（newName 的清洗已安全，不动）
+    const inBasket = (basket.items || []).some(
+      (item) => basketfiles.keyOf(item) === basketfiles.keyOf(oldPath)
+    );
+    if (!inBasket) return { ok: false, error: '这个文件不在这个筐里' };
     const clean = basketfiles.sanitizeFileName(newName);
     if (!clean) return { ok: false, error: '这个名字用不了' };
     if (!fs.existsSync(oldPath)) return { ok: false, error: '文件已经不在了' };
@@ -2132,7 +2504,7 @@ function registerIpc() {
 
   // Ctrl+C / 右键「复制」：把真文件放进系统剪贴板（Electron 的 clipboard 模块给不了
   // 资源管理器认的文件列表，这一步交给 PowerShell 的 Set-Clipboard -Path）
-  ipcMain.handle('basket:copy-clipboard', async (_event, { paths } = {}) => {
+  guardHandle('basket:copy-clipboard', async (_event, { paths } = {}) => {
     const list = (paths || []).filter((item) => {
       try {
         return fs.existsSync(item);
@@ -2148,7 +2520,7 @@ function registerIpc() {
 
   // Ctrl+V：读剪贴板里的文件列表（带"剪切/复制"的意图），复制或移动进筐目录再登记。
   // 剪切来的也遵守保护规则：被 Dock/别的筐引用着的只复制，不搬。
-  ipcMain.handle('basket:paste-clipboard', async (_event, { basketId } = {}) => {
+  guardHandle('basket:paste-clipboard', async (_event, { basketId } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return null;
     const res = await runPowerShell(PS_CLIP_PASTE);
@@ -2176,9 +2548,10 @@ function registerIpc() {
     return { ...result, error: '' };
   });
 
-  ipcMain.handle('basket:delete', (_event, { basketId }) => {
+  guardHandle('basket:delete', (_event, { basketId }) => {
     const basket = findBasket(basketId);
     if (popupWindow && popupKey === `basket:${basketId}`) closeFolderPopup('筐被删');
+    basketScanCache.delete(basketId);   // 筐没了，视图缓存跟着走（PE-1：别留无主条目）
     settings.baskets = basketModel.dropBasket(settings.baskets, basketId);
     persist();
     syncDock();
@@ -2206,22 +2579,31 @@ function registerIpc() {
 
   ipcMain.handle('special:icon', (_event, { id }) => specialIconFor(id));
 
-  // 天气项不走 shell 打开（要三层兜底 + 应用是否装着的判断），单独一条路
-  ipcMain.handle('special:open', (_event, { id }) =>
-    id === specials.WEATHER_ID
+  // 天气项不走 shell 打开（要三层兜底 + 应用是否装着的判断），单独一条路。
+  // 点了会做事：先把可能滞留的自绘菜单收掉（POP-1）
+  ipcMain.handle('special:open', (_event, { id }) => {
+    closeMenuIfOpen();
+    return id === specials.WEATHER_ID
       ? openWeatherApp()
       : id === specials.WINDOWS_ID
         ? openStartMenu()
-        : openSpecial(id)
-  );
+        : openSpecial(id);
+  });
 
   // 天气：快照（Dock 图标下的气温、悬浮卡片都读它）／立刻刷新／打开天气应用／悬浮卡片
   ipcMain.handle('weather:get', () => weatherPayload());
-  ipcMain.handle('weather:refresh', () => refreshWeather(true));
-  ipcMain.handle('weather:open-app', () => openWeatherApp());
-  ipcMain.handle('weather:card-show', (_event, { itemCenterX } = {}) =>
-    showWeatherCard(itemCenterX)
-  );
+  ipcMain.handle('weather:refresh', () => {
+    closeMenuIfOpen();   // POP-1：天气入口（设置面板「立即刷新」等）
+    return refreshWeather(true);
+  });
+  ipcMain.handle('weather:open-app', () => {
+    closeMenuIfOpen();   // POP-1
+    return openWeatherApp();
+  });
+  ipcMain.handle('weather:card-show', (_event, { itemCenterX } = {}) => {
+    closeMenuIfOpen();   // POP-1：悬停天气图标时也把可能滞留的菜单收掉
+    return showWeatherCard(itemCenterX);
+  });
   ipcMain.handle('weather:card-hide', () => {
     hideWeatherCard();
     return true;
@@ -2239,7 +2621,10 @@ function registerIpc() {
     return settings.dock_specials;
   });
 
-  ipcMain.handle('dock:add', (event, { paths }) => addDockPaths(paths, pageTag(event)));
+  guardHandle('dock:add', (event, { paths }) => {
+    closeMenuIfOpen();   // POP-1：往 Dock 拖入也算"点了会做事"
+    return addDockPaths(paths, pageTag(event));
+  });
 
   // 设置面板里的"逐个添加"：列出来源目录里可收录的条目，并标出哪些已经在 Dock 上
   ipcMain.handle('dock:candidates', () =>
@@ -2248,6 +2633,7 @@ function registerIpc() {
 
   // 从磁盘任意位置挑文件加进 Dock（不限于来源目录）
   ipcMain.handle('dock:pick', async () => {
+    closeMenuIfOpen();   // POP-1
     const options = {
       title: '选择要放进 Dock 的快捷方式',
       buttonLabel: '加入 Dock',
@@ -2269,6 +2655,7 @@ function registerIpc() {
 
   // 设置面板「收录来源目录 → 浏览…」：挑一个目录，交回渲染层走 settings:update 落盘
   ipcMain.handle('dir:pick', async (_event, { purpose } = {}) => {
+    closeMenuIfOpen();   // POP-1
     const owner = settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : null;
     const forBaskets = purpose === 'baskets';
     const options = {
@@ -2285,7 +2672,7 @@ function registerIpc() {
     return picked.filePaths[0];
   });
 
-  ipcMain.handle('dock:remove', (event, { itemPath }) => {
+  guardHandle('dock:remove', (event, { itemPath }) => {
     settings.dock_items = dockmodel.removeItem(settings.dock_items, itemPath);
     const blocked = dockmodel.addItem(settings.dock_removed, itemPath);
     settings.dock_removed = blocked.items;
@@ -2305,13 +2692,20 @@ function registerIpc() {
     return settings.dock_items;
   });
 
-  ipcMain.handle('dock:reorder', (event, { items }) => {
+  guardHandle('dock:reorder', (event, { items }) => {
     const next = store.normalizePathList(items);
-    if (next.length !== settings.dock_items.length) {
-      // 重排不该改变条目数量：数量变了说明渲染层传错了，记下来（这条曾经导致条目被清空）
+    // 只许"重排"，不许改集合（SEC-8）：normalizePathList 之后与现有清单比集合是否相同。
+    // 数量变了曾经导致条目被整表清空（配置丢失事故），集合变了就拒绝落盘。
+    const beforeKeys = settings.dock_items.map((item) => store.pathKey(item)).sort();
+    const afterKeys = next.map((item) => store.pathKey(item)).sort();
+    const sameSet =
+      beforeKeys.length === afterKeys.length &&
+      beforeKeys.every((key, index) => key === afterKeys[index]);
+    if (!sameSet) {
       console.log(
-        `[dock] 重排把条目数从 ${settings.dock_items.length} 改成 ${next.length}（来源 ${pageTag(event)}）`
+        `[dock] 重排的条目集合与现有不一致（${settings.dock_items.length} → ${next.length}，来源 ${pageTag(event)}），拒绝落盘`
       );
+      return settings.dock_items;
     }
     settings.dock_items = next;
     persist();
@@ -2320,7 +2714,13 @@ function registerIpc() {
   });
 
   // 点击 Dock 快捷方式：指向文件夹的弹文件夹弹窗（再点一次收起），其余交给系统打开
-  ipcMain.handle('dock:activate', async (_event, { path: target, itemCenterX }) => {
+  guardHandle('dock:activate', async (_event, { path: target, itemCenterX }) => {
+    closeMenuIfOpen();   // POP-1：点 Dock 不发生焦点转移，菜单收不到自己的 blur
+    // 归属校验（SEC-2）：目标必须在 Dock 清单里（或对上系统项的解析名），否则不开
+    if (!dockTargetAllowed(target)) {
+      console.log(`[dock] 拒绝打开不在 Dock 上的条目：${target}`);
+      return { opened: 'app', ok: false, error: '这一项不在 Dock 上' };
+    }
     cancelPopupBlurClose();
     const dirTarget = dirTargetForShortcut(target);
     if (dirTarget) {
@@ -2333,12 +2733,18 @@ function registerIpc() {
   });
 
   // 点击 Dock 里的文件夹（筐）：切换对应弹窗
-  ipcMain.handle('folder:toggle', (_event, { kind, id, path: target, itemCenterX }) => {
-    return toggleFolderPopup(
-      kind === 'basket' ? 'basket' : 'dir',
-      kind === 'basket' ? { id } : { path: target },
-      itemCenterX
-    );
+  guardHandle('folder:toggle', (_event, { kind, id, path: target, itemCenterX }) => {
+    closeMenuIfOpen();   // POP-1
+    if (kind !== 'basket') {
+      // dir 视图的根必须有静态归属（SEC-2）：否则任意路径一起头，下面的文件就都能 open 了。
+      // 当前渲染层只发 basket（dock.js 只 toggleFolder({kind:'basket'})），这条是兜底。
+      if (!staticFileAllowed(target)) {
+        console.log(`[popup] 拒绝对归属外目录弹窗：${target}`);
+        return { open: false };
+      }
+      return toggleFolderPopup('dir', { path: target }, itemCenterX);
+    }
+    return toggleFolderPopup('basket', { id }, itemCenterX);
   });
 
   // 右键菜单：自绘菜单窗（见 openMenuWindow）。返回被选中的 key，取消返回 null。
@@ -2368,6 +2774,13 @@ function registerIpc() {
     const win = BrowserWindow.fromWebContents(event.sender);
     // showInactive：显示但不抢用户当前应用的焦点（Dock 本身也不抢焦点，体验一致）
     if (win !== popupWindow || win.isDestroyed()) return false;
+    // 正在收起（closeFolderPopup 已经把内容清了）：别掐掉隐藏定时器、也别把窗口
+    // 重新露出来，让收起动画走完（POP-3）。这一条同时挡住"收起动画期间点到窗口"
+    // 把 away 轮询又挂回去、对着马上要隐藏的窗口空转的问题。
+    if (!popupKey || !popupPayload) return false;
+    // 关掉上一次收起留下的隐藏定时器：关闭动画 210ms 内再次打开不能被旧定时器盖掉（POP-3）
+    clearTimeout(popupHideTimer);
+    popupHideTimer = null;
     // 等页面画出第一帧再显示：不然窗口先亮起来、内容后到，磨砂模式会闪一下空白矩形
     // （看起来就是"弹出来一顿"）。复用热窗口时早就画好了，这里不会等。
     if (!popupPainted) {
@@ -2389,7 +2802,8 @@ function registerIpc() {
       popupOpenMode = '';
     }
     win.showInactive();
-    startPopupAwayWatch();
+    // 窗口真露面了才开"鼠标离开就关"的轮询（POP-3）：对隐藏窗口跑没有意义，白留定时器
+    if (win.isVisible()) startPopupAwayWatch();
     return true;
   });
 
@@ -2414,6 +2828,10 @@ function registerIpc() {
   // 拖出去 = 复制一份到落点，筐里那份保留——startDrag 拿不到"拖到哪了/放没放下"的回执，
   // 做不到"拖出去就从筐里消失"；真要移出用右键「移出到桌面」。
   ipcMain.on('basket:item-drag', async (event, { path: target } = {}) => {
+    if (!trustedSender(event)) {
+      console.log(`[ipc] 拒绝非本应用窗口调用 basket:item-drag（${pageTag(event)}）`);
+      return;
+    }
     if (!target || !fs.existsSync(target)) return;
     let icon = nativeImage.createEmpty();
     try {
@@ -2449,10 +2867,15 @@ function registerIpc() {
   ipcMain.handle('popup:navigate', async (event, { path: target }) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win !== popupWindow || !target) return null;
+    // 归属闸门（SEC-2）：只许在会话走过的地方与本就归属的目录之间上/下一格
+    if (!canEnterPopupDir(target)) {
+      console.log(`[popup] 拒绝对归属外目录的浏览：${target}`);
+      return null;
+    }
     const listing = filebrowse.listEntries(target);
     const entries = listing.entries || [];
-    warmEntryIcons(entries, settings.icon_size);
-    return withEntryIcons(
+    if (!listing.error) rememberPopupDir(target);   // 真走过去了才记进会话（SEC-2）
+    const result = await withEntryIcons(
       {
         kind: 'dir',
         name: path.basename(target) || target,
@@ -2464,6 +2887,10 @@ function registerIpc() {
       },
       POPUP_NAVIGATE_ICON_WAIT_MS
     );
+    // 预热挪到返回值算完之后（AN-2，warmEntryIcons 内部再 setImmediate 分拍）：
+    // 原来是同步逐个探测（.lnk 的 statSync+readFileSync）堵在 handler 首轮，拖慢这次返回
+    warmEntryIcons(entries, settings.icon_size);
+    return result;
   });
 
   // 拖右下角把手改弹窗尺寸（#3）：夹到合法范围与所在屏工作区内，再 setBounds，
@@ -2486,18 +2913,30 @@ function registerIpc() {
 
   ipcMain.handle('file:icon', (_event, { path: target, size }) => iconFor(target, size || 48));
 
-  ipcMain.handle('file:open', async (_event, { path: target }) => {
+  // 打开/定位文件（SEC-2）：只放行归属白名单内的路径——筐条目、筐目录/桌面/来源目录/
+  // Dock 目录之下，或当前弹窗会话真浏览过的地方。渲染层调用场景（popup.js 双击与右键、
+  // dock.js 右键）全部落在这些范围里，正常 UX 不受影响。
+  guardHandle('file:open', async (_event, { path: target }) => {
     if (!target) return false;
+    if (!fileOpAllowed(target)) {
+      console.log(`[file] 拒绝打开归属外的路径：${target}`);
+      return { ok: false, error: '这个位置不在本应用可打开的范围里' };
+    }
     const error = await shell.openPath(target);
     return { ok: !error, error: error || '' };
   });
 
-  ipcMain.handle('file:reveal', (_event, { path: target }) => {
-    if (target) shell.showItemInFolder(target);
+  guardHandle('file:reveal', (_event, { path: target }) => {
+    if (!target) return true;
+    if (!fileOpAllowed(target)) {
+      console.log(`[file] 拒绝定位归属外的路径：${target}`);
+      return false;
+    }
+    shell.showItemInFolder(target);
     return true;
   });
 
-  ipcMain.handle('file:list', (_event, { path: target }) => filebrowse.listEntries(target));
+  guardHandle('file:list', (_event, { path: target }) => filebrowse.listEntries(target));
 
   ipcMain.handle('window:settings', () => {
     openSettings();
@@ -2526,7 +2965,8 @@ function registerIpc() {
       persist();
     }
     syncDock();
-    broadcastState();
+    // 不再额外 broadcastState（PE-3）：两个分支到这里都已经 persist 过，
+    // persist 自己会全窗口广播一次，再发就是重复（Dock 收到两遍会连刷两次）
     return true;
   });
 
@@ -2555,9 +2995,37 @@ function registerIpc() {
     return true;
   });
 
+  // settings:update 的键白名单（SEC-6）：只认 settings.js 的 push/Set 里那些标量设置键。
+  // baskets 必须走 basket:update（items/dir 以主进程为准的保护在那边），dock_items 走 dock:*；
+  // 其余未知键一律忽略并记日志——渲染层不能借 patch 整体覆写配置。
+  const SETTINGS_PATCH_KEYS = new Set([
+    'accent_mode', 'theme_mode', 'reduce_motion',
+    'icon_size', 'shortcuts_dir', 'basket_dir',
+    'dock_enabled', 'dock_auto_hide', 'dock_icon_size', 'dock_magnify',
+    'dock_bottom_gap', 'dock_display', 'dock_specials', 'weather_city'
+  ]);
+  const SETTINGS_PATCH_DENIED = new Set(['baskets', 'dock_items']);
+
+  function sanitizeSettingsPatch(patch) {
+    const clean = {};
+    for (const [key, value] of Object.entries(patch || {})) {
+      if (SETTINGS_PATCH_DENIED.has(key)) {
+        console.log(`[settings] 拒绝经 settings:update 覆写 ${key}（走 basket:update / dock:*）`);
+        continue;
+      }
+      if (!SETTINGS_PATCH_KEYS.has(key)) {
+        console.log(`[settings] 忽略未知设置键：${key}`);
+        continue;
+      }
+      clean[key] = value;
+    }
+    return clean;
+  }
+
   // 设置补丁的统一入口：合并 → 主题解析 → 落盘 → 按变化面同步 Dock，返回新设置。
   // settings:update 和 settings:reset 都走这一条路，行为不会分叉。
-  function applySettingsPatch(patch) {
+  function applySettingsPatch(rawPatch) {
+    const patch = sanitizeSettingsPatch(rawPatch);   // SEC-6：键白名单在合并前过滤
     const before = {
       dock_enabled: settings.dock_enabled,
       dock_auto_hide: settings.dock_auto_hide,
@@ -2572,7 +3040,8 @@ function registerIpc() {
       basket_count: settings.baskets.length
     };
     settings = store.mergedSettings({ ...settings, ...(patch || {}) });
-    // 主题要在 persist（=广播）之前解析好，payload 里才带得出新深浅色
+    // 主题要在 persist（=广播）之前解析好：nativeTheme 先切，页面配色（媒体查询）
+    // 与系统材质会跟着 state:changed 同一拍到位
     if (settings.theme_mode !== before.theme_mode) applyTheme();
     persist();
     if (settings.weather_city !== before.weather_city) {
@@ -2604,6 +3073,7 @@ function registerIpc() {
       syncDock();
     } else if (
       settings.dock_icon_size !== before.dock_icon_size ||
+      settings.dock_magnify !== before.dock_magnify ||
       settings.dock_bottom_gap !== before.dock_bottom_gap ||
       settings.dock_display !== before.dock_display ||
       // 增删系统图标（此电脑/回收站/天气）也会改变条目数 → Dock 要重算宽度
@@ -2611,20 +3081,18 @@ function registerIpc() {
       settings.baskets.length !== before.basket_count
     ) {
       // 换屏（primary ⇄ mouse ⇄ 下标）要重算底边锚点与居中，跟改尺寸/抬起同一套处理
+      // （内容刷新交给上面 persist 的 broadcastState，这里不用再单发一遍，PE-3；
+      //  dock_magnify 决定顶部余量留多少——放大档位变了窗口高要跟着重算）
       applyDockGeometry();
-      if (dockWindow && !dockWindow.isDestroyed()) {
-        dockWindow.webContents.send('state:changed', { settings });
-      }
-    } else if (settings.dock_magnify !== before.dock_magnify) {
-      // 放大程度只影响渲染层动画，不用重建窗口
-      if (dockWindow && !dockWindow.isDestroyed()) {
-        dockWindow.webContents.send('state:changed', { settings });
-      }
     }
     return settings;
   }
 
-  ipcMain.handle('settings:update', (_event, { patch }) => applySettingsPatch(patch));
+  guardHandle(
+    'settings:update',
+    (_event, { patch }) => applySettingsPatch(patch),
+    () => settings   // 拒绝时仍回一份当前设置：settings.js 会直接拿返回值继续 render
+  );
 
   // 「恢复默认」：设置窗口里能调的那些项回到 DEFAULTS；筐、Dock 条目、弹窗尺寸、
   // 开机自启这类用户数据/系统登记不动。

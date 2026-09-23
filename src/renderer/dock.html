@@ -61,6 +61,11 @@
     pointer-events: none;
   }
   .dock-caption.flash { color: #9fd0ff; font-weight: 600; }
+  /* 浅色主题：#9fd0ff 几乎是白的，压在浅底上约 1.5:1、再叠 common.css 的白描边就彻底看不见了，
+     换成深蓝（对白底约 6.7:1）才可辨识；深色主题保留原值 */
+  @media (prefers-color-scheme: light) {
+    .dock-caption.flash { color: #1753b5; }
+  }
   /* 天气那行写的是实时气温（'26° 多云'），比筐名长，稍微放宽一点；
      邻居这一格都是空的，多出来的字落在条目之间的间隙里，不会压到谁 */
   .dock-item.weather .dock-caption { max-width: calc(var(--icon) + 26px); }
@@ -85,6 +90,10 @@
   .dock-item.leaving.gone { opacity: 0; transform: scale(0.2); }
   /* 减弱动画（#7）：进场/移除的淡出都省掉，直接增删 */
   body.reduce-motion .dock-item.leaving { transition: none; }
+  /* 系统级"减少动效"与设置开关等效：命中任一就不播离场过渡（JS 侧同样二合一，见 dock.js） */
+  @media (prefers-reduced-motion: reduce) {
+    .dock-item.leaving { transition: none; }
+  }
 
   /* Dock 空态（#4）：一条都没有时给一行极淡的提示，别让人以为没显示出来 */
   .dock-empty {

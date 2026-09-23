@@ -75,6 +75,22 @@ function days(state) {
   return box;
 }
 
+// 进场每次都从头播（AN-4）：先摘 .ready（卡片回到底层的收起态）并清掉退场用的
+// .closing，强制 reflow 让浏览器把收起态先算一遍，再挂回 .ready —— 少了 reflow 这一步，
+// 同一个 class 摘了马上挂回去不会过过渡，第二次 hover 就没有淡入。
+function playEnter() {
+  document.body.classList.remove('ready', 'closing');
+  void document.body.offsetWidth;   // 强制 reflow
+  document.body.classList.add('ready');
+}
+
+// 主进程要收窗了（hideWeatherCard 发来的 closing 标记，AN-4）：摘 .ready 加 .closing，
+// 卡片按 weather.html 里 .closing 的过渡淡出；窗口由主进程在等长时延后隐藏。
+function playExit() {
+  document.body.classList.remove('ready');
+  document.body.classList.add('closing');
+}
+
 function paint(state) {
   cardEl.innerHTML = '';
   if (!state || !state.current) {
@@ -85,7 +101,7 @@ function paint(state) {
       note.className = 'note warn';
     }
     cardEl.append(note);
-    document.body.classList.add('ready');
+    playEnter();
     return;
   }
   cardEl.append(head(state), now(state), node('sep'));
@@ -94,8 +110,15 @@ function paint(state) {
   if (state.ok === false && state.error) {
     cardEl.append(node('note warn', '数据可能有点旧：' + state.error));
   }
-  document.body.classList.add('ready');
+  playEnter();
 }
 
-api.onWeatherChanged((state) => paint(state));
+api.onWeatherChanged((state) => {
+  // 主进程的收窗通知（携带 closing 标记）：不重画，只播退场
+  if (state && state.closing) {
+    playExit();
+    return;
+  }
+  paint(state);
+});
 api.getWeather().then(paint).catch(() => paint(null));

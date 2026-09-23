@@ -5,7 +5,7 @@
 //
 // 坐标一律用「屏幕逻辑像素」的 {x, y, width, height}。
 
-const { normalizePath, pathKey } = require('./store');
+const { normalizePath, pathKey, DOCK_MAGNIFY_MAX } = require('./store');
 const path = require('node:path');
 
 const EDGE_BOTTOM = 'bottom';
@@ -136,13 +136,38 @@ function revealedGeometry(screen, dockSize, edge = EDGE_BOTTOM, margin = 0, anch
 // （顶部余量给放大后的图标向上生长用，靠上的行会被悬停图标盖住，这是 Nexus 同款行为）。
 const DOCK_CELL_GAP = 12;      // 单元间距（含图标间隙）
 const DOCK_ROW_PITCH = 16;     // 行距：图标尺寸 + 每行余量
-const DOCK_HEADROOM = 0.55;    // 顶部余量 = 图标尺寸 × 系数
 const DOCK_WIDTH_RATIO = 0.96; // 最大占屏宽
 // 图标下面那行小名字的高度（只有文件夹筐会写名字）。所有条目都留出这一格，
 // 否则带名字的条目会把它的图标顶高、和邻居对不齐。dock.html 里的 CSS 必须与之对齐。
 const DOCK_CAPTION_H = 15;
 
-function dockLayout(itemCount, iconSize, screenWidth, padding = 8) {
+// 顶部余量：悬停放大/点击弹跳会把图标顶推出窗口上沿，而 dock.html 是 overflow:hidden
+// （不 hidden 会长滚动条），推出去就被裁掉。余量按**当前设置的放大百分比**算：
+//   ceil(图标 × (1 + 当前放大%)) + HOP_LIFT + BOOST_LIFT + 安全余量
+// HOP_LIFT / BOOST_LIFT 与 renderer/dock.js 里的同名常量保持一致（动画实际抬升的像素，
+// store.js 那边改不了也不归这里管）；dock_magnify 变化时 main.js 会重算几何（applyDockGeometry），
+// 所以窗口高度始终按当前档位留余量，不必长期背着 100% 上限的空白带（那条带在常驻模式下挡点击）。
+const HOP_LIFT = 22;        // 点开弹跳最高抬升（= dock.js HOP_LIFT）
+const BOOST_LIFT = 10;      // 悬停最大上浮（= dock.js BOOST_LIFT）
+const HEADROOM_SAFETY = 8;  // 安全余量：缩放圆整、亚像素渲染
+
+// 顶部余量随图标尺寸与当前放大档位算：放大是百分比，余量里既有按比例的部分也有固定抬升，
+// 做不成一个固定系数，所以给函数而不是常量。不传 magnifyPercent（或传坏值）按上限
+// DOCK_MAGNIFY_MAX 算——最坏情况兜底，未知输入宁可高一点也不裁图标。
+function dockHeadroom(iconSize, magnifyPercent = DOCK_MAGNIFY_MAX) {
+  const raw = Number(magnifyPercent);
+  const m = Number.isFinite(raw)
+    ? Math.min(Math.max(raw, 0), DOCK_MAGNIFY_MAX)
+    : DOCK_MAGNIFY_MAX;
+  return (
+    Math.ceil(iconSize * (1 + m / 100)) +
+    HOP_LIFT +
+    BOOST_LIFT +
+    HEADROOM_SAFETY
+  );
+}
+
+function dockLayout(itemCount, iconSize, screenWidth, padding = 8, magnifyPercent = DOCK_MAGNIFY_MAX) {
   const count = Math.max(1, itemCount);
   const cell = iconSize + DOCK_CELL_GAP;
   const maxW = Math.max(240, Math.floor(screenWidth * DOCK_WIDTH_RATIO));
@@ -151,7 +176,7 @@ function dockLayout(itemCount, iconSize, screenWidth, padding = 8) {
   const inRow = Math.min(count, perRow);
   const width = padding * 2 + inRow * cell;
   const height =
-    Math.ceil(iconSize * DOCK_HEADROOM) +
+    dockHeadroom(iconSize, magnifyPercent) +
     rows * (iconSize + DOCK_CAPTION_H + DOCK_ROW_PITCH) +
     padding;
   return { width, height, rows, perRow };
@@ -389,7 +414,6 @@ module.exports = {
   COLLECT_SUFFIXES,
   DOCK_CAPTION_H,
   DOCK_CELL_GAP,
-  DOCK_HEADROOM,
   DOCK_ROW_PITCH,
   DOCK_WIDTH_RATIO,
   EDGE_BOTTOM,
@@ -403,6 +427,7 @@ module.exports = {
   addItem,
   basketCandidates,
   bottomAnchor,
+  dockHeadroom,
   dockLayout,
   displayName,
   easeOutBack,

@@ -70,6 +70,18 @@
   body.reduce-motion.collapsed .popup-frame {
     transform: none;
   }
+  /* 系统「减少动效」：与上面的 body.reduce-motion 并列生效，任一命中开合都直接出现/消失。
+     选择器与 body.reduce-motion 一一对齐（含 .glass 变体），放到所有开合规则之后才压得住。 */
+  @media (prefers-reduced-motion: reduce) {
+    .popup-frame,
+    body.glass .popup-frame {
+      transition: none;
+    }
+    body.collapsed .popup-frame,
+    body.glass.collapsed .popup-frame {
+      transform: none;
+    }
+  }
 
   .popup {
     position: absolute;
@@ -92,6 +104,7 @@
     font-size: 13px;
     font-weight: 600;
     flex: 1 1 auto;
+    min-width: 0;                    /* 收缩下限放开到 0：窄窗口靠省略号截断，不许把右侧按钮挤出边界 */
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -111,6 +124,16 @@
   .nav-btn:hover:not(:disabled) { background: var(--head-btn-hover); }
   .nav-btn:disabled { opacity: 0.35; cursor: default; }
   .nav-btn.wide { width: auto; padding: 0 10px; font-size: 12px; }
+  /* ⌂ 按钮文案是整串筐名：窄窗口（最小 260px）下必须和标题一起可收缩，否则整串名字会把
+     「＋/✕」挤出 .popup 的 overflow:hidden 之外、点都点不到。按 id 单独收紧是因为
+     「＋」也挂 .nav-btn.wide，它必须保持 flex:0 0 auto 永不缩。 */
+  #btnHome {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   .popup-grid {
     flex: 1 1 auto;
@@ -122,11 +145,7 @@
     justify-content: start;
     align-content: start;
   }
-  .popup-grid::-webkit-scrollbar { width: 8px; }
-  .popup-grid::-webkit-scrollbar-thumb {
-    background: var(--scroll-thumb);
-    border-radius: 4px;
-  }
+  /* 滚动条样式不再内联一份：统一走 common.css 里 .popup-grid 那条共用规则（细滚动条） */
 
   .popup-status {
     padding: 0 12px 8px;
@@ -135,6 +154,11 @@
     flex: 0 0 auto;
   }
   .popup-status.error { color: #ffbe78; }
+  /* 浅色主题：#ffbe78 压近白底只有约 1.6:1、错误提示读不出来，换成深棕红
+     （保留「警告/错误」语义，对 #fff 实测约 7.6:1 ≥ 4.5:1）；暗色仍用原值 */
+  @media (prefers-color-scheme: light) {
+    .popup-status.error { color: #9b2c1b; }
+  }
 
   .empty-tip {
     position: absolute;
@@ -181,7 +205,7 @@
         <button class="nav-btn wide" id="btnAdd" title="往这个筐里添加文件（可多选；也可以直接把文件拖进窗口，或拖到 Dock 的文件夹图标上）">＋</button>
         <button class="nav-btn" id="btnClose" title="关闭">✕</button>
       </div>
-      <div class="popup-grid" id="grid"></div>
+      <div class="popup-grid" id="grid" role="listbox" aria-multiselectable="true" aria-label="文件列表"></div>
       <div class="popup-status" id="status"></div>
       <div class="empty-tip" id="emptyTip" style="display:none"></div>
     </div>
