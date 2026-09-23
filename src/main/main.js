@@ -1103,9 +1103,13 @@ async function openWeatherApp() {
 function weatherCardGeometry(anchorCenterX, size) {
   const display = activeDisplay();
   const bounds = dockWindow && !dockWindow.isDestroyed() ? dockWindow.getBounds() : null;
+  // 锚在图标行上沿，不是带放大余量的窗口上沿（U-1 连带：余量变大后卡片整体飘高）
+  const anchor = bounds
+    ? dockmodel.dockContentBounds(bounds, settings.dock_icon_size, settings.dock_magnify)
+    : null;
   return dockmodel.popupGeometry(
     display.workArea,
-    bounds,
+    anchor,
     anchorCenterX,
     size,
     POPUP_EDGE_GAP,
@@ -1170,12 +1174,15 @@ function startWeatherCardWatch() {
       return;
     }
     const point = screen.getCursorScreenPoint();
-    // 与文件夹弹窗同口径：Dock 那圈多让一点（上方给放大动画，下方把 Dock 与底边之间的缝包进来）
-    const pad = 16 + Math.max(0, settings.dock_bottom_gap || 0);
-    const onDock =
-      dockWindow &&
-      !dockWindow.isDestroyed() &&
-      dockmodel.pointNearBounds(point, dockWindow.getBounds(), pad);
+    // 只认「图标行 + 16px」：窗口顶部那条放大余量空白带不算「Dock 附近」——鼠标穿行去卡片
+    // 由卡片自己的 16px 包络接住（卡片锚在图标行上沿，与图标只隔 10px，两块包络是接上的）；
+    // 停在空白带里超过 500ms 就收（那不是该停留的地方），底边缝也不再豁免
+    // （沿底边离开＝明确走人，与旧行为「离开图标即收」对齐）。
+    const row =
+      dockWindow && !dockWindow.isDestroyed()
+        ? dockmodel.dockContentBounds(dockWindow.getBounds(), settings.dock_icon_size, settings.dock_magnify)
+        : null;
+    const onDock = Boolean(row) && dockmodel.pointNearBounds(point, row, 16);
     const onCard = dockmodel.pointNearBounds(point, win.getBounds(), 16);
     if (onDock || onCard) {
       weatherCardLeftAt = 0;
@@ -1928,11 +1935,15 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
   closeFolderPopup('换内容');
 
   const dockBounds = dockWindow && !dockWindow.isDestroyed() ? dockWindow.getContentBounds() : null;
+  // 弹窗贴图标行上沿：窗口顶部那条是放大余量的空白带，拿窗口上沿当地锚会跟着余量飘高（U-1 连带）
+  const anchorBounds = dockBounds
+    ? dockmodel.dockContentBounds(dockBounds, settings.dock_icon_size, settings.dock_magnify)
+    : null;
   const display = activeDisplay();
   const popupSize = { width: settings.popup_width, height: settings.popup_height };
   const rect = dockmodel.popupGeometry(
     display.workArea,
-    dockBounds,
+    anchorBounds,
     anchorXInDock || 0,
     popupSize,
     POPUP_EDGE_GAP,
@@ -2195,7 +2206,10 @@ const RENAME_DOCK_GAP = 12;
 
 function renamePosition(anchorScreenX) {
   const area = activeDisplay().workArea;   // 改名窗钉在 Dock 上方，跟着 Dock 那块屏（#9）
-  const dockTop = dockTargetGeometry().y;
+  // 贴图标行上沿：窗口顶部那条是放大余量的空白带，拿窗口上沿当地锚会跟着余量飘高（U-1 连带）
+  const dockTop =
+    dockTargetGeometry().y +
+    dockmodel.dockHeadroom(settings.dock_icon_size, settings.dock_magnify);
   const wanted = Number.isFinite(anchorScreenX)
     ? Math.round(anchorScreenX - RENAME_WIDTH / 2)
     : Math.round(area.x + (area.width - RENAME_WIDTH) / 2);

@@ -11,7 +11,7 @@ Windows 桌面整理工具：把散落的文件、文件夹、快捷方式收进
 - **主进程落盘只有三处**：设置文件（`%APPDATA%\DeskBasket\settings.json`）、图标缓存、筐的文件夹；此外启动器 `scripts/launch.js` 会向 `%TEMP%` 追加两份日志（`deskbasket-run.log` / `deskbasket-run.err.log`）。除此之外不写任何地方，也不上传任何数据——唯一的网络请求是天气（见下文），不发送任何本机信息。
 
 - 环境要求：Windows 10/11 ＋ Node.js（开发态跑 Electron）
-- 当前版本：3.8.1
+- 当前版本：3.8.2
 
 ---
 

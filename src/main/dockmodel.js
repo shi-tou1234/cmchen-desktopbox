@@ -167,6 +167,15 @@ function dockHeadroom(iconSize, magnifyPercent = DOCK_MAGNIFY_MAX) {
   );
 }
 
+// Dock 窗口顶部那条是放大余量的空白带（U-1 修复后按当前档位留，可能有 100+px）。
+// 弹窗/天气卡/改名窗、以及「鼠标还在 Dock 附近」的判定，要贴的是**图标行上沿**，
+// 不是窗口上沿——拿窗口上沿当地锚，余量一变大这些窗口与判定区就整体飘上去。
+function dockContentBounds(bounds, iconSize, magnifyPercent) {
+  if (!bounds) return null;
+  const headroom = dockHeadroom(iconSize, magnifyPercent);
+  return { ...bounds, y: bounds.y + headroom, height: Math.max(0, bounds.height - headroom) };
+}
+
 function dockLayout(itemCount, iconSize, screenWidth, padding = 8, magnifyPercent = DOCK_MAGNIFY_MAX) {
   const count = Math.max(1, itemCount);
   const cell = iconSize + DOCK_CELL_GAP;
@@ -427,6 +436,7 @@ module.exports = {
   addItem,
   basketCandidates,
   bottomAnchor,
+  dockContentBounds,
   dockHeadroom,
   dockLayout,
   displayName,

@@ -57,3 +57,15 @@ test('dockHeadroom 输入防御：0 取最小、坏输入按上限兜底', () =>
   assert.strictEqual(dockmodel.dockHeadroom(48, -5), dockmodel.dockHeadroom(48, 0), '负数夹到 0');
   assert.strictEqual(dockmodel.dockHeadroom(48, 999), max, '超上限夹到上限');
 });
+
+test('dockContentBounds：从窗口 bounds 上剪掉余量带（弹窗/天气卡/改名窗的锚）', () => {
+  const bounds = { x: 100, y: 791, width: 1460, height: 233 };
+  const head = dockmodel.dockHeadroom(64, 40);
+  const content = dockmodel.dockContentBounds(bounds, 64, 40);
+  assert.strictEqual(content.y, 791 + head, 'y 应下移到图标行上沿');
+  assert.strictEqual(content.height, 233 - head, '高度应去掉余量带');
+  assert.strictEqual(content.x, 100, 'x 不动');
+  assert.strictEqual(dockmodel.dockContentBounds(null, 64, 40), null, '空 bounds 传 null');
+  // 剪完仍要盖住图标行本身（图标行至少 icon+caption 高）
+  assert.ok(content.height >= 64 + dockmodel.DOCK_CAPTION_H, '剪完不能把图标行剪没');
+});
