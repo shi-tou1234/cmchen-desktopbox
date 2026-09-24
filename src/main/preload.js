@@ -67,6 +67,12 @@ contextBridge.exposeInMainWorld('deskbasket', {
   getSpecialIcon: (id) => ipcRenderer.invoke('special:icon', { id }),
   openSpecial: (id) => ipcRenderer.invoke('special:open', { id }),
   removeDockSpecial: (id) => ipcRenderer.invoke('dock:remove-special', { id }),
+  // 主进程推来「图标换了」：回收站空/满翻转时现拉的新图（页面直接换 img.src）
+  onSpecialIconChanged: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on('special:icon-changed', listener);
+    return () => ipcRenderer.removeListener('special:icon-changed', listener);
+  },
 
   // 天气：当前天气＋未来几天的那份快照（主进程每 15 分钟刷一次，页面只管画）
   getWeather: () => ipcRenderer.invoke('weather:get'),

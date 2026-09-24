@@ -132,7 +132,7 @@ function makeNode(entry) {
       })
       .catch(() => {});
   } else if (entry.type === 'special') {
-    // 此电脑 / 回收站：图标由 shell 按解析名给（带状态，如回收站空/非空）
+    // 此电脑 / 回收站：图标由 shell 按解析名给（带状态，如回收站空/满）
     api
       .getSpecialIcon(entry.id)
       .then((dataUrl) => {
@@ -151,6 +151,7 @@ function makeNode(entry) {
         img.src = fallbackIcon();
       });
   }
+  node.img = img;   // 主进程推新图（回收站空/满翻转）时直接换这张，不必整块重画
   item.append(img);
 
   // 图标下面那行小字：文件夹筐写筐名、天气写实时气温（'26° 多云'），其余条目留空保持对齐
@@ -719,5 +720,17 @@ api.onStateChanged((state) => {
 
 // 天气更新就改那一行小字（不整块重画）
 api.onWeatherChanged((state) => applyWeather(state));
+
+// 回收站空/满翻转：主进程现拉的新图直接换 src——同样不整块重画
+//（重画会把入场动画又播一遍，看着像 Dock 闪了一下，理由同 applyWeather）
+api.onSpecialIconChanged((payload) => {
+  if (!payload || !payload.id || !payload.dataUrl) return;
+  for (const node of nodes) {
+    if (node.entry.type === 'special' && node.entry.id === payload.id && node.img) {
+      node.img.src = payload.dataUrl;
+      return;
+    }
+  }
+});
 
 refresh();

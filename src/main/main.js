@@ -34,6 +34,7 @@ const basketModel = require('./baskets');
 const dockmodel = require('./dockmodel');
 const filebrowse = require('./filebrowse');
 const shellIcons = require('./shellIcons');
+const recyclebin = require('./recyclebin');
 const specials = require('./specials');
 const windowLayer = require('./windowLayer');
 const winFactory = require('./windows');
@@ -874,7 +875,136 @@ function specialIconFor(id) {
   if (process.platform !== 'win32') {
     return Promise.resolve(id === specials.WEATHER_ID ? WEATHER_FALLBACK_ICON_DATA_URL : '');
   }
+  // 回收站：看门狗正在现拉新图就等它一下（上限 2 秒），首屏直接拿到新状态，
+  // 不会先闪一张按天缓存里的旧图再被广播换掉；超时才退回缓存，广播稍后照样会来。
+  if (id === 'recyclebin' && recycleIconPending) {
+    const raced = Promise.race([
+      recycleIconPending.catch(() => ''),
+      new Promise((resolve) => setTimeout(() => resolve(''), RECYCLE_WAIT_FRESH_MS))
+    ]);
+    return raced.then((dataUrl) => dataUrl || shellIcons.parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX));
+  }
   return shellIcons.parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX);
+}
+
+// ---------------------------------------------------------------- 回收站图标的「空 / 满」
+//
+// 回收站图标是状态相关的（空/满两张不同，shell 按当前状态现给），但 shellIcons 的
+// 虚拟项缓存按天失效——当天第一问是什么状态，之后一整天 Dock 上都是那张图；在
+// 资源管理器里删东西/清空，主进程也全然不知（真机报障：图标答不出「回收站里到底
+// 有没有文件」，取证见 PROGRESS）。
+//
+// 修法把「探状态」与「取图」拆开：
+//   - 探：每秒 recyclebin.probeToken() 扫一遍各盘 $Recycle.Bin\SID 目录的 mtime
+//     （目录里增删 $R/$I 子文件都会顶到 mtime），几次 stat、不起进程，没变就到此为止；
+//   - 取：变了才 { fresh: true } 让 shell 现拉一张（绕过按天缓存、写回缓存），
+//     拿到后广播 special:icon-changed，Dock 渲染层直接换 img.src（不整块重画）。
+const RECYCLE_WATCH_MS = 1000;      // 探测节拍：本机 26 个盘符全扫实测 2ms，1 秒绰绰有余
+const RECYCLE_RETRY_MS = 2000;      // 现拉失败（PowerShell 起不来/超时）后的补拉间隔
+const RECYCLE_MAX_RETRIES = 3;      // 连败上限：不无限起进程，下一次状态变化重置预算
+const RECYCLE_WAIT_FRESH_MS = 2000; // special:icon 等在途现拉的上限（见 specialIconFor）
+let recycleWatchTimer = null;
+let recycleWatchToken = '';         // 上次探测的 token（空串 = 看门狗没在跑）
+let recycleIconPending = null;      // 正在现拉的那张（首屏 special:icon 会等它）
+let recycleIconAgain = false;       // 拉取途中状态又变了一次：这张回来立刻补拉
+let recycleIconRetryTimer = null;
+let recycleIconRetries = 0;
+
+// 把现拉到的新图广播给各窗口（做法同天气快照；目前只有 Dock 页面有读者）
+function sendSpecialIcon(id, dataUrl) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('special:icon-changed', { id, dataUrl });
+  }
+}
+
+// 补拉一次：连败到上限就歇着，等下一次状态变化（recycleWatchTick）重置预算
+function scheduleRecycleRetry() {
+  if (recycleIconRetries >= RECYCLE_MAX_RETRIES) return;
+  recycleIconRetries += 1;
+  if (recycleIconRetryTimer) return;
+  console.log(`[recyclebin] 现拉图标失败，第 ${recycleIconRetries} 次补拉排在 ${RECYCLE_RETRY_MS}ms 后`);
+  recycleIconRetryTimer = setTimeout(() => {
+    recycleIconRetryTimer = null;
+    refreshRecycleIcon().catch(() => {});
+  }, RECYCLE_RETRY_MS);
+}
+
+// 现拉一张回收站图标并广播。同一时刻只拉一张：拉取途中状态又变就记个「回头再补」，
+// 等这张回来立刻再拉，不叠着起 PowerShell。
+function refreshRecycleIcon() {
+  if (recycleIconPending) {
+    recycleIconAgain = true;
+    return recycleIconPending;
+  }
+  const special = specials.findSpecial('recyclebin');
+  if (!special) return Promise.resolve('');
+  recycleIconPending = (async () => {
+    try {
+      const dataUrl = await shellIcons.parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX, {
+        fresh: true
+      });
+      if (!dataUrl) {
+        scheduleRecycleRetry();   // 手里那张还对的图原样留着（fresh 失败不写缓存）
+        return '';
+      }
+      recycleIconRetries = 0;
+      sendSpecialIcon('recyclebin', dataUrl);
+      console.log('[recyclebin] 已现拉新图标并广播给 Dock（绕过按天缓存）');
+      return dataUrl;
+    } catch (_) {
+      scheduleRecycleRetry();
+      return '';
+    }
+  })();
+  const done = recycleIconPending;
+  return done
+    .finally(() => {
+      recycleIconPending = null;
+      if (recycleIconAgain) {
+        recycleIconAgain = false;
+        refreshRecycleIcon().catch(() => {});
+      }
+    })
+    .then(() => done);
+}
+
+// 一拍探测：token 变了（任何盘的回收站目录有增删）才现拉
+function recycleWatchTick() {
+  if (!recycleWatchTimer) return;   // 已被撤下 Dock / 正在退出
+  let token = '';
+  try {
+    token = recyclebin.probeToken();
+  } catch (_) {
+    return;   // 探测整体失败不致命，下一拍再试
+  }
+  if (token === recycleWatchToken) return;
+  recycleWatchToken = token;
+  recycleIconRetries = 0;   // 状态变了 = 重试预算重置
+  refreshRecycleIcon().catch(() => {});
+}
+
+function startRecycleWatch() {
+  if (process.platform !== 'win32') return;
+  stopRecycleWatch();
+  try {
+    recycleWatchToken = recyclebin.probeToken();
+  } catch (_) {
+    recycleWatchToken = '';
+  }
+  recycleIconRetries = 0;
+  // 启动先现拉一次：把「按天缓存」里可能是旧状态的那张当场顶掉，
+  // 而不是等回收站下一次有动静（specialIconFor 会等这张，首屏不闪旧图）
+  refreshRecycleIcon().catch(() => {});
+  recycleWatchTimer = setInterval(recycleWatchTick, RECYCLE_WATCH_MS);
+}
+
+function stopRecycleWatch() {
+  if (recycleWatchTimer) clearInterval(recycleWatchTimer);
+  recycleWatchTimer = null;
+  if (recycleIconRetryTimer) clearTimeout(recycleIconRetryTimer);
+  recycleIconRetryTimer = null;
+  recycleWatchToken = '';
+  recycleIconRetries = 0;
 }
 
 // 打开开始菜单：模拟按一下 Win 键（keybd_event 注入，全局生效，不需要窗口焦点）。
@@ -2487,6 +2617,8 @@ function registerIpc() {
     );
     syncDock();
     prewarmBasketIcons();
+    // 删除一发生就立刻探一拍：回收站状态刚变，不等下一秒的节拍
+    if (done.length) recycleWatchTick();
     console.log(`[basket] 删除（进回收站）${done.length} 条、失败 ${failed.length} → 现有 ${saved.items.length} 条`);
     return { done, failed, total: saved.items.length };
   });
@@ -3077,6 +3209,10 @@ function registerIpc() {
       stopWeatherRefresh();
       hideWeatherCard();
     }
+    const binOn = settings.dock_specials.includes('recyclebin');
+    const binWas = before.dock_specials.includes('recyclebin');
+    if (binOn && !binWas) startRecycleWatch();   // 刚把回收站摆上 Dock
+    if (!binOn && binWas) stopRecycleWatch();    // 撤下来就别每秒扫盘了
     if (settings.dock_enabled !== before.dock_enabled) syncDock();
     else if (settings.dock_auto_hide !== before.dock_auto_hide) {
       // 常驻 ⇄ 自动收起：切换置顶，常驻时重新放到桌面层
@@ -3160,6 +3296,8 @@ function bootstrap() {
   startDockAutoHide();
   // 天气：图标在 Dock 上才去取（撤下来就不白打接口）
   if (settings.dock_specials.includes(specials.WEATHER_ID)) startWeatherRefresh();
+  // 回收站：图标在 Dock 上才起空/满看门狗（同天气的取舍）
+  if (settings.dock_specials.includes('recyclebin')) startRecycleWatch();
   // 老条目归位（搬进筐目录）之后再热图标：顺序反了会给"已经不在那个路径"的图标白热一遍
   migrateBasketFiles()
     .then(() => {
@@ -3203,6 +3341,7 @@ if (!singleInstance) {
   app.on('will-quit', () => {
     // 定时器留着会把进程吊住：退出前明确停掉
     stopWeatherRefresh();
+    stopRecycleWatch();
     stopWeatherCardWatch();
     if (dockWatchTimer) clearInterval(dockWatchTimer);
     // 鼠标状态那个 PowerShell 小循环也要收掉，别留一个孤儿进程

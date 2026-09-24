@@ -1002,3 +1002,85 @@ test('桌面层：窗口句柄按小端读出，拿不到回 "0" 不抛异常', 
     '0'
   );
 });
+
+
+// ---------------------------------------------------------------- 回收站图标的「空/满」
+// 真机报障：回收站图标答不出「里面到底有没有文件」。查障结论：shell 现取的状态图标
+// 是准的（本机非空时 SHGetFileInfo(PIDL) 给下标 32 = 满，与 SIID_RECYCLERFULL 逐字节
+// 一致），坏在缓存——虚拟项签名按天失效，当天第一问定格成全天的图。修法拆成两半，
+// 这里各自锁住：状态探测（recyclebin.probeWith：几次 stat、不起进程）与现拉
+//（shellIcons.requestIcon 的 fresh：绕过缓存、写回、失败不盖旧图）。
+
+const recyclebin = require('../src/main/recyclebin');
+
+test('回收站探测：SID 目录里增删文件会顶到 mtime，token 随之变化；没动静时逐字节稳定', () => {
+  const root = tmpdir();
+  const sid = path.join(root, 'S-1-5-21-fake');
+  fs.mkdirSync(sid);
+  // 先把目录 mtime 拨回过去：免得「建目录」和「写文件」挤进同一毫秒，token 看起来没变
+  const past = new Date(Date.now() - 60000);
+  fs.utimesSync(sid, past, past);
+  const rootFor = (letter) => (letter === 'C' ? root : path.join(root, 'no-drive-' + letter));
+
+  const before = recyclebin.probeWith(rootFor);
+  assert.ok(before.includes('C:S-1-5-21-fake:'), '能读到属性的 SID 目录要进 token');
+  assert.strictEqual(recyclebin.probeWith(rootFor), before, '没动静时 token 必须逐字节稳定');
+
+  fs.writeFileSync(path.join(sid, '$RAbCdEf.txt'), 'x');   // 像真回收站那样往目录里落子文件
+  const after = recyclebin.probeWith(rootFor);
+  assert.notStrictEqual(after, before, '目录 mtime 变了 → token 必须变');
+});
+
+test('回收站探测：根下的标记文件不算数，读不到的根静默跳过', () => {
+  const root = tmpdir();
+  fs.mkdirSync(path.join(root, 'S-1-5-21-fake'));
+  fs.writeFileSync(path.join(root, 'DIRTY'), '');   // $Recycle.Bin 根下会有这类系统标记
+  const rootFor = (letter) => (letter === 'C' ? root : path.join(root, 'no-drive-' + letter));
+  const before = recyclebin.probeWith(rootFor);
+  fs.appendFileSync(path.join(root, 'DIRTY'), 'y');
+  assert.strictEqual(recyclebin.probeWith(rootFor), before, '根级文件的增删不该改 token');
+  // 盘不存在（readdir 直接抛）：跳过而不是抛出去——26 个盘符里大多数都不存在
+  assert.strictEqual(recyclebin.probeWith((letter) => path.join(root, 'missing-' + letter)), '');
+});
+
+test('图标 fresh：绕过按天缓存现拉、写回后普通请求读到新图，拉空不盖掉手里那张还对的图', async () => {
+  // 取图那层用注入的假 runner（store.__setRootForTests 同款注入口）：
+  // 测试既不起真 PowerShell，磁盘缓存也落在临时目录里（异步用例不能走 withRoot，
+  // 它的 finally 会在 await 完成前就把根目录还回去）
+  store.__setRootForTests(tmpdir());
+  const request = 'p::{DEADBEEF-0000-0000-0000-0000FRESHPING}';
+  const answers = ['PNGDAY1', 'PNGDAY2'];   // 第 3 次起回空表，模拟 PowerShell 挂了
+  let calls = 0;
+  shellIcons.__setBatchRunnerForTests(async (requests) => {
+    const answer = answers[calls] || '';
+    calls += 1;
+    return { icons: answer ? new Map([[requests[0], answer]]) : new Map() };
+  });
+  try {
+    const first = await shellIcons.requestIcon(request);
+    assert.ok(first.endsWith('PNGDAY1'), '冷缓存 → 现取第一张');
+    assert.strictEqual(calls, 1);
+
+    const cached = await shellIcons.requestIcon(request);
+    assert.ok(cached.endsWith('PNGDAY1'));
+    assert.strictEqual(calls, 1, '普通请求命中内存缓存，不再起进程');
+
+    const fresh = await shellIcons.requestIcon(request, undefined, { fresh: true });
+    assert.ok(fresh.endsWith('PNGDAY2'), 'fresh 必须绕过缓存现拉');
+    assert.strictEqual(calls, 2, '缓存再热，fresh 也要重新取');
+
+    const after = await shellIcons.requestIcon(request);
+    assert.ok(after.endsWith('PNGDAY2'), 'fresh 的结果写回缓存，普通请求读到新图');
+    assert.strictEqual(calls, 2);
+
+    const failed = await shellIcons.requestIcon(request, undefined, { fresh: true });
+    assert.strictEqual(failed, '', '现拉失败回空串');
+    assert.strictEqual(calls, 3);
+
+    const kept = await shellIcons.requestIcon(request);
+    assert.ok(kept.endsWith('PNGDAY2'), 'fresh 失败不拿空串盖掉手里那张还对的图');
+  } finally {
+    shellIcons.__setBatchRunnerForTests(null);
+    store.__setRootForTests(null);
+  }
+});

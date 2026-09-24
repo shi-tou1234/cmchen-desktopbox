@@ -538,7 +538,11 @@ function runPowerShell(requests, px) {
 // ------------------------------------------------------------------ 缓存与批量
 
 const memory = new Map();   // `${request}|${signature}|${px}` -> dataURL
-const pending = new Map();  // 同上 key -> { request, signature, px, resolvers }
+// 排队中的批次：键正常就是上面那个缓存键；fresh 请求的键带一个递增序号
+// （见 requestIcon），保证不跟「可能拍在状态变化之前」的在途请求合并。
+// 条目里的 key 永远是规范缓存键——回填、写盘、写内存都按它来。
+const pending = new Map();  // 排队键 -> { key, request, px, resolvers, fresh }
+let freshSeq = 0;           // fresh 排队键的序号（只要保证不重复，不承重）
 let flushTimer = null;
 let diskWriteCount = 0;     // 距上次后台清扫又写了多少次磁盘缓存
 let sweepTimer = null;      // 清扫定时器：同一时刻只挂一个，防止重复排队
@@ -558,8 +562,10 @@ function cacheDir() {
   return path.join(store.settingsDir(), CACHE_DIR_NAME);
 }
 
-// 缓存签名：文件按 mtime+size（换了图标就重取）；虚拟项按天失效，
-// 因为回收站这类图标是「状态相关」的（空/非空不同），不能永久缓存。
+// 缓存签名：文件按 mtime+size（换了图标就重取）；虚拟项按天失效打底。
+// 回收站这类「状态相关」（空/满不同）的图只按天失效不够——一天之内状态翻转
+// 图标还是旧的（当天第一问定格成当天的状态），所以主进程的回收站看门狗会用
+// { fresh: true } 现拉一张**写回本键**（见 main.js），这里的按天键对它只是兜底。
 function signatureOf(request, now = new Date()) {
   const { kind, value } = decodeRequest(request);
   if (kind !== 'file') return `virtual:${now.toISOString().slice(0, 10)}`;
@@ -644,14 +650,24 @@ function sweepDiskCache() {
   }
 }
 
-// 单批：起一个 PowerShell，把结果回填给这一批的等待者。
+// 取图的真正执行者：起一个 PowerShell，把结果回填给这一批的等待者。
+// 默认是 runPowerShell；单测用 __setBatchRunnerForTests 换成假的（store.__setRootForTests
+// 同款注入口），免得测试去起真的 PowerShell。
+let batchRunner = runPowerShell;
+
+function __setBatchRunnerForTests(fn) {
+  batchRunner = typeof fn === 'function' ? fn : runPowerShell;
+  return null;
+}
+
+// 单批：把结果回填给这一批的等待者。
 // 批与批之间没有共享可变状态——runPowerShell 各自 spawn 各自的子进程、env 是新对象，
 // pending 在 flush 开头就已清空且每条 entry 只属于一个 chunk，回填写的 key 互不重叠，
 // 因此每条 key 只被回填一次（幂等），一批失败/超时只让该批回空串，不牵连其它批。
 async function runBatch(px, chunk) {
   let icons = new Map();
   try {
-    const result = await runPowerShell(chunk.map((entry) => entry.request), px);
+    const result = await batchRunner(chunk.map((entry) => entry.request), px);
     icons = result.icons;
   } catch (_) {
     icons = new Map();   // 这批失败：这批全回空串（上层退回通用图标），错误照旧被兜底
@@ -659,8 +675,14 @@ async function runBatch(px, chunk) {
   for (const entry of chunk) {
     const base64 = icons.get(entry.request) || '';
     const dataUrl = base64 ? `data:image/png;base64,${base64}` : '';
-    if (base64) writeDisk(entry.key, base64);
-    memorySet(entry.key, dataUrl);
+    if (base64) {
+      writeDisk(entry.key, base64);
+      memorySet(entry.key, dataUrl);
+    } else if (!entry.fresh) {
+      memorySet(entry.key, dataUrl);   // 普通请求失败回空串：上层退回通用图标（沿用原行为）
+    }
+    // fresh 失败：不拿空串盖掉手里那张还对的图（否则一次 PowerShell 抖动
+    // 就把好好显示着的图标变成「破图占位」），由调用方决定何时重试
     for (const resolve of entry.resolvers) resolve(dataUrl);
   }
 }
@@ -699,24 +721,33 @@ function schedule() {
   }, DEBOUNCE_MS);
 }
 
-// 取图标（dataURL）；拿不到回空串，由上层退回通用图标
-function requestIcon(request, px = ICON_PX) {
+// 取图标（dataURL）；拿不到回空串，由上层退回通用图标。
+//
+// opts.fresh = 状态相关图标（回收站空/满）的「现拉」通道：
+//   * 跳过内存/磁盘读——哪怕按天缓存里躺着一张也不发它；
+//   * 排队键带序号，不搭上任何在途请求（在途那张可能拍在状态变化之前）；
+//   * 结果照旧写回规范缓存键——之后所有普通请求读到的就是这张新图。
+function requestIcon(request, px = ICON_PX, opts = {}) {
   if (!request || request.length < 2) return Promise.resolve('');
+  const fresh = Boolean(opts && opts.fresh);
   const signature = signatureOf(request);
   const key = cacheKey(request, signature, px);
-  if (memory.has(key)) return Promise.resolve(memory.get(key));
-  const cached = readDisk(key);
-  if (cached) {
-    memorySet(key, cached);
-    return Promise.resolve(cached);
+  if (!fresh) {
+    if (memory.has(key)) return Promise.resolve(memory.get(key));
+    const cached = readDisk(key);
+    if (cached) {
+      memorySet(key, cached);
+      return Promise.resolve(cached);
+    }
   }
+  const queueKey = fresh ? `${key}#fresh:${(freshSeq += 1)}` : key;
   return new Promise((resolve) => {
-    const entry = pending.get(key);
+    const entry = pending.get(queueKey);
     if (entry) {
       entry.resolvers.push(resolve);
       return;
     }
-    pending.set(key, { key, request, px, resolvers: [resolve] });
+    pending.set(queueKey, { key, request, px, resolvers: [resolve], fresh });
     schedule();
   });
 }
@@ -758,15 +789,17 @@ async function iconDataUrl(target, px = ICON_PX) {
   return requestIcon(encodeFileRequest(target), px);
 }
 
-// 虚拟项的图标（此电脑、回收站…）——载荷是 shell 解析名，如 ::{CLSID}
-function parsingNameIconDataUrl(parsingName, px = ICON_PX) {
+// 虚拟项的图标（此电脑、回收站…）——载荷是 shell 解析名，如 ::{CLSID}。
+// opts 透传给 requestIcon（回收站的 { fresh: true } 现拉走这里）
+function parsingNameIconDataUrl(parsingName, px = ICON_PX, opts) {
   if (process.platform !== 'win32') return Promise.resolve('');   // 非 Windows：图标由 app.getFileIcon 兜底
-  return requestIcon(encodeParsingNameRequest(parsingName), px);
+  return requestIcon(encodeParsingNameRequest(parsingName), px, opts);
 }
 
 module.exports = {
   ICON_PX,
   MARKER,
+  __setBatchRunnerForTests,
   aumidFromLink,
   aumidOf,
   decodeRequest,
