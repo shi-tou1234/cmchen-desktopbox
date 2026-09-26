@@ -236,6 +236,43 @@ test('移除条目只动数据，不碰磁盘', () => {
   assert.ok(fs.existsSync(link), '移除只该动登记，磁盘文件必须还在');
 });
 
+test('拖动换位：只重排 items 顺序，落点按「插到第几格前面」折算', () => {
+  const basket = baskets.normalizeBasket({
+    id: 'b1',
+    items: ['C:\\a\\甲.txt', 'C:\\a\\乙.txt', 'C:\\a\\丙.txt', 'C:\\a\\丁.txt']
+  });
+  // 甲（第 0 格）拖到第 3 格前面：拿走甲后落点左移一格 → 乙 丙 甲 丁
+  const forward = baskets.reorderItems(basket, 'C:\\a\\甲.txt', 3);
+  assert.deepStrictEqual(forward.items, ['C:\\a\\乙.txt', 'C:\\a\\丙.txt', 'C:\\a\\甲.txt', 'C:\\a\\丁.txt']);
+  // 再把甲拖回第 0 格前面：拿走后落点不左移（0 在原位之前）→ 甲 乙 丙 丁
+  const back = baskets.reorderItems(forward, 'C:\\a\\甲.txt', 0);
+  assert.deepStrictEqual(back.items, ['C:\\a\\甲.txt', 'C:\\a\\乙.txt', 'C:\\a\\丙.txt', 'C:\\a\\丁.txt']);
+  // 落回原位 / 落在自己紧后面（视觉上没动）：原样返回，不生成新清单
+  const still = baskets.reorderItems(basket, 'C:\\a\\乙.txt', 1);
+  assert.strictEqual(still, basket);
+  const stillAfter = baskets.reorderItems(basket, 'C:\\a\\乙.txt', 2);
+  assert.strictEqual(stillAfter, basket);
+  // 末尾追加（index = 条目数）
+  const append = baskets.reorderItems(basket, 'C:\\a\\乙.txt', 4);
+  assert.deepStrictEqual(append.items, ['C:\\a\\甲.txt', 'C:\\a\\丙.txt', 'C:\\a\\丁.txt', 'C:\\a\\乙.txt']);
+});
+
+test('拖动换位：越界落点被夹住，清单外的路径被拒', () => {
+  const basket = baskets.normalizeBasket({
+    id: 'b1',
+    items: ['C:\\a\\甲.txt', 'C:\\a\\乙.txt', 'C:\\a\\丙.txt']
+  });
+  // 头一项拖到「第 99 格前面」= 追加到末尾；负数落点夹到 0
+  const clamped = baskets.reorderItems(basket, 'C:\\a\\甲.txt', 99);
+  assert.deepStrictEqual(clamped.items, ['C:\\a\\乙.txt', 'C:\\a\\丙.txt', 'C:\\a\\甲.txt']);
+  const clampedLow = baskets.reorderItems(basket, 'C:\\a\\乙.txt', -5);
+  assert.deepStrictEqual(clampedLow.items, ['C:\\a\\乙.txt', 'C:\\a\\甲.txt', 'C:\\a\\丙.txt']);
+  assert.strictEqual(baskets.reorderItems(basket, 'C:\\别处\\外人.txt', 1), null);
+  assert.strictEqual(baskets.reorderItems(basket, '', 1), null);
+  // 非整数落点（渲染层不会传，兜底）按原位折算：原样返回
+  assert.strictEqual(baskets.reorderItems(basket, 'C:\\a\\乙.txt', NaN), basket);
+});
+
 test('筐尺寸被夹在合法范围', () => {
   const small = baskets.normalizeBasket({ id: 'b1', w: 5, h: 99999 });
   assert.strictEqual(small.w, baskets.MIN_WIDTH);

@@ -1897,3 +1897,48 @@ settings+preload+README / shellIcons+store），逐条落掉发现；集成收�
 ### 版本
 
 3.8.3 → 3.8.4，单笔提交推 GitHub。
+
+## 3.9.0 · 弹窗拖拽换位 ＋ 修多重边框 ＋ 真·带图标的应用（2026-09-26）
+
+**四件事**：①文件夹弹窗里按住图标拖动换位（松手落在哪就摆哪，顺序持久化）；②修弹窗"多个边框"；
+③应用图标换成 `assets/图标.png`（窗口/任务栏/exe/快捷方式全套）；④`npm run dist` 改打 NSIS 安装包
+（桌面＋开始菜单快捷方式、应用列表可见、可卸载）。
+
+### 拖拽换位的关键取舍（实测定案）
+
+- **不能用 OS 拖拽做弹窗内换位**：`webContents.startDrag` 的回环（拖回自己的窗口）不给页面
+  dragover/drop——真机实测拖拽影子、tooltip 全正常，页面全程收不到事件（插不进插入线、
+  drop 也不触发）。最后落点：**纯指针手势**（pointerdown 捕获 → move 画插入线 → up 重排）。
+- **格子绝不能挂 HTML5 `draggable`**：原生拖拽手势会把后续指针事件整个吞掉
+  （真机实测：capture 失效、pointerup 不到），`<img>` 也要 `draggable=false`。
+- **插入点算法**按行主序逐格判「是否已被越过」（整格在指针上方，或同行且越过中线）；
+  只看竖直中线的话，同一行里中线以上的横向拖动永远算出 slot=0（真机踩过）。
+- 拖出弹窗那一瞬（client 坐标出界）才发起 `basket:item-drag` 接手 OS 拖拽——「拖出去=复制」
+  的老语义原样保留，弹窗内换位就地作废。
+
+### 多重边框根因
+
+弹窗窗口带 8px 隐形 resize 边（客户区比窗口矩形小一圈）：页面 box-shadow 画的外扩投影
+被窗口边界裁进那条透明边带，成了一道暗框，和 1px 边框叠成"多重边框"。改法：去 box-shadow、
+`hasShadow: true` 交给窗口原生投影（画在窗口矩形之外）。真机截图验证：单一 1px 边框＋外部软投影。
+
+### 安装包
+
+- `win.target` portable → **nsis**（oneClick=false、per-user、可改目录、桌面＋开始菜单快捷方式、
+  `uninstallDisplayName: "DeskBasket 桌面文件筐"`）。构建需 `NODE_USE_SYSTEM_CA=1`（企业自签证书）
+  ＋ `ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/`
+  （GitHub 下载工具链会超时）。
+- 静默装 `/S` 后逐项核过：`%LOCALAPPDATA%\Programs\DeskBasket\DeskBasket.exe`、桌面/开始菜单
+  `DeskBasket.lnk`、HKCU Uninstall 键、`Get-StartApps` 列出 `com.cmchen.deskbasket`、
+  exe 内嵌图标 ExtractAssociatedIcon 与 图标.png 一致。
+- 图标链路：`scripts/make_ico.py`（PIL 抠与边缘连通的近白底→紧裁→7 帧 ico＋原尺寸 icon.png）；
+  旧 `gen_icon.py`（PySide6 现场画）退役。
+
+### 实机验证
+
+Dock 自动收起临时打开→贴底唤出→点开「硬件工具」筐：三次拖拽（同格横拖、跨格、拖出窗界）
+全部符合预期，顺序落盘逐次读 settings.json 核对；测完筐顺序与 dock_auto_hide 已还原。
+
+### 版本
+
+3.8.4 → 3.9.0，144 → 146 条测试全绿，单笔提交推 GitHub。

@@ -163,6 +163,25 @@ function updateItems(basket, items) {
   return { ...basket, items: [...items] };
 }
 
+// 弹窗里拖动换位（3.9.0）：筐条目的显示顺序就是 items 的登记顺序，所以重排 = 重排清单，
+// 磁盘上的文件一概不动。rawIndex 是渲染层按「插到第几个格子前面」给的落点（0..items.length，
+// 含被拖项自己占的那一格——落回原位或紧随其后都算没动，原样返回）。路径必须本来就在清单里，
+// 否则返回 null 让调用方拒绝（与 move-out 的归属校验同一条底线）。
+function reorderItems(basket, rawPath, rawIndex) {
+  const items = basket.items || [];
+  const key = pathKey(rawPath || '');
+  const from = items.findIndex((item) => pathKey(item) === key);
+  if (from < 0) return null;
+  const slot = Number.isInteger(rawIndex) ? rawIndex : from;
+  // 落点先折算成「拿走被拖项之后」的数组下标：from 之后的位置整体左移一格，再夹进合法范围
+  const to = Math.max(0, Math.min(items.length - 1, slot > from ? slot - 1 : slot));
+  if (to === from) return basket;
+  const next = items.slice();
+  next.splice(from, 1);
+  next.splice(to, 0, items[from]);
+  return { ...basket, items: next };
+}
+
 // 文件管理器里删掉的条目：清单里直接消失（不留灰色残影——这是领导定的语义）。
 // exists 注入便于单测。只在调用方确认"筐目录本身是好的"之后再调，盘不在时整筐都不能动。
 function dropMissing(items, exists) {
@@ -218,5 +237,6 @@ module.exports = {
   normalizeBaskets,
   normalizeName,
   removeItem,
+  reorderItems,
   updateItems
 };

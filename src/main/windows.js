@@ -16,6 +16,11 @@ const storeConstants = require('./store');
 
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
 
+// 应用图标（assets/icon.ico，见 scripts/make_ico.py）：挂到每个窗口上。打包后窗口图标
+// 会落到 exe（electron-builder 认 build.win.icon），这里主要管开发态的任务栏/Alt-Tab，
+// 以及 Dock 窗口在任务栏里的那一格。
+const APP_ICON = path.join(__dirname, '..', 'assets', 'icon.ico');
+
 const GLASS_MATERIAL = 'acrylic';
 
 // 磨砂模式由设置决定：off 走完全透明（token 的透明模式），其余走系统材质（token 的磨砂模式）
@@ -76,6 +81,7 @@ function baseOptions(options = {}) {
     skipTaskbar,
     alwaysOnTop,
     title,
+    icon: APP_ICON,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -144,6 +150,7 @@ function createWeatherCardWindow(options = {}) {
     skipTaskbar: true,
     alwaysOnTop: true,
     title,
+    icon: APP_ICON,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -175,6 +182,8 @@ function listDisplays() {
 // 文件夹弹窗：跟随「磨砂模式」设置——完全透明模式就是全透明，磨砂模式挂系统材质。
 // 置顶可聚焦（聚焦才能在失焦时自动关闭），不进任务栏，大小可调（右下角拖边缩放，主进程记住）。
 // 材质和 transparent 在窗口创建时锁定，所以改了模式要重新开一次弹窗才生效（本来就是每次点开重建）。
+// hasShadow：软投影交给窗口原生投影画在窗口矩形之外。以前用页面 box-shadow 画，投进去
+// 客户区外那圈透明 resize border、被窗口裁成一道暗框，和 1px 边框看着像"多重边框"。
 function createPopupWindow(options = {}) {
   const {
     width = 480,
@@ -191,7 +200,7 @@ function createPopupWindow(options = {}) {
     ...(Number.isInteger(y) ? { y } : {}),
     frame: false,
     show: false,
-    hasShadow: false,
+    hasShadow: true,
     // 可缩放但不可移动：右下角边缘能拖大拖小，位置仍锚在 Dock 图标上方由主进程摆
     resizable: true,
     minWidth: storeConstants.POPUP_WIDTH_MIN,
@@ -203,6 +212,7 @@ function createPopupWindow(options = {}) {
     skipTaskbar: true,
     alwaysOnTop: true,
     title,
+    icon: APP_ICON,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -237,6 +247,7 @@ function createRenameWindow(options = {}) {
     skipTaskbar: true,
     alwaysOnTop: true,
     title,
+    icon: APP_ICON,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -270,6 +281,7 @@ function createMenuWindow(options = {}) {
     skipTaskbar: true,
     alwaysOnTop: true,
     title,
+    icon: APP_ICON,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

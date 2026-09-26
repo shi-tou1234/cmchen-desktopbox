@@ -50,6 +50,9 @@ contextBridge.exposeInMainWorld('deskbasket', {
   // 设置面板里的批量勾选清单：桌面上所有条目 + 是否已在这个筐里
   basketCandidates: (basketId) => ipcRenderer.invoke('basket:candidates', { basketId }),
   removeItem: (basketId, itemPath) => ipcRenderer.invoke('basket:remove', { basketId, itemPath }),
+  // 弹窗里拖动换位：itemPath 挪到「第 index 个格子前面」（0..条目数，含自己那格）
+  reorderBasket: (basketId, itemPath, index) =>
+    ipcRenderer.invoke('basket:reorder', { basketId, path: itemPath, index }),
   updateBasket: (basket) => ipcRenderer.invoke('basket:update', { basket }),
   pruneMissing: (basketId) => ipcRenderer.invoke('basket:prune', { basketId }),
   createBasket: (name) => ipcRenderer.invoke('basket:create', { name }),

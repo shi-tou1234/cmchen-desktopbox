@@ -2511,6 +2511,20 @@ function registerIpc() {
     return replaceBasket(basketModel.removeItem(basket, itemPath));
   });
 
+  // 弹窗里拖动条目换位（3.9.0）：渲染层把系统拖拽放回弹窗自己的格子上时走这条。
+  // 只重排 basket.items 的登记顺序（显示顺序 = 清单顺序），磁盘文件一概不动。
+  // 归属校验（与 move-out 的 SEC-4 同款底线）：路径不在清单里就原样返回现视图，不落盘。
+  guardHandle('basket:reorder', (_event, { basketId, path: target, index } = {}) => {
+    const basket = findBasket(basketId);
+    if (!basket) return null;
+    const next = basketModel.reorderItems(basket, target, Number(index));
+    if (!next) {
+      console.log(`[basket] 拒绝重排不属于筐「${basket.name}」的路径：${target}`);
+      return popupDataFor('basket', { id: basket.id });
+    }
+    return withEntryIcons(popupDataFor('basket', { id: replaceBasket(next).id }), POPUP_NAVIGATE_ICON_WAIT_MS);
+  });
+
   guardHandle('basket:update', (_event, { basket }) => {
     const current = findBasket(basket && basket.id);
     if (!current) return null;

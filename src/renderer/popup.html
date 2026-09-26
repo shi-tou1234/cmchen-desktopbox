@@ -11,20 +11,27 @@
 
   /* ---------------------------------------------------------------- 完全透明
      窗口本身透明，页面也不铺任何底色：文件夹内容直接浮在桌面之上，
-     只留一圈细边框和一层投影把面板的轮廓勾出来，文字靠 common.css 的阴影保证可读。 */
+     只留一圈细边框把面板的轮廓勾出来，文字靠 common.css 的阴影保证可读。
+     **不再画 box-shadow 投影**：弹窗窗口带 8px 隐形 resize border（客户区比窗口矩形小一圈），
+     投影会画进那条透明边带、被窗口边界裁成一道暗框——和 1px 边框叠在一起就是领导说的
+     "多个边框"。外扩的软投影改由窗口原生投影负责（见 windows.js createPopupWindow 的
+     hasShadow），它画在窗口矩形之外，不会和边框抢轮廓。 */
   .popup-edge {
     position: absolute;
     inset: 0;
     border-radius: 14px;
     border: 1px solid var(--border);
-    box-shadow:
-      inset 0 1px 0 var(--border),
-      0 18px 44px rgba(0, 0, 0, 0.38);
     pointer-events: none;
   }
 
   /* 有文件拖到弹窗上：给一圈高亮，表示"松手会加进这个筐" */
   body.dragover .popup-edge { border-color: rgba(140, 190, 255, 0.9); }
+
+  /* 弹窗内拖动换位（3.9.0）：插入位置画一条竖提示线（左缘=插到这格前面，右缘=追加到末尾），
+     被拖的那格本体变淡。提示线用 inset box-shadow，不占布局、盖在格子底色之上。 */
+  .cell.drop-before { box-shadow: inset 3px 0 0 0 var(--accent); }
+  .cell.drop-after { box-shadow: inset -3px 0 0 0 var(--accent); }
+  .cell.dragging-source { opacity: 0.4; }
 
   /* 打开/收起动画：整块内容从图标位置"抽"出来再缩回去（macOS 的文件夹堆栈那种感觉）。
      变换原点落在 Dock 图标中心（--origin-x 由主进程按锚点算好），底边贴齐。

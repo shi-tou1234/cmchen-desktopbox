@@ -11,6 +11,8 @@ let anchorIndex = -1;        // Shift 连选的起点
 let staggerNext = false;   // 下一次 render 要不要给格子做交错进场（只有"打开"那一次要）
 let staggerTimer = 0;      // 摘 .stagger 的兜底定时器：等不到格子 animationend 时靠它（U-4）
 let focusIndex = -1;       // 键盘光标停在哪个格子（roving tabindex：只有它进 Tab 序列，方向键在它之间挪）
+let reorderDrag = null;    // 进行中的拖动换位手势（见底部「弹窗内拖动换位」）
+let suppressClick = false; // 拖动换位松手后的那次 click 是"拖完了"，别当选择处理
 
 function currentEntries() {
   return (view && view.entries) || [];
@@ -115,6 +117,7 @@ function makeCell(entry, index) {
   cell.style.setProperty('--i', Math.min(index, 20));
 
   const img = document.createElement('img');
+  img.draggable = false;   // 图标图片别自己可拖（原生图片拖拽会吃掉换位手势的指针事件）
   if (entry.iconUrl) {
     // 主进程已经把图标算好塞进载荷了：直接画，不用再等一次 IPC 和图片解码
     img.src = entry.iconUrl;
@@ -136,21 +139,19 @@ function makeCell(entry, index) {
 
   cell.append(img, name);
 
-  // 拖出去 = 把真文件作为系统拖拽源（落点收到一份复制，筐里保留——startDrag 拿不到
-  // "拖到哪了"的回执，做不到拖出去就从筐里消失；真要移出用右键「移出到桌面」）。
-  // 拖进来 = 移动进筐。两个方向合起来才是"鼠标直接移进移出"。
+  // 拖出去 = 把真文件作为系统拖拽源（落点收到一份复制，筐里保留——真要移出用右键
+  // 「移出到桌面」）；拖进来 = 移动进筐。3.9.0 起还有第三种手势：拖在弹窗**内部**挪
+  // 摆放位置（见「弹窗内拖动换位」）。格子**不挂** HTML5 draggable：原生拖拽手势会把
+  // 后续指针事件整个吞掉（真机实测），换位和"探出弹窗才发起 OS 拖拽"都靠指针事件做。
   if (view.kind === 'basket') {
-    cell.draggable = true;
-    cell.addEventListener('dragstart', (event) => {
-      event.preventDefault();   // 别让页面自己拖图片/文字，交给主进程发起系统拖拽
-      api.startItemDrag(entry.path);
-    });
-    cell.addEventListener('dragend', () => {
-      setStatus('已复制一份到落点（筐里保留）；要真正移出请右键「移出到桌面」');
-    });
+    cell.addEventListener('pointerdown', (event) => armReorderDrag(event, entry, cell));
   }
 
   cell.addEventListener('click', (event) => {
+    if (suppressClick) {   // 刚拖着放完手的那一下不是点击
+      suppressClick = false;
+      return;
+    }
     if (event.ctrlKey || event.metaKey) toggleSelect(entry, index);
     else if (event.shiftKey && anchorIndex >= 0) selectRange(anchorIndex, index);
     else selectSingle(entry, index);
@@ -360,6 +361,7 @@ function attachRenameEditor(entry, cell) {
 setInterval(async () => {
   if (!view || view.kind !== 'basket' || view !== homeView) return;
   if (document.querySelector('input.rename-editor')) return;   // 正在改名，别打断
+  if (reorderDrag) return;                                     // 正在拖动换位，别把拖着的格子换掉
   if (document.visibilityState !== 'visible') return;          // 窗口藏着就不白问
   try {
     const fresh = await api.basketGet(view.basketId);
@@ -574,6 +576,144 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
+// ------------------------------------------------- 弹窗内拖动换位（3.9.0）
+//
+// 指针手势：按住格子挪动，弹窗内实时画插入线，松手就把该条目重排到落点（走
+// basket:reorder，只改 basket.items 的登记顺序——显示顺序就是清单顺序，磁盘不动）。
+// 手势中途把指针拖出弹窗 = 老语义「拖出去复制一份」：在探出边框那一刻把 OS 拖拽
+// （basket:item-drag → startDrag）从当前位置接手过去，弹窗内的换位就地作废。
+// 不借 OS 拖拽做弹窗内换位的原因：startDrag 的回环（拖回自己的窗口）实测不给页面
+// dragover/drop 事件（拖拽影子和 tooltip 都正常，页面却全程蒙在鼓里），指针事件才是稳的。
+
+const REORDER_START_PX = 6;   // 挪过这个距离才算"在拖"：单击选中的手感不受影响
+
+function clearReorderHint() {
+  for (const cell of el('grid').children) cell.classList.remove('drop-before', 'drop-after');
+}
+
+// 在第 index 个格子前画一条插入线；index 等于条目数（追加到最后）就画在末格右缘
+function showReorderHint(index) {
+  clearReorderHint();
+  const cells = el('grid').children;
+  if (index >= 0 && index < cells.length) cells[index].classList.add('drop-before');
+  else if (cells.length) cells[cells.length - 1].classList.add('drop-after');
+}
+
+function clearReorderDrag() {
+  if (reorderDrag) {
+    try {
+      reorderDrag.cell.releasePointerCapture(reorderDrag.pointerId);
+    } catch (_) {
+      /* 指针早释放了/格子已重建 */
+    }
+  }
+  reorderDrag = null;
+  clearReorderHint();
+  for (const cell of el('grid').children) cell.classList.remove('dragging-source');
+}
+
+// 按下（左键、不带 Ctrl/Shift）：登记一场可能的换位手势，指针捕获到这格上，
+// 之后就算指针滑出格子/窗口，move/up 也照样送到这里
+function armReorderDrag(event, entry, cell) {
+  if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  if (!view || view.kind !== 'basket') return;
+  clearReorderDrag();
+  reorderDrag = {
+    entry,
+    cell,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: false,   // 过了位移阈值、真在拖
+    handedOff: false, // 已交给 OS 拖拽（拖出弹窗）
+    slot: -1
+  };
+  try {
+    cell.setPointerCapture(event.pointerId);
+  } catch (_) {
+    /* 拿不到捕获就只在格子上拖，出了格子松手算取消 */
+  }
+}
+
+function reorderDragMove(event) {
+  const drag = reorderDrag;
+  if (!drag || drag.handedOff) return;
+  if (!drag.active) {
+    if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < REORDER_START_PX) return;
+    drag.active = true;
+    drag.cell.classList.add('dragging-source');
+  }
+  // 探出弹窗客户区 = 用户要拖出去：换位作废，OS 拖拽从当前光标位置接手
+  if (
+    event.clientX < 0 || event.clientY < 0 ||
+    event.clientX >= window.innerWidth || event.clientY >= window.innerHeight
+  ) {
+    drag.handedOff = true;
+    clearReorderHint();
+    drag.cell.classList.remove('dragging-source');
+    api.startItemDrag(drag.entry.path);
+    return;
+  }
+  // 指针落在网格上时算插入位：0..条目数（「插到第几个格子前面」）。按行主序逐格问
+  // 「这格是不是已经被指针越过了」——指针整格在它下方、或与它同行但越过了它的中线。
+  // 第一个还没被越过的格子就是插入点；全部越过（网格底部留白）就是追加到末尾。
+  // 注意同行必须看左右半边：只看竖直中线的话，同一行里中线以上的横向拖动永远算出 0。
+  const grid = el('grid');
+  const rect = grid.getBoundingClientRect();
+  const inside =
+    event.clientX >= rect.left && event.clientX <= rect.right &&
+    event.clientY >= rect.top && event.clientY <= rect.bottom;
+  let slot = grid.children.length;
+  if (inside) {
+    for (let i = 0; i < grid.children.length; i += 1) {
+      const box = grid.children[i].getBoundingClientRect();
+      const passed =
+        event.clientY > box.bottom ||
+        (event.clientY >= box.top && event.clientX > box.left + box.width / 2);
+      if (!passed) { slot = i; break; }
+    }
+  } else if (event.clientY < rect.top) {
+    slot = 0;
+  }
+  drag.slot = slot;
+  showReorderHint(slot);
+  // 拖到网格上下边缘附近自动滚（条目多到出了滚动条才用得上）；move 帧率触发，步子给小
+  const edge = 28;
+  if (event.clientY < rect.top + edge) grid.scrollTop -= 9;
+  else if (event.clientY > rect.bottom - edge) grid.scrollTop += 9;
+}
+
+async function reorderDragEnd(event) {
+  const drag = reorderDrag;
+  if (!drag) return;
+  const { cell, entry, active, handedOff, slot } = drag;
+  clearReorderDrag();
+  if (!active || handedOff || !cell.isConnected) return;
+  suppressClick = true;   // 拖过的手势，松手那一下别把落点格子选中
+  if (!view || view.kind !== 'basket' || !Number.isInteger(slot) || slot < 0) return;
+  const from = currentEntries().findIndex((item) => item.path === entry.path);
+  // 落回原位（含「落在自己紧后面」）就不动，省一次重画
+  if (from < 0 || slot === from || slot === from + 1) return;
+  const fresh = await api.reorderBasket(view.basketId, entry.path, slot);
+  if (fresh && fresh.kind === 'basket') {
+    view = fresh;
+    homeView = fresh;
+    render();
+  }
+}
+
+// move/up 挂 document 捕获阶段：指针落到哪格、甚至滑出窗口（捕获在手时）都收得到，
+// 不赌"事件一定路由回按下的那格"。state 判重入：一次手势只有一份。
+document.addEventListener('pointermove', (event) => {
+  if (reorderDrag && !reorderDrag.handedOff) reorderDragMove(event);
+}, true);
+document.addEventListener('pointerup', (event) => {
+  if (reorderDrag) reorderDragEnd(event);
+}, true);
+document.addEventListener('pointercancel', () => {
+  if (reorderDrag) clearReorderDrag();
+}, true);
+
 // 把文件直接拖进弹窗 = 加到这个筐里（拖动时给一圈高亮）。
 // 拖动期间要告诉主进程"别收窗"：主进程的"鼠标离开就关"挡不住拖拽——用户得先离开弹窗去
 // 桌面/资源管理器抓文件，那一段光标确实不在弹窗附近，弹窗会被收掉，文件到了没有落点。
@@ -658,6 +798,8 @@ function showPayload(payload) {
   homeView = payload;
   selection = new Set();
   anchorIndex = -1;
+  reorderDrag = null;   // 新内容把格子整个换掉了：上一场手势就算它结束了
+  suppressClick = false;
   iconSize = payload.iconSize || 48;
   // 磨砂模式的窗口底是一整块系统材质，动画得换个做法（见下面的 CSS）
   document.body.classList.toggle('glass', payload.glass === true);
