@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<title>DeskBasket 一键整理</title>
+<link rel="stylesheet" href="common.css">
+<style>
+  /* 宝石玻璃同语言（1.4.0）：素色深玻璃 + 筐色点缀；固定 560×640 无边框窗 */
+  * { box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; }
+  :root {
+    --panel: rgba(24, 27, 37, 0.985);
+    --hairline: rgba(255, 255, 255, 0.08);
+    --wash: rgba(255, 255, 255, 0.06);
+    --wash-strong: rgba(255, 255, 255, 0.11);
+    --title-fg: #f0f2f7;
+    --dim-fg: #a7acb8;
+    --faint-fg: #7b8090;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --panel: rgba(252, 252, 255, 0.99);
+      --hairline: rgba(22, 26, 36, 0.10);
+      --wash: rgba(22, 28, 42, 0.05);
+      --wash-strong: rgba(22, 28, 42, 0.09);
+      --title-fg: #24262f;
+      --dim-fg: #5b5f69;
+      --faint-fg: #85888f;
+    }
+  }
+  body {
+    margin: 0; background: var(--panel); color: var(--title-fg);
+    display: flex; flex-direction: column; overflow: hidden;
+    animation: win-in 150ms ease-out;
+    font: 13px/1.55 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    user-select: none; cursor: default;
+  }
+  header {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 12px 12px 10px 14px; border-bottom: 1px solid var(--hairline);
+  }
+  .badge {
+    width: 30px; height: 30px; border-radius: 10px; flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(150deg, #67b8ff 0%, #3b74e0 55%, #234aa8 100%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.45), 0 3px 10px rgba(59, 116, 224, 0.35);
+  }
+  .badge svg { width: 17px; height: 17px; }
+  .tt { font-size: 14px; font-weight: 700; }
+  .sub { font-size: 11px; color: var(--faint-fg); }
+  .sp { flex: 1; }
+  .xbtn {
+    width: 26px; height: 26px; border: 0; border-radius: 7px; background: transparent;
+    color: var(--dim-fg); font-size: 13px; cursor: pointer;
+  }
+  .xbtn:hover { background: rgba(226, 72, 72, 0.18); color: #ff8484; }
+  main { flex: 1 1 auto; overflow-y: auto; padding: 12px 14px; }
+  main::-webkit-scrollbar { width: 9px; }
+  main::-webkit-scrollbar-thumb { background: rgba(128, 132, 144, 0.4); border-radius: 8px; border: 2.5px solid transparent; background-clip: padding-box; }
+
+  .group {
+    border: 1px solid var(--hairline); border-radius: 12px; padding: 10px 12px; margin-bottom: 10px;
+  }
+  .group.off { opacity: 0.45; }
+  .ghead { display: flex; align-items: center; gap: 9px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; flex: 0 0 auto;
+         box-shadow: inset 0 0 0 1px rgba(255,255,255,0.35); }
+  .gname { font-weight: 700; font-size: 13.5px; }
+  .gcount { font-size: 11.5px; color: var(--faint-fg); }
+  .gtarget { font-size: 11.5px; color: var(--dim-fg);
+             background: var(--wash); border-radius: 999px; padding: 2px 9px; }
+  .files { margin: 8px 0 2px; display: flex; flex-wrap: wrap; gap: 5px; }
+  .chip {
+    font-size: 11px; color: var(--dim-fg); background: var(--wash);
+    border-radius: 6px; padding: 2px 8px; max-width: 190px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .more { font-size: 11px; color: var(--faint-fg); align-self: center; }
+  .check { margin-left: auto; flex: 0 0 auto; }
+
+  .skipbox { font-size: 11.5px; color: var(--faint-fg); padding: 4px 2px 0; }
+  .skipbox summary { cursor: pointer; outline: none; }
+  .skipbox div { margin: 6px 0 0 10px; line-height: 1.8; }
+
+  footer {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 11px 14px; border-top: 1px solid var(--hairline);
+  }
+  .note { font-size: 11.5px; color: var(--dim-fg); flex: 1 1 auto; min-width: 0;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .note.error { color: #f0a35e; }
+  button.act {
+    height: 32px; padding: 0 18px; border: 0; border-radius: 9px; font-size: 12.5px;
+    font-weight: 600; cursor: pointer; color: #fff;
+    background: linear-gradient(150deg, #4f92ff, #2f66d8);
+    box-shadow: 0 3px 9px rgba(59, 116, 224, 0.35);
+  }
+  button.act:hover { filter: brightness(1.1); }
+  button.act:disabled { opacity: 0.45; cursor: default; filter: none; }
+  button.ghost {
+    height: 32px; padding: 0 14px; border: 0; border-radius: 9px; font-size: 12.5px;
+    cursor: pointer; color: var(--dim-fg); background: var(--wash);
+  }
+  button.ghost:hover { background: var(--wash-strong); color: var(--title-fg); }
+  .result { font-size: 12px; line-height: 1.9; }
+  .result b { font-weight: 700; }
+  .result .warn { color: #f0a35e; }
+
+  /* 窗口淡入（1.4.1）：弹窗/菜单都有进场动画，这两扇别再「啪」地出现 */
+  @keyframes win-in {
+    from { opacity: 0; transform: scale(0.975); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <span class="badge" aria-hidden="true">
+      <svg viewBox="0 0 48 48"><path d="M24 8l14 6v9c0 8.4-5.9 15.3-14 17-8.1-1.7-14-8.6-14-17v-9l14-6z" fill="#fff" fill-opacity="0.95"/></svg>
+    </span>
+    <span class="head-texts">
+      <span class="tt">一键整理桌面</span>
+      <span class="sub" id="sub">正在扫描桌面…</span>
+    </span>
+    <span class="sp"></span>
+    <button class="xbtn" id="btnClose" title="关闭">✕</button>
+  </header>
+  <main id="main"></main>
+  <footer>
+    <span class="note" id="note"></span>
+    <button class="ghost" id="btnUndo" style="display:none">撤销整理</button>
+    <button class="ghost" id="btnCancel">取消</button>
+    <button class="act" id="btnGo" disabled>开始整理</button>
+  </footer>
+  <script src="organize.js"></script>
+</body>
+</html>

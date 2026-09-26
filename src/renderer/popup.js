@@ -6,6 +6,8 @@ const el = (id) => document.getElementById(id);
 let view = null;       // 当前视图：{ kind, name, path?, parent?, basketId?, view?, entries, error }
 let homeView = null;   // 初始视图（从筐导航出去后能回来）
 let iconSize = 48;
+// 图标请求 96px 源：150% 缩放下 48px 源是糊的（与 Dock 的预热/缓存键统一）
+const ICON_REQUEST_PX = 96;
 let selection = new Set();   // 选中的条目路径（筐视图支持多选：Ctrl 点选、Shift 连选、Ctrl+A 全选）
 let anchorIndex = -1;        // Shift 连选的起点
 let staggerNext = false;   // 下一次 render 要不要给格子做交错进场（只有"打开"那一次要）
@@ -105,6 +107,43 @@ function fallbackIcon() {
 
 // ---------------------------------------------------------------- 渲染
 
+// 釉面底板的色相（宝石玻璃设计）：按扩展名给一类颜色（文档蓝、表格绿、图片粉…），
+// 认不出的按路径散列到整个色环——同一个文件永远同一种颜色
+const EXT_HUE = {
+  doc: 216, docx: 216, rtf: 216, txt: 212, md: 212, log: 212,
+  xls: 152, xlsx: 152, csv: 152,
+  ppt: 14, pptx: 14, pdf: 6,
+  png: 326, jpg: 326, jpeg: 326, gif: 326, bmp: 326, webp: 326, svg: 326, ico: 326, psd: 326,
+  mp3: 38, wav: 38, flac: 38, m4a: 38, ape: 38,
+  mp4: 288, mkv: 288, avi: 288, mov: 288, wmv: 288,
+  zip: 268, rar: 268, '7z': 268, tar: 268, gz: 268,
+  exe: 248, msi: 248, bat: 248, cmd: 248, apkg: 248,
+  iso: 200, torrent: 200
+};
+const FOLDER_HUE = 188;   // 文件夹：青绿
+const APP_HUE = 248;      // 程序/认不出的快捷方式：蓝紫
+
+function hashHue(text) {
+  let h = 5381;
+  for (let i = 0; i < text.length; i += 1) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+  return h % 360;
+}
+
+function hueFor(entry) {
+  if (entry.isDir) return FOLDER_HUE;
+  const lower = entry.name.toLowerCase();
+  const m = lower.match(/\.([a-z0-9]+)$/);
+  const ext = m ? m[1] : '';
+  if (ext === 'lnk' || ext === 'url') {
+    // 快捷方式看真身：桌面语义里「xxx.lnk」展示时本来就不带后缀
+    const base = lower.replace(/\.(lnk|url)$/, '').match(/\.([a-z0-9]+)$/);
+    if (base && base[1] in EXT_HUE) return EXT_HUE[base[1]];
+    return APP_HUE;
+  }
+  if (ext && ext in EXT_HUE) return EXT_HUE[ext];
+  return hashHue(entry.path || entry.name);
+}
+
 function makeCell(entry, index) {
   const cell = document.createElement('div');
   cell.className = 'cell';
@@ -125,19 +164,25 @@ function makeCell(entry, index) {
     // 载荷里没有（算图标超时了）：退回异步取，先用兜底图标垫着
     img.src = fallbackIcon();
     api
-      .getIcon(entry.path, iconSize)
+      .getIcon(entry.path, ICON_REQUEST_PX)
       .then((dataUrl) => {
         if (dataUrl) img.src = dataUrl;
       })
       .catch(() => {});
   }
 
+  // 图标坐在釉面底板上（宝石玻璃设计）：底板颜色跟文件类型走
+  const plate = document.createElement('div');
+  plate.className = 'plate';
+  plate.style.setProperty('--h', String(hueFor(entry)));
+  plate.append(img);
+
   const name = document.createElement('div');
   name.className = 'name';
   // 与桌面图标一致：快捷方式不带 .lnk/.url 后缀展示
   name.textContent = entry.name.replace(/\.(lnk|url)$/i, '');
 
-  cell.append(img, name);
+  cell.append(plate, name);
 
   // 拖出去 = 把真文件作为系统拖拽源（落点收到一份复制，筐里保留——真要移出用右键
   // 「移出到桌面」）；拖进来 = 移动进筐。3.9.0 起还有第三种手势：拖在弹窗**内部**挪
@@ -450,7 +495,9 @@ function render(navDirection) {
     view.kind === 'basket'
       ? '这个筐还是空的：点上面的「＋」添加文件，或者把文件直接拖进来 / 拖到 Dock 的文件夹图标上（文件会移动进筐的文件夹，原来那处不再保留）'
       : '这个文件夹是空的';
-  setStatus(entries.length ? entries.length + ' 项' : '');
+  // 条目数是标题旁的灰字（启动器风格）；脚栏只报消息（复制/删除/出错…），不占常驻文案
+  el('count').textContent = entries.length ? entries.length + ' 项' : '';
+  setStatus('');
   applySelection();
   applyRoving();   // 格子刚重建完：把 roving tabindex 重新落到键盘光标那一格上（U-2）
 }
@@ -533,6 +580,19 @@ document.addEventListener('keydown', (event) => {
     else if (event.key === 'Home') next = 0;
     else next = entries.length - 1;      // End
     moveCursor(next);                    // 越界在 moveCursor 里统一钳到 [0, len-1]
+    return;
+  }
+  if (event.key === ' ' || event.code === 'Space') {
+    // QuickLook（1.4.0）：空格预览键盘光标那格（多选时唯一选中项优先）。
+    // 头部按钮上的空格是原生激活，别抢；预览窗自己再按空格/Esc 收掉。
+    if (event.target && event.target.tagName === 'BUTTON') return;
+    const entries = currentEntries();
+    if (!entries.length) return;
+    const picked = selectedEntries();
+    const target = picked.length === 1 ? picked[0] : entries[focusIndex < 0 ? 0 : focusIndex];
+    if (!target) return;
+    event.preventDefault();
+    api.previewOpen({ path: target.path });
     return;
   }
   if (event.key === 'Enter') {
@@ -647,10 +707,14 @@ function liftCell(drag, event) {
   const ghostImg = document.createElement('img');
   ghostImg.draggable = false;
   if (img) ghostImg.src = img.src;
+  const ghostPlate = document.createElement('div');
+  ghostPlate.className = 'plate';
+  ghostPlate.style.setProperty('--h', String(hueFor(drag.entry)));
+  ghostPlate.append(ghostImg);
   const ghostName = document.createElement('div');
   ghostName.className = 'name';
   ghostName.textContent = nameEl ? nameEl.textContent : drag.entry.name.replace(/\.(lnk|url)$/i, '');
-  card.append(ghostImg, ghostName);
+  card.append(ghostPlate, ghostName);
   ghost.append(card);
   document.body.append(ghost);
   // 影子上的"手握位置"：夹在格子矩形中带，别在边角上
@@ -981,6 +1045,15 @@ function showPayload(payload) {
   iconSize = payload.iconSize || 48;
   // 磨砂模式的窗口底是一整块系统材质，动画得换个做法（见下面的 CSS）
   document.body.classList.toggle('glass', payload.glass === true);
+  // 视图种类挂 body 上：脚栏的快捷键提示只给筐视图（dir 里 F2/换位那套不成立）
+  document.body.dataset.kind = payload.kind === 'dir' ? 'dir' : 'basket';
+  // 筐的主色（1.3 启动器式设计）：头部圆点、选中格、拖拽空位/插入线跟 Dock 上的筐色走；
+  // dir 视图/颜色缺失时**移掉**这个变量（设空串会让 CSS 的 var() 兜底失效），CSS 侧回落系统蓝
+  const accent = payload.kind === 'basket' && typeof payload.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(payload.color)
+    ? payload.color
+    : '';
+  if (accent) document.documentElement.style.setProperty('--basket-accent', accent);
+  else document.documentElement.style.removeProperty('--basket-accent');
   // 主题（#1）与减弱动画（#7）：主进程把结果塞进载荷，这一帧就用对
   document.body.classList.toggle('reduce-motion', payload.reduceMotion === true);
   // 动画原点落在被点开的 Dock 图标中心

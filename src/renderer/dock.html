@@ -49,16 +49,29 @@
 
   /* 文件夹筐的名字：小小一行贴在图标下面。别的条目这一格留空（保持图标对齐） */
   .dock-caption {
-    height: 15px;
-    max-width: calc(var(--icon) + 12px);
-    font-size: 10px;
-    line-height: 15px;
+    display: inline-block;
+    box-sizing: border-box;
+    height: 16px;
+    max-width: calc(var(--icon) + 22px);
+    padding: 0 6px;
+    border-radius: 8px;
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 500;
     color: var(--text);
     text-align: center;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     pointer-events: none;
+    /* 背板药丸：压住壁纸的纹理，字才立得起来（空文案不画背板） */
+    background: rgba(10, 12, 18, 0.52);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+  }
+  .dock-caption:empty { background: transparent; box-shadow: none; padding: 0; }
+  @media (prefers-color-scheme: light) {
+    .dock-caption { background: rgba(255, 255, 255, 0.62); box-shadow: inset 0 0 0 1px rgba(20, 30, 50, 0.08); }
+    .dock-caption:empty { background: transparent; box-shadow: none; padding: 0; }
   }
   .dock-caption.flash { color: #9fd0ff; font-weight: 600; }
   /* 浅色主题：#9fd0ff 几乎是白的，压在浅底上约 1.5:1、再叠 common.css 的白描边就彻底看不见了，
@@ -94,6 +107,56 @@
   @media (prefers-reduced-motion: reduce) {
     .dock-item.leaving { transition: none; }
   }
+
+  /* 筐的叠放预览（1.4.0）：筐色底板上 2×2 摆前 4 个条目缩略 + 数量角标。
+     底板色由 JS 按 --tint（筐主色）染色；角标压在右下角，仿手机文件夹。 */
+  .dock-stack {
+    position: relative;
+    width: calc(var(--icon) * 0.94);
+    height: calc(var(--icon) * 0.94);
+    border-radius: 22%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: calc(var(--icon) * 0.035);
+    padding: calc(var(--icon) * 0.09);
+    background:
+      linear-gradient(150deg,
+        color-mix(in srgb, var(--tint, #e8973a) 88%, #ffffff) 0%,
+        color-mix(in srgb, var(--tint, #e8973a) 92%, #22314d) 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.4),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+      0 3px 8px rgba(0, 0, 0, 0.35);
+  }
+  .dock-stack img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: 14%;
+    background: rgba(255, 255, 255, 0.22);
+    padding: calc(var(--icon) * 0.015);
+  }
+  .dock-stack-badge {
+    position: absolute;
+    right: calc(var(--icon) * -0.10);
+    bottom: calc(var(--icon) * -0.06);
+    min-width: calc(var(--icon) * 0.36);
+    height: calc(var(--icon) * 0.36);
+    padding: 0 calc(var(--icon) * 0.08);
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(var(--icon) * 0.23);
+    font-weight: 700;
+    color: #fff;
+    background: linear-gradient(150deg, #ff6b52, #e0402a);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+    pointer-events: none;
+  }
+  /* 悬空条目（1.4.0）：文件已经不在了——整格灰显，名字行上墙（dock-caption 的药丸底），右键可清理 */
+  .dock-item.missing { opacity: 0.45; }
+  .dock-item.missing img { filter: grayscale(1); }
 
   /* Dock 空态（#4）：一条都没有时给一行极淡的提示，别让人以为没显示出来 */
   .dock-empty {

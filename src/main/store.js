@@ -36,6 +36,7 @@ const DEFAULTS = {
   popup_height: 460,
   dock_items: [],
   dock_aliases: {},            // 快捷方式在 Dock 上的显示名：只存设置，绝不动磁盘上的文件名
+  dock_hotkey: 'F9',           // Dock 唤出/收起的全局热键（'' = 关闭；双击 Ctrl 那种要底层钩子，Electron 做不了）
   dock_specials: ['windows', 'thispc', 'recyclebin', 'weather'],   // windows = 开始菜单（最左）  // 系统虚拟项：此电脑、回收站、天气
   dock_removed: [],
   // 天气城市：只存一个名字，经纬度每次启动重新查（一次地理编码请求，代价极低，
@@ -236,6 +237,7 @@ function mergedSettings(raw) {
     DOCK_HIDE_DELAY_MAX
   );
   out.dock_items = normalizePathList(raw.dock_items);
+  out.dock_hotkey = typeof raw.dock_hotkey === 'string' ? raw.dock_hotkey.trim().slice(0, 40) : DEFAULTS.dock_hotkey;
   out.shortcuts_dir = normalizeSourceDir(raw.shortcuts_dir);
   out.basket_dir = normalizeBasketDir(raw.basket_dir);
   out.dock_bottom_gap = clampInt(

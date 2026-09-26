@@ -16,3 +16,6 @@ docs/icon-proof/
 docs/desktop_*
 .codex-scan/
 dist*/
+
+# 本地验证工作台（隔离实例、截图、探针脚本）——只在本机活着
+.tmp_*/

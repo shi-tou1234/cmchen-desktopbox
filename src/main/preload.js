@@ -128,6 +128,14 @@ contextBridge.exposeInMainWorld('deskbasket', {
 
   // 设置
   openSettings: () => ipcRenderer.invoke('window:settings'),
+  // 一键整理（1.4.0）
+  openOrganizer: () => ipcRenderer.invoke('window:organize'),
+  organizePlan: () => ipcRenderer.invoke('organize:plan'),
+  organizeExecute: (groups) => ipcRenderer.invoke('organize:execute', { groups }),
+  organizeUndo: () => ipcRenderer.invoke('organize:undo'),
+  // 空格预览 QuickLook（1.4.0）
+  previewOpen: (payload) => ipcRenderer.invoke('preview:open', payload),
+  previewRead: (payload) => ipcRenderer.invoke('preview:read', payload),
   // 改名：开一个钉在 Dock 上方的小输入窗（Electron 没有 window.prompt，Dock 又收不到键盘）
   openRename: (payload) => ipcRenderer.invoke('rename:open', payload),
   commitRename: (value) => ipcRenderer.invoke('rename:commit', { value }),

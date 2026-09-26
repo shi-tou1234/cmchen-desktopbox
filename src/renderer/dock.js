@@ -51,6 +51,9 @@ function fallbackIcon() {
 }
 
 let iconSize = 48;
+// 图标请求分辨率：显示 48px，但本机 150% 缩放 + 悬停放大 ~1.5×，48px 源会被拉糊。
+// 固定向管线要 96px（和 main 的预热、缓存键一致），CSS 侧仍按 --icon 显示。
+const ICON_REQUEST_PX = 96;
 let reduceMotion = false;   // 减弱动画开关（#7）：来自设置 reduce_motion
 // 减弱动效的二合一判定：设置开关与系统级「减少动效」偏好取或，任一命中就不播装饰动画。
 //（CSS 侧同理：dock.html 里 @media (prefers-reduced-motion: reduce) 和 body.reduce-motion 各管各的入口）
@@ -86,6 +89,8 @@ function displayName(entry) {
 function captionText(entry) {
   if (entry.type === 'basket') return displayName(entry);
   if (entry.type === 'weather') return weatherIcons.caption(weatherState) || '天气';
+  // 悬空条目（1.4.0）：名字上墙（背板药丸保证读得清），用户才知道哪个图标已经失效
+  if (entry.type === 'shortcut' && entry.missing) return displayName(entry);
   return '';
 }
 
@@ -99,7 +104,7 @@ function keyOf(entry) {
 function makeNode(entry) {
   const item = document.createElement('div');
   // 带上类型类名：天气那行气温要用到更宽的 max-width（见 dock.html）
-  item.className = 'dock-item ' + entry.type;
+  item.className = 'dock-item ' + entry.type + (entry.missing ? ' missing' : '');
   // 每条挂一份动画状态，全部由 tick 逐帧积分：
   //   influence 悬停联动 / press 按下回弹 / hopAt 点开时的弹跳 / enter 新条目进场 / dx,dy 位移
   const node = {
@@ -119,7 +124,26 @@ function makeNode(entry) {
 
   const img = document.createElement('img');
   img.alt = '';
-  if (entry.type === 'basket') {
+  if (entry.type === 'basket' && entry.preview && entry.preview.icons && entry.preview.icons.length) {
+    // 叠放预览（1.4.0）：筐色底板上 2×2 摆前 4 个条目缩略 + 数量角标（手机文件夹那味）
+    const stack = document.createElement('div');
+    stack.className = 'dock-stack';
+    stack.style.setProperty('--tint', entry.color || '#e8973a');
+    for (const url of entry.preview.icons.slice(0, 4)) {
+      const mini = document.createElement('img');
+      mini.alt = '';
+      mini.draggable = false;
+      mini.src = url;
+      stack.append(mini);
+    }
+    const badge = document.createElement('span');
+    badge.className = 'dock-stack-badge';
+    badge.textContent = entry.preview.count > 99 ? '99+' : String(entry.preview.count);
+    stack.append(badge);
+    item.append(stack);
+    node.stack = stack;
+  }
+  if (entry.type === 'basket' && !node.stack) {
     img.src = folderIcon(entry.color);
   } else if (entry.type === 'weather') {
     img.src = weatherIcons.tile();   // 先摆兜底图，免得这一格空一下
@@ -143,7 +167,7 @@ function makeNode(entry) {
       });
   } else {
     api
-      .getIcon(entry.path, iconSize)
+      .getIcon(entry.path, ICON_REQUEST_PX)
       .then((dataUrl) => {
         img.src = dataUrl || fallbackIcon();
       })
@@ -152,7 +176,8 @@ function makeNode(entry) {
       });
   }
   node.img = img;   // 主进程推新图（回收站空/满翻转）时直接换这张，不必整块重画
-  item.append(img);
+  // 叠放预览接管了图标位（node.stack）：img 不上树，免得一张空 src 的破图占位
+  if (!node.stack) item.append(img);
 
   // 图标下面那行小字：文件夹筐写筐名、天气写实时气温（'26° 多云'），其余条目留空保持对齐
   const caption = document.createElement('div');
@@ -280,30 +305,38 @@ function makeNode(entry) {
         }
       });
     } else if (entry.type === 'special') {
-      window.showContextMenu(
-        [
-          { key: 'open', label: '打开' },
-          { separator: true },
-          { key: 'remove', label: '从 Dock 移除' }
-        ],
-        event
-      ).then((picked) => {
+      // 开始菜单图标挂「一键整理桌面」的入口（1.4.0）：桌面乱不乱，从「开始」旁边最顺手
+      const menu = entry.id === 'windows'
+        ? [
+            { key: 'open', label: '打开' },
+            { key: 'organize', label: '一键整理桌面…' },
+            { separator: true },
+            { key: 'remove', label: '从 Dock 移除' }
+          ]
+        : [
+            { key: 'open', label: '打开' },
+            { separator: true },
+            { key: 'remove', label: '从 Dock 移除' }
+          ];
+      window.showContextMenu(menu, event).then((picked) => {
         if (picked === 'open') api.openSpecial(entry.id);
+        else if (picked === 'organize') api.openOrganizer();
         else if (picked === 'remove') api.removeDockSpecial(entry.id);
       });
     } else {
       window.showContextMenu(
         [
-          { key: 'open', label: '打开' },
-          { key: 'reveal', label: '用系统资源管理器打开所在位置' },
-          { separator: true },
+          ...(entry.missing
+            ? [{ key: 'prune', label: '移除这个失效项' }, { separator: true }]
+            : [{ key: 'open', label: '打开' }, { key: 'reveal', label: '用系统资源管理器打开所在位置' }, { separator: true }]),
           { key: 'rename', label: '改名…' },
           { key: 'remove', label: '从 Dock 移除' }
         ],
         event
       ).then((picked) => {
         if (!picked) return;
-        if (picked === 'open') api.openPath(entry.path);
+        if (picked === 'prune') api.removeDockItem(entry.path);
+        else if (picked === 'open') api.openPath(entry.path);
         else if (picked === 'reveal') api.revealPath(entry.path);
         else if (picked === 'rename') {
           // 改的是 Dock 上的显示名（别名），磁盘上的文件名一个字都不动
@@ -488,11 +521,12 @@ async function refresh() {
       id: item.id,
       name: item.label
     })),
-    ...(data.baskets || []).map((basket) => ({ type: 'basket', id: basket.id, name: basket.name, color: basket.color })),
+    ...(data.baskets || []).map((basket) => ({ type: 'basket', id: basket.id, name: basket.name, color: basket.color, preview: basket.preview })),
     ...(data.shortcuts || []).map((item) => ({
       type: 'shortcut',
       path: item.path,
-      name: item.name
+      name: item.name,
+      missing: item.missing === true
     }))
   ];
   render();

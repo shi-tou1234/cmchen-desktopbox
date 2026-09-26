@@ -9,102 +9,83 @@
 <style>
   html, body { width: 100%; height: 100%; }
 
-  /* ---------------------------------------------------------------- 完全透明
-     窗口本身透明，页面也不铺任何底色：文件夹内容直接浮在桌面之上，
-     只留一圈细边框把面板的轮廓勾出来，文字靠 common.css 的阴影保证可读。
-     **不再画 box-shadow 投影**：弹窗窗口带 8px 隐形 resize border（客户区比窗口矩形小一圈），
-     投影会画进那条透明边带、被窗口边界裁成一道暗框——和 1px 边框叠在一起就是领导说的
-     "多个边框"。外扩的软投影改由窗口原生投影负责（见 windows.js createPopupWindow 的
-     hasShadow），它画在窗口矩形之外，不会和边框抢轮廓。 */
-  .popup-edge {
+  /* ================================================================ 1.3 · 宝石玻璃设计
+     「精致装饰感」：整块面板罩一层筐色的低饱和彩调（颜色是气氛不是色块），
+     每个图标坐在自己文件类型的彩色釉面底板上（--h 由 popup.js 按扩展名给），
+     头部是一枚筐色渐变宝石徽章 + 成组的玻璃按钮，顶部一道内高光当"釉面反光"。
+     深/浅两套配色走 prefers-color-scheme（主进程按壁纸亮度切 nativeTheme，
+     见 theme.js），同一个设计语言各配一轮颜色。
+     窗口是 resizable:false（见 windows.js），客户区＝窗口矩形，铺满即无缝。
+     */
+
+  :root {
+    --card-radius: 14px;
+    --cell-radius: 12px;
+    /* 深色主题：宝石玻璃。--basket-accent 由 JS 设成 Dock 上那颗筐的颜色，
+       缺失（dir 视图）时回落一颗系统蓝 */
+    --panel-accent: var(--basket-accent, #6e9bfe);
+    --panel-bg: rgba(21, 24, 33, 0.80);
+    --panel-bg-solid: rgba(22, 25, 34, 0.90);
+    --panel-edge: rgba(255, 255, 255, 0.10);
+    --panel-gloss: rgba(255, 255, 255, 0.12);
+    --wash: rgba(255, 255, 255, 0.065);
+    --wash-strong: rgba(255, 255, 255, 0.11);
+    --title-fg: #f0f2f7;
+    --dim-fg: #a7acb8;
+    --faint-fg: #7b8090;
+    --grp-bg: rgba(255, 255, 255, 0.07);
+    --grp-edge: rgba(255, 255, 255, 0.09);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --panel-accent: var(--basket-accent, #3b74e0);
+      --panel-bg: rgba(250, 250, 254, 0.78);
+      --panel-bg-solid: rgba(252, 252, 255, 0.94);
+      --panel-edge: rgba(28, 34, 52, 0.10);
+      --panel-gloss: rgba(255, 255, 255, 0.9);
+      --wash: rgba(30, 38, 60, 0.05);
+      --wash-strong: rgba(30, 38, 60, 0.085);
+      --title-fg: #262933;
+      --dim-fg: #5c6070;
+      --faint-fg: #8a8e9c;
+      --grp-bg: rgba(255, 255, 255, 0.55);
+      --grp-edge: rgba(28, 34, 52, 0.08);
+    }
+  }
+
+  /* ---------------------------------------------------------------- 面板
+     底色 = 深玻璃罩一层筐色彩调；右上角一汪筐色"极光"、左下角一点补光，
+     顶边一道内高光。磨砂模式透系统材质，完全透明模式近实底。 */
+  .card {
     position: absolute;
     inset: 0;
-    border-radius: 14px;
-    border: 1px solid var(--border);
-    pointer-events: none;
-  }
-
-  /* 有文件拖到弹窗上：给一圈高亮，表示"松手会加进这个筐" */
-  body.dragover .popup-edge { border-color: rgba(140, 190, 255, 0.9); }
-
-  /* 弹窗内拖动换位（3.9.0 起指针手势；3.9.1 动画翻新）：抓起后原格隐身让位，落点是
-     一个虚线空位框、实时滑到插入点（其余格子 FLIP 平移，见 popup.js 拖拽段）；
-     「拎起来」的影子（图标＋名字）浮出格子跟手，松手飞进新格子、格子回弹落定。 */
-  .drag-placeholder {
-    width: 88px;
-    box-sizing: border-box;
-    border-radius: 10px;
-    border: 1.5px dashed var(--accent);
-    background: rgba(140, 190, 255, 0.12);
-    pointer-events: none;
-  }
-  .cell.dragging-source {
-    opacity: 0;
-    transform: scale(0.86);
-    transition: opacity 130ms ease-out, transform 130ms ease-out;
-  }
-  .drag-ghost {
-    position: fixed;
-    left: 0;
-    top: 0;
-    width: 88px;
-    z-index: 9;
-    pointer-events: none;
-    will-change: transform;
-  }
-  .drag-ghost-card {
+    border-radius: var(--card-radius);
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 2px 8px;
-    border-radius: 10px;
-    background: rgba(255, 255, 255, 0.10);
-    box-shadow: 0 14px 26px rgba(0, 0, 0, 0.42), 0 3px 8px rgba(0, 0, 0, 0.30);
-    animation: drag-ghost-lift 150ms cubic-bezier(0.34, 1.56, 0.64, 1);
-  }
-  .drag-ghost img { width: 48px; height: 48px; object-fit: contain; }
-  .drag-ghost .name {
-    font-size: 12px;
-    line-height: 14px;
-    max-height: 28px;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
     overflow: hidden;
-    word-break: break-all;
-    text-align: center;
+    background:
+      radial-gradient(480px 320px at 88% -8%, color-mix(in srgb, var(--panel-accent) 30%, transparent), transparent 68%),
+      radial-gradient(400px 280px at -6% 106%, color-mix(in srgb, var(--panel-accent) 12%, transparent), transparent 60%),
+      color-mix(in srgb, var(--panel-accent) 5%, var(--panel-bg));
+    box-shadow:
+      inset 0 0 0 1px var(--panel-edge),
+      inset 0 1px 0 var(--panel-gloss);
   }
-  @keyframes drag-ghost-lift {
-    from { transform: scale(0.82); opacity: 0.5; }
-    to { transform: scale(1.06); opacity: 1; }
-  }
-  /* 松手落位：新格子小小回弹一下"接住"飞回来的影子 */
-  .cell.just-dropped { animation: cell-settle 180ms cubic-bezier(0.3, 1.3, 0.5, 1); }
-  @keyframes cell-settle {
-    from { transform: scale(0.9); opacity: 0.5; }
-    to { transform: none; opacity: 1; }
-  }
-  /* 减弱动画（#7）与系统「减少动效」：弹跳与落位动画直接不做（JS 侧的跟随/FLIP 同步关） */
-  body.reduce-motion .drag-ghost-card,
-  body.reduce-motion .cell.just-dropped { animation: none; }
-  @media (prefers-reduced-motion: reduce) {
-    .drag-ghost-card,
-    .cell.just-dropped { animation: none; }
+  body:not(.glass) .card {
+    background:
+      radial-gradient(480px 320px at 88% -8%, color-mix(in srgb, var(--panel-accent) 32%, transparent), transparent 68%),
+      radial-gradient(400px 280px at -6% 106%, color-mix(in srgb, var(--panel-accent) 13%, transparent), transparent 60%),
+      color-mix(in srgb, var(--panel-accent) 6%, var(--panel-bg-solid));
   }
 
   /* 打开/收起动画：整块内容从图标位置"抽"出来再缩回去（macOS 的文件夹堆栈那种感觉）。
      变换原点落在 Dock 图标中心（--origin-x 由主进程按锚点算好），底边贴齐。
-     完全透明模式：窗口本身是透的、没有"底盘"，内容可以放心从很小放大。
-     磨砂模式（body.glass）：窗口底是一整块系统材质，内容缩到 0.28 会和材质底对不上、
-     看着像闪一下，所以那一档改成"轻微下沉 + 淡"。
-     **窗口本身不做透明度动画**：给挂材质的窗口 setOpacity 会让材质底闪一下，
-     开和关都看得见。 */
+     磨砂模式（body.glass）缩放改"轻微下沉 + 淡"，避免和材质底对不上。
+     **窗口本身不做透明度动画**：给挂材质的窗口 setOpacity 会让材质底闪一下。 */
   .popup-frame {
     position: absolute;
     inset: 0;
     transform-origin: var(--origin-x, 50%) 100%;
-    /* 交给合成器单独一层：缩放/淡入就只是图层变换，不会每帧重画整块内容 */
     will-change: transform, opacity;
     transition:
       transform 260ms cubic-bezier(0.34, 1.28, 0.5, 1),
@@ -113,7 +94,6 @@
   body.collapsed .popup-frame {
     transform: translateY(16px) scale(0.28);
     opacity: 0;
-    /* 收起：干脆收回去，不拖泥带水 */
     transition:
       transform 200ms cubic-bezier(0.4, 0, 0.9, 0.4),
       opacity 150ms ease-in;
@@ -130,153 +110,429 @@
       transform 160ms ease-in,
       opacity 150ms ease-in;
   }
-  /* 减弱动画（#7）：开合不缩放不淡，直接出现/消失 */
-  body.reduce-motion .popup-frame {
-    transition: none;
-  }
-  body.reduce-motion.collapsed .popup-frame {
-    transform: none;
-  }
-  /* 系统「减少动效」：与上面的 body.reduce-motion 并列生效，任一命中开合都直接出现/消失。
-     选择器与 body.reduce-motion 一一对齐（含 .glass 变体），放到所有开合规则之后才压得住。 */
+  body.reduce-motion .popup-frame { transition: none; }
+  body.reduce-motion.collapsed .popup-frame { transform: none; }
   @media (prefers-reduced-motion: reduce) {
-    .popup-frame,
-    body.glass .popup-frame {
-      transition: none;
-    }
-    body.collapsed .popup-frame,
-    body.glass.collapsed .popup-frame {
-      transform: none;
-    }
+    .popup-frame, body.glass .popup-frame { transition: none; }
+    body.collapsed .popup-frame, body.glass.collapsed .popup-frame { transform: none; }
   }
 
-  .popup {
-    position: absolute;
-    inset: 0;
-    border-radius: 14px;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .popup-head {
-    height: 38px;
+  /* ---------------------------------------------------------------- 头部
+     宝石徽章 + 标题/条目数 + 成组玻璃按钮；头部底下压着一层由浓到淡的
+     筐色薄雾（和面板极光连成一体），装饰感从这里来，但不做成色块横幅。 */
+  .card-head {
+    flex: 0 0 auto;
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 0 8px 0 12px;
-    flex: 0 0 auto;
+    gap: 10px;
+    height: 56px;
+    padding: 0 10px 0 12px;
   }
-  .popup-title {
-    font-size: 13px;
-    font-weight: 600;
-    flex: 1 1 auto;
-    min-width: 0;                    /* 收缩下限放开到 0：窄窗口靠省略号截断，不许把右侧按钮挤出边界 */
+  .card-head::before {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; top: 0;
+    height: 100%;
+    background: linear-gradient(180deg,
+      color-mix(in srgb, var(--panel-accent) 17%, transparent), transparent);
+    pointer-events: none;
+  }
+  /* 宝石徽章：筐色渐变 + 釉面顶光 + 同色软投影；dir 视图回落石墨徽章 */
+  .head-badge {
+    position: relative;
+    flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    border-radius: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(150deg,
+      color-mix(in srgb, var(--panel-accent) 62%, #ffffff) 0%,
+      var(--panel-accent) 52%,
+      color-mix(in srgb, var(--panel-accent) 74%, #1a1030) 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.45),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+      0 4px 12px color-mix(in srgb, var(--panel-accent) 40%, transparent);
+  }
+  .head-badge svg { width: 19px; height: 19px; display: block; }
+  .head-texts {
+    position: relative;
+    flex: 0 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .head-title {
+    font-size: 14.5px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    color: var(--title-fg);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .nav-btn {
-    width: 26px;
-    height: 26px;
+  /* 条目数：一枚同色系小胶囊 */
+  .head-count {
+    align-self: flex-start;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--panel-accent) 20%, transparent);
+    color: color-mix(in srgb, var(--panel-accent) 55%, var(--title-fg));
+    font-size: 10.5px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .head-count:empty { display: none; }
+  .head-spring { flex: 1 1 0; }
+
+  /* 按钮组：一整条玻璃胶囊，按钮之间用发丝线分格 */
+  .hbtn-group {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    background: var(--grp-bg);
+    box-shadow: inset 0 0 0 1px var(--grp-edge), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 2px;
+  }
+  .hbtn {
+    flex: 0 0 auto;
+    min-width: 28px;
+    height: 28px;
     border: 0;
     border-radius: 8px;
-    background: var(--head-btn-bg);
-    color: var(--text);
-    font-size: 13px;
+    background: transparent;
+    color: var(--dim-fg);
+    font-size: 14px;
     line-height: 1;
     cursor: pointer;
-    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 120ms ease, color 120ms ease, transform 80ms ease;
   }
-  .nav-btn:hover:not(:disabled) { background: var(--head-btn-hover); }
-  .nav-btn:disabled { opacity: 0.35; cursor: default; }
-  .nav-btn.wide { width: auto; padding: 0 10px; font-size: 12px; }
-  /* ⌂ 按钮文案是整串筐名：窄窗口（最小 260px）下必须和标题一起可收缩，否则整串名字会把
-     「＋/✕」挤出 .popup 的 overflow:hidden 之外、点都点不到。按 id 单独收紧是因为
-     「＋」也挂 .nav-btn.wide，它必须保持 flex:0 0 auto 永不缩。 */
+  .hbtn + .hbtn { margin-left: 1px; }
+  .hbtn:hover { background: var(--wash-strong); color: var(--title-fg); }
+  .hbtn:active { transform: scale(0.92); }
+  .hbtn:disabled { opacity: 0.35; cursor: default; background: transparent; color: var(--dim-fg); }
+  .hbtn.close:hover { background: rgba(226, 72, 72, 0.22); color: #ff8484; }
+  @media (prefers-color-scheme: light) {
+    .hbtn.close:hover { background: rgba(206, 58, 58, 0.14); color: #c23434; }
+  }
+  /* ⌂ 文案是整串筐名：窄窗口下随标题一起收缩 */
   #btnHome {
-    flex: 1 1 auto;
     min-width: 0;
+    max-width: 170px;
+    padding: 0 9px;
+    font-size: 12px;
+    font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  /* ---------------------------------------------------------------- 网格 */
   .popup-grid {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 4px 8px 10px;
+    padding: 10px 12px 14px;
     display: grid;
-    grid-template-columns: repeat(auto-fill, 88px);
+    grid-template-columns: repeat(auto-fill, 94px);
     grid-auto-rows: min-content;
     justify-content: start;
     align-content: start;
   }
-  /* 滚动条样式不再内联一份：统一走 common.css 里 .popup-grid 那条共用规则（细滚动条） */
-
-  .popup-status {
-    padding: 0 12px 8px;
-    font-size: 12px;
-    color: var(--text-dim);
-    flex: 0 0 auto;
+  .popup-grid::-webkit-scrollbar { width: 10px; }
+  .popup-grid::-webkit-scrollbar-track { background: transparent; }
+  .popup-grid::-webkit-scrollbar-thumb {
+    background: var(--scroll-thumb);
+    border-radius: 8px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
   }
-  .popup-status.error { color: #ffbe78; }
-  /* 浅色主题：#ffbe78 压近白底只有约 1.6:1、错误提示读不出来，换成深棕红
-     （保留「警告/错误」语义，对 #fff 实测约 7.6:1 ≥ 4.5:1）；暗色仍用原值 */
+  .popup-grid::-webkit-scrollbar-thumb:hover { background: var(--text-faint); background-clip: padding-box; }
+  .popup-grid::-webkit-scrollbar-button { display: none; }
+  .popup-grid .cell {
+    position: relative;   /* 插入线 ::after 的定位基准 */
+    width: 94px;
+    padding: 9px 4px 7px;
+    border-radius: var(--cell-radius);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    transition: background 120ms ease, transform 120ms ease;
+  }
+  .popup-grid .cell:hover {
+    background: var(--wash);
+    transform: translateY(-1px);
+  }
+  .popup-grid .cell:hover .plate { filter: brightness(1.14); }
+  .popup-grid .cell:active { transform: translateY(0) scale(0.97); }
+  .popup-grid .cell.selected {
+    background: color-mix(in srgb, var(--panel-accent) 15%, transparent);
+    box-shadow:
+      inset 0 0 0 1.5px color-mix(in srgb, var(--panel-accent) 62%, transparent),
+      0 2px 10px color-mix(in srgb, var(--panel-accent) 20%, transparent);
+  }
+  .popup-grid .cell:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--panel-accent) 82%, transparent);
+    outline-offset: -2px;
+  }
+  .popup-grid .cell.missing { opacity: 0.5; }
+
+  /* 釉面底板：每个图标坐在自己文件类型的颜色上（--h 由 popup.js 按扩展名给），
+     上亮下暗的对角渐变 + 顶缘一圈釉光 + 同色软投影 = "宝石台座" */
+  .plate {
+    width: 58px;
+    height: 58px;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(150deg,
+      hsl(var(--h, 225) 74% 62% / 0.44),
+      hsl(var(--h, 225) 70% 46% / 0.22));
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.28),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+      0 3px 9px hsl(var(--h, 225) 70% 50% / 0.22);
+    transition: filter 120ms ease;
+  }
   @media (prefers-color-scheme: light) {
-    .popup-status.error { color: #9b2c1b; }
+    .plate {
+      background: linear-gradient(150deg,
+        hsl(var(--h, 225) 72% 62% / 0.30),
+        hsl(var(--h, 225) 70% 46% / 0.14));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.85),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+        0 3px 9px hsl(var(--h, 225) 70% 50% / 0.20);
+    }
+  }
+  .plate img { width: 44px; height: 44px; object-fit: contain; }
+  .popup-grid .cell .name { margin-top: 0; }
+
+  /* ---------------------------------------------------------------- 脚栏
+     一条安静的提示带：左边状态消息（平时空着），右边快捷键键帽；
+     上缘分隔线用筐色淡淡地染一下头，跟头部呼应。 */
+  .card-foot {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 34px;
+    padding: 0 12px;
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--panel-accent) 12%, var(--panel-edge));
+  }
+  .popup-status {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--dim-fg);
+    font-size: 11.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+  }
+  .popup-status:empty { display: none; }
+  .popup-status.error { color: #f0a35e; }
+  @media (prefers-color-scheme: light) {
+    .popup-status.error { color: #b05e1e; }
+  }
+  .foot-hints {
+    flex: 0 0 auto;
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  body[data-kind="dir"] .foot-hints { display: none; }
+  .hint {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--faint-fg);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .hint kbd {
+    font: 600 10px/1.7 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    color: var(--dim-fg);
+    background: var(--grp-bg);
+    box-shadow: inset 0 0 0 1px var(--grp-edge);
+    border-radius: 4px;
+    padding: 0 5px;
   }
 
   .empty-tip {
     position: absolute;
-    inset: 38px 0 30px;
+    inset: 64px 26px 44px;
     display: flex;
     align-items: center;
     justify-content: center;
+    text-align: center;
+    line-height: 1.7;
     color: var(--text-faint);
     font-size: 12px;
     pointer-events: none;
   }
 
-  /* 右下角的拖拽调尺寸把手（#3）：平时只是三个小点，鼠标靠近才亮 */
+  /* 右下角的拖拽调尺寸把手：三个小点，鼠标靠近才亮 */
   .resize-grip {
     position: absolute;
-    right: 3px;
-    bottom: 3px;
+    right: 5px;
+    bottom: 5px;
     width: 18px;
     height: 18px;
     cursor: nwse-resize;
-    opacity: 0.35;
+    opacity: 0.3;
     touch-action: none;
   }
-  .resize-grip:hover { opacity: 0.9; }
+  .resize-grip:hover { opacity: 0.85; }
   .resize-grip::before {
     content: '';
     position: absolute;
-    right: 2px;
-    bottom: 2px;
-    width: 10px;
-    height: 10px;
+    right: 3px;
+    bottom: 3px;
+    width: 9px;
+    height: 9px;
     background:
-      radial-gradient(circle, var(--text-dim) 1.2px, transparent 1.6px) 0 0 / 5px 5px;
+      radial-gradient(circle, var(--text-dim) 1px, transparent 1.4px) 0 0 / 5px 5px;
+  }
+
+  /* ---------------------------------------------------------------- 拖动换位
+     抓起：原格隐身让位、虚线空位框（筐色）落在原位；「拎起来」的影子跟手；
+     FLIP 平移；拖动中插入线（筐色竖条）标出落点；松手：影子飞进落点格、回弹落定。 */
+  .drag-placeholder {
+    width: 94px;
+    box-sizing: border-box;
+    border-radius: var(--cell-radius);
+    border: 1.5px dashed color-mix(in srgb, var(--panel-accent) 75%, transparent);
+    background: color-mix(in srgb, var(--panel-accent) 12%, transparent);
+    pointer-events: none;
+  }
+  /* 插入线：竖条贴在目标格的左缘（追加到末尾时贴末格右缘）。
+     用 ::after 画，不占布局也不和选中格的 inset 描边打架。 */
+  .cell.drop-before::after,
+  .cell.drop-after::after {
+    content: '';
+    position: absolute;
+    top: 7%;
+    bottom: 7%;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--panel-accent);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--panel-accent) 55%, transparent);
+    z-index: 2;
+  }
+  .cell.drop-before::after { left: -5px; }
+  .cell.drop-after::after { right: -5px; }
+  .cell.dragging-source {
+    opacity: 0;
+    transform: scale(0.86);
+    transition: opacity 130ms ease-out, transform 130ms ease-out;
+  }
+  .drag-ghost {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 94px;
+    z-index: 9;
+    pointer-events: none;
+    will-change: transform;
+  }
+  .drag-ghost-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    padding: 9px 4px 7px;
+    border-radius: var(--cell-radius);
+    background:
+      radial-gradient(120px 80px at 80% 0%, color-mix(in srgb, var(--panel-accent) 22%, transparent), transparent 70%),
+      rgba(28, 31, 42, 0.92);
+    box-shadow: 0 16px 30px rgba(0, 0, 0, 0.45), 0 3px 9px rgba(0, 0, 0, 0.32),
+      inset 0 0 0 1px var(--panel-edge), inset 0 1px 0 var(--panel-gloss);
+    animation: drag-ghost-lift 150ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  @media (prefers-color-scheme: light) {
+    .drag-ghost-card { background: rgba(252, 252, 254, 0.94); }
+  }
+  .drag-ghost .plate {
+    width: 58px;
+    height: 58px;
+    border-radius: 16px;
+  }
+  .drag-ghost img { width: 44px; height: 44px; object-fit: contain; }
+  .drag-ghost .name {
+    font-size: 12px;
+    line-height: 14px;
+    max-height: 28px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-all;
+    text-align: center;
+  }
+  @keyframes drag-ghost-lift {
+    from { transform: scale(0.82); opacity: 0.5; }
+    to { transform: scale(1.06); opacity: 1; }
+  }
+  .cell.just-dropped { animation: cell-settle 180ms cubic-bezier(0.3, 1.3, 0.5, 1); }
+  @keyframes cell-settle {
+    from { transform: scale(0.9); opacity: 0.5; }
+    to { transform: none; opacity: 1; }
+  }
+  body.reduce-motion .drag-ghost-card,
+  body.reduce-motion .cell.just-dropped,
+  body.reduce-motion .popup-grid .cell { transition: none; }
+  body.reduce-motion .drag-ghost-card,
+  body.reduce-motion .cell.just-dropped { animation: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .drag-ghost-card,
+    .cell.just-dropped,
+    .popup-grid .cell { animation: none; transition: none; }
   }
 </style>
 </head>
-<body class="collapsed">
+<body class="collapsed" data-kind="basket">
   <div class="popup-frame">
-    <div class="popup">
-      <div class="popup-head">
-        <button class="nav-btn wide" id="btnHome" title="回到文件夹">⌂</button>
-        <button class="nav-btn" id="btnUp" title="上一级">↑</button>
-        <span class="popup-title" id="title"></span>
-        <button class="nav-btn wide" id="btnAdd" title="往这个筐里添加文件（可多选；也可以直接把文件拖进窗口，或拖到 Dock 的文件夹图标上）">＋</button>
-        <button class="nav-btn" id="btnClose" title="关闭">✕</button>
-      </div>
+    <section class="card">
+      <header class="card-head">
+        <span class="head-badge" aria-hidden="true">
+          <svg viewBox="0 0 48 48"><path d="M6 12a4 4 0 0 1 4-4h11l5 5h12a4 4 0 0 1 4 4v17a4 4 0 0 1-4 4H10a4 4 0 0 1-4-4V12z" fill="#ffffff" fill-opacity="0.96"/></svg>
+        </span>
+        <span class="head-texts">
+          <span class="head-title" id="title"></span>
+          <span class="head-count" id="count"></span>
+        </span>
+        <span class="head-spring" aria-hidden="true"></span>
+        <span class="hbtn-group">
+          <button class="hbtn" id="btnHome" title="回到文件夹">⌂</button>
+          <button class="hbtn" id="btnUp" title="上一级">↑</button>
+          <button class="hbtn" id="btnAdd" title="往这个筐里添加文件（可多选；也可以直接把文件拖进窗口，或拖到 Dock 的文件夹图标上）">＋</button>
+          <button class="hbtn close" id="btnClose" title="关闭">✕</button>
+        </span>
+      </header>
       <div class="popup-grid" id="grid" role="listbox" aria-multiselectable="true" aria-label="文件列表"></div>
-      <div class="popup-status" id="status"></div>
+      <footer class="card-foot">
+        <div class="popup-status" id="status"></div>
+        <div class="foot-hints" aria-hidden="true">
+          <span class="hint"><kbd>↵</kbd>打开</span>
+          <span class="hint"><kbd>F2</kbd>重命名</span>
+          <span class="hint"><kbd>Del</kbd>删除</span>
+          <span class="hint"><kbd>拖动</kbd>换位</span>
+        </div>
+      </footer>
       <div class="empty-tip" id="emptyTip" style="display:none"></div>
-    </div>
-    <div class="popup-edge"></div>
+    </section>
     <div class="resize-grip" id="grip" title="拖动调整窗口大小"></div>
   </div>
   <script src="popup.js"></script>

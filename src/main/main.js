@@ -19,6 +19,7 @@ const { execFileSync, spawn } = require('node:child_process');
 const {
   app,
   BrowserWindow,
+  globalShortcut,
   Menu,
   Tray,
   dialog,
@@ -38,6 +39,7 @@ const recyclebin = require('./recyclebin');
 const specials = require('./specials');
 const windowLayer = require('./windowLayer');
 const winFactory = require('./windows');
+const organize = require('./organize');
 const autostart = require('./autostart');
 const theme = require('./theme');
 const weatherModel = require('./weather');
@@ -85,6 +87,7 @@ let tray = null;
 let dockWindow = null;
 let settingsWindow = null;
 let renameWindow = null;       // 改名输入窗（钉在 Dock 上方）
+let organizerWindow = null;    // 一键整理预览窗（1.4.0）
 let renameTarget = null;       // { kind:'basket', id } | { kind:'shortcut', path }
 
 let popupWindow = null;        // 当前文件夹弹窗（收起时隐藏、不销毁，下次复用）
@@ -882,9 +885,9 @@ function specialIconFor(id) {
       recycleIconPending.catch(() => ''),
       new Promise((resolve) => setTimeout(() => resolve(''), RECYCLE_WAIT_FRESH_MS))
     ]);
-    return raced.then((dataUrl) => dataUrl || shellIcons.parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX));
+    return raced.then((dataUrl) => dataUrl || shellIcons.parsingNameIconDataUrl(special.parsingName, 96));
   }
-  return shellIcons.parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX);
+  return shellIcons.parsingNameIconDataUrl(special.parsingName, 96);
 }
 
 // ---------------------------------------------------------------- 回收站图标的「空 / 满」
@@ -1644,12 +1647,12 @@ function prewarmDockIcons() {
   const jobs = [];
   for (const item of settings.dock_items) {
     if (String(item).toLowerCase().endsWith('.lnk')) {
-      jobs.push(shellIcons.iconDataUrl(item, shellIcons.ICON_PX));
+      jobs.push(shellIcons.iconDataUrl(item, 96));
     }
   }
   for (const id of settings.dock_specials) {
     const special = specials.findSpecial(id);
-    if (special) jobs.push(shellIcons.parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX));
+    if (special) jobs.push(shellIcons.parsingNameIconDataUrl(special.parsingName, 96));
   }
   if (jobs.length) Promise.all(jobs).catch(() => {});
 }
@@ -1658,7 +1661,8 @@ function prewarmDockIcons() {
 // 窗口一出来就是齐的（不然图标会在展开动画播到一半时才开始解码，看着一顿一顿）。
 // 与 Dock 那批一样一次性批量发起，命中缓存时等于空操作。
 function prewarmBasketIcons() {
-  const size = settings.icon_size;
+  // 与渲染层的请求分辨率对齐（96）：键不一致的话预热等于白热，弹窗首帧还得现抽
+  const size = 96;
   const jobs = [];
   const seen = new Set();
   for (const basket of settings.baskets) {
@@ -1768,6 +1772,346 @@ function syncDockItems() {
   }
 }
 
+// ------------------------------------------------------------------ Dock 热键唤出（1.4.0）
+//
+// 双击 Ctrl 那种玩法需要底层键盘钩子（Electron 没有现成的），这里用可配置的
+// globalShortcut 组合键（默认 F9）做「唤出/收起」开关。Windows 会静默吞掉全局热键
+// （别的应用抢注、切输入法、睡眠唤醒），所以配一个看门狗：掉了就再挂回去。
+let dockHotkeyWatch = null;
+
+function toggleDockByHotkey() {
+  if (!settings.dock_auto_hide) return;   // 常驻模式下 Dock 永远在，热键无事可做
+  if (dockRevealed) {
+    dockRevealed = false;
+    dockLeftAt = 0;
+    if (!popupAutoCloseBlocked()) closeFolderPopup('热键收起');
+    hideWeatherCard();
+    slideDockTo(dockHiddenGeometry());
+  } else {
+    dockRevealed = true;
+    dockLeftAt = 0;
+    slideDockTo(dockTargetGeometry());
+  }
+}
+
+function registerDockHotkey() {
+  const combo = String(settings.dock_hotkey || '').trim();
+  if (!combo) return;
+  try {
+    if (globalShortcut.isRegistered(combo)) globalShortcut.unregister(combo);
+    const ok = globalShortcut.register(combo, toggleDockByHotkey);
+    if (ok) console.log(`[hotkey] Dock 唤出热键已注册：${combo}`);
+    else console.log(`[hotkey] 热键 ${combo} 注册失败（可能被别的程序占用）`);
+  } catch (error) {
+    console.log(`[hotkey] 热键 ${combo} 注册异常：${basketfiles.errorText(error)}`);
+  }
+  if (!dockHotkeyWatch) {
+    dockHotkeyWatch = setInterval(() => {
+      const want = String(settings.dock_hotkey || '').trim();
+      if (!want) {
+        clearInterval(dockHotkeyWatch);
+        dockHotkeyWatch = null;
+        return;
+      }
+      try {
+        if (!globalShortcut.isRegistered(want)) registerDockHotkey();
+      } catch (_) {
+        /* 查询失败下一轮再试 */
+      }
+    }, 60 * 1000);
+  }
+}
+
+// ------------------------------------------------------------------ 一键整理桌面（1.4.0）
+//
+// 桌面乱成一锅粥时的一键收拾：扫描收录来源目录（默认桌面）→ 按扩展名分类（organize.js，
+// 纯逻辑、有单测）→ 预览窗让用户确认 → 执行（按类建筐，文件真的搬进筐文件夹，走
+// addPathsToBasket 的既有管线：保护集/跨卷回退/登记持久化全复用）→ 记录搬家清单，支持一键撤销。
+// 执行前**重新规划**一次：预览窗开着的时候桌面可能又变了，一切以执行那一刻的盘面为准。
+
+function pathExists(p) {
+  try {
+    fs.statSync(p);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// 扫描可整理的文件：桌面上的文件夹保持原位、点开头文件和 desktop.ini 跳过、
+// 已经是 Dock 条目/别的筐成员的跳过（动了会弄坏那边的登记）。
+function scanOrganizable() {
+  const root = sourceDir();
+  let dirents = [];
+  try {
+    dirents = fs.readdirSync(root, { withFileTypes: true });
+  } catch (error) {
+    return { root, entries: [], error: basketfiles.errorText(error) };
+  }
+  const registered = protectedKeysFor('');
+  const entries = [];
+  for (const dirent of dirents) {
+    const name = dirent.name;
+    if (name.startsWith('.')) continue;                        // .accelerate 这类点文件
+    if (name.toLowerCase() === 'desktop.ini') continue;
+    const full = path.join(root, name);
+    let stat = null;
+    try {
+      stat = fs.statSync(full);
+    } catch (_) {
+      continue;                                                // 失效 junction 之类
+    }
+    if (!stat.isFile()) continue;
+    entries.push({
+      path: full,
+      name,
+      isDir: false,
+      missing: false,
+      registered: registered.has(basketfiles.keyOf(full)),
+      hidden: false
+    });
+  }
+  return { root, entries, error: '' };
+}
+
+// 规划 + 载荷瘦身：每组最多带 24 个文件名（再多弹窗也装不下，用「等 N 个」示意）；
+// 新建筐的展示色这里先分配好（执行时原色落地），预览窗里色点 = 到时候 Dock 上的颜色
+function planFromScan() {
+  const scan = scanOrganizable();
+  if (scan.error) return { root: scan.root, groups: [], skipped: [], error: scan.error };
+  const takenColors = new Set(settings.baskets.map((b) => b.color).filter(Boolean));
+  const plan = organize.planOrganization(scan.entries, settings.baskets);
+  const groups = plan.groups.map((group) => {
+    let color = '';
+    if (group.action === 'create') {
+      color = basketModel.assignColor('organize:' + group.id, takenColors);
+      takenColors.add(color);
+    } else {
+      const existing = findBasket(group.basketId);
+      color = existing ? existing.color : '';
+      group.basketName = existing ? existing.name : group.name;
+    }
+    return {
+      id: group.id,
+      name: group.name,
+      count: group.count,
+      color,
+      action: group.action,
+      basketId: group.basketId,
+      items: group.items.slice(0, 24).map((item) => ({ path: item.path, name: item.name })),
+      more: Math.max(0, group.items.length - 24)
+    };
+  });
+  const skipped = plan.skipped.slice(0, 30).map((item) => ({ name: item.name, reason: item.reason }));
+  return { root: scan.root, groups, skipped, error: '' };
+}
+
+function openOrganizerWindow() {
+  if (organizerWindow && !organizerWindow.isDestroyed()) {
+    organizerWindow.show();
+    organizerWindow.focus();
+    return true;
+  }
+  const area = screen.getPrimaryDisplay().workArea;
+  const width = 560;
+  const height = 640;
+  organizerWindow = winFactory.createRenameWindow({
+    width,
+    height,
+    x: Math.round(area.x + (area.width - width) / 2),
+    y: Math.round(area.y + (area.height - height) / 2),
+    glass: false,
+    title: `${APP_NAME} 一键整理`
+  });
+  attachDiagnostics(organizerWindow, 'organize');
+  winFactory.loadPage(organizerWindow, 'organize.html');
+  const win = organizerWindow;
+  win.once('ready-to-show', () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.focus();
+  });
+  win.on('closed', () => {
+    if (organizerWindow === win) organizerWindow = null;
+  });
+  return true;
+}
+
+guardHandle('window:organize', () => {
+  closeMenuIfOpen();
+  return openOrganizerWindow();
+});
+
+guardHandle('organize:plan', () => planFromScan());
+
+guardHandle('organize:execute', async (_event, { groups } = {}) => {
+  const wanted = new Map((groups || []).map((group) => [group.id, group]));
+  const fresh = planFromScan();
+  const results = [];
+  const undoMoves = [];
+  for (const group of fresh.groups) {
+    if (!wanted.has(group.id)) continue;                       // 用户在预览里取消了的类
+    let basket = group.action === 'reuse' ? findBasket(group.basketId) : null;
+    if (!basket) {
+      const created = basketModel.createBasket(settings.baskets, group.name);
+      settings.baskets = created.baskets;
+      basket = created.basket;
+      if (group.color && basketModel.isValidColor(group.color)) basket.color = group.color;
+    }
+    const before = new Set((basket.items || []).map(basketfiles.keyOf));
+    const origins = group.items.map((item) => item.path);
+    const outcome = await addPathsToBasket(basket, origins, '一键整理');
+    const saved = findBasket(basket.id);
+    // 新登记的条目按文件名配回原路径（placeInto 撞名会改名字，按路径键配不上）；
+    // 「真搬家」以源文件是否还在原地为准——placeInto 跨卷是复制+删源，源没了就算搬家
+    const destByName = new Map();
+    if (saved) {
+      for (const item of saved.items || []) {
+        const key = basketfiles.keyOf(item);
+        if (!before.has(key)) destByName.set(path.basename(item).toLowerCase(), item);
+      }
+    }
+    for (const origin of origins) {
+      const dest = destByName.get(path.basename(origin).toLowerCase());
+      if (!dest) continue;                                     // 失败/没登记的：没有可撤销的搬家
+      undoMoves.push({ from: origin, to: dest, moved: !pathExists(origin) });
+    }
+    results.push({ id: group.id, name: group.name, basketId: basket.id, ...outcome });
+  }
+  settings.organize_undo = undoMoves.length ? { at: new Date().toISOString(), moves: undoMoves } : null;
+  persist();
+  syncDock();
+  return { results, undoable: undoMoves.some((m) => m.moved) };
+});
+
+guardHandle('organize:undo', async () => {
+  const record = settings.organize_undo;
+  if (!record || !Array.isArray(record.moves) || !record.moves.length) {
+    return { done: 0, skipped: 0 };
+  }
+  const steps = organize.undoPlan(record.moves, pathExists);
+  let done = 0;
+  let skipped = record.moves.length - steps.length;
+  for (const step of steps) {
+    const result = await basketfiles.moveInto(path.dirname(step.to), step.from);
+    if (!result || (result.action !== 'move' && result.action !== 'inside')) {
+      skipped += 1;
+      continue;
+    }
+    done += 1;
+    // 筐清单摘掉这条（文件回桌面了，筐不再登记）
+    for (const basket of settings.baskets) {
+      const hit = (basket.items || []).find((item) => basketfiles.samePath(item, result.dest || step.from));
+      if (hit) replaceBasket(basketModel.removeItem(basket, hit));
+    }
+  }
+  settings.organize_undo = null;
+  persist();
+  syncDock();
+  return { done, skipped };
+});
+
+// ------------------------------------------------------------------ QuickLook 空格预览（1.4.0）
+//
+// 筐弹窗里选中文件按空格 = 弹出大图预览（图片直接看、文本读前 400KB、音视频给播放器），
+// 再按空格/Esc 关闭。窗口失焦即关（与弹窗/菜单同一口径）。读取接口只对预览窗自己放行，
+// 别的页面拿不到任意路径的文件内容。
+
+let previewWindow = null;
+const PREVIEW_TEXT_MAX = 400 * 1024;
+const PREVIEW_IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.ico', '.avif'];
+const PREVIEW_MEDIA_EXTS = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.mp3', '.wav', '.flac', '.m4a', '.ogg'];
+const PREVIEW_TEXT_EXTS = ['.txt', '.md', '.csv', '.log', '.json', '.js', '.ts', '.py', '.c', '.cpp', '.h', '.css', '.html', '.xml', '.yml', '.yaml', '.ini', '.bat', '.ps1', '.java'];
+
+function previewKindOf(name) {
+  const lowered = String(name || '').toLowerCase();
+  const dot = lowered.lastIndexOf('.');
+  const ext = dot > 0 ? lowered.slice(dot) : '';
+  if (PREVIEW_IMAGE_EXTS.includes(ext)) return 'image';
+  if (PREVIEW_MEDIA_EXTS.includes(ext)) return 'media';
+  if (PREVIEW_TEXT_EXTS.includes(ext)) return 'text';
+  return 'none';
+}
+
+function closePreviewWindow() {
+  if (previewWindow && !previewWindow.isDestroyed()) previewWindow.destroy();
+  previewWindow = null;
+}
+
+guardHandle('preview:open', (_event, { path: target } = {}) => {
+  closeMenuIfOpen();
+  if (!target || !pathExists(target)) return { ok: false, error: '文件不存在' };
+  try {
+    if (fs.statSync(target).isDirectory()) return { ok: false, error: '文件夹不支持预览' };
+  } catch (_) {
+    return { ok: false, error: '文件读不了' };
+  }
+  closePreviewWindow();
+  const area = screen.getPrimaryDisplay().workArea;
+  const width = 720;
+  const height = 520;
+  previewWindow = winFactory.createRenameWindow({
+    width,
+    height,
+    x: Math.round(area.x + (area.width - width) / 2),
+    y: Math.round(area.y + (area.height - height) / 2),
+    glass: false,
+    title: `${APP_NAME} 预览`
+  });
+  attachDiagnostics(previewWindow, 'preview');
+  winFactory.loadPage(previewWindow, 'preview.html', { path: target });
+  const win = previewWindow;
+  win.once('ready-to-show', () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.focus();
+  });
+  // **不做**失焦即关：预览窗从弹窗里唤出时，弹窗收起的焦点震荡会立刻把它也带走。
+  // 关闭只走三条路：空格 / Esc / 点 ✕（预览页里都有监听）。
+  win.on('closed', () => {
+    if (previewWindow === win) previewWindow = null;
+  });
+  return { ok: true };
+});
+
+// 文件内容只给预览窗自己：别的页面来问一律拒绝（任意路径读文件的口子必须收紧）
+guardHandle('preview:read', (event, { path: target } = {}) => {
+  if (!previewWindow || previewWindow.isDestroyed() || event.sender !== previewWindow.webContents) {
+    return { ok: false, error: 'denied' };
+  }
+  if (!target || !pathExists(target)) return { ok: false, error: '文件不存在' };
+  let stat = null;
+  try {
+    stat = fs.statSync(target);
+  } catch (_) {
+    return { ok: false, error: '文件读不了' };
+  }
+  const kind = previewKindOf(target);
+  const payload = {
+    ok: true,
+    kind,
+    name: path.basename(target),
+    size: stat.size,
+    mtime: stat.mtime.toISOString(),
+    url: kind === 'image' || kind === 'media'
+      ? 'file:///' + encodeURI(target).replace(/#/g, '%23').replace(/\?/g, '%3F')
+      : ''
+  };
+  if (kind === 'text') {
+    try {
+      const handle = fs.openSync(target, 'r');
+      const buffer = Buffer.alloc(Math.min(stat.size, PREVIEW_TEXT_MAX));
+      const read = fs.readSync(handle, buffer, 0, buffer.length, 0);
+      fs.closeSync(handle);
+      payload.text = buffer.toString('utf8', 0, read);
+      payload.truncated = read < stat.size;
+    } catch (error) {
+      return { ok: false, error: basketfiles.errorText(error) };
+    }
+  }
+  return payload;
+});
+
 // ------------------------------------------------------------------ 窗口：文件夹弹窗（自研磨砂）
 
 function popupKeyFor(kind, payload = {}) {
@@ -1779,7 +2123,8 @@ function popupDataFor(kind, payload = {}) {
     const basket = findBasket(payload.id);
     if (!basket) return null;
     const view = basketView(basket);
-    return { kind, name: basket.name, basketId: basket.id, entries: view.entries };
+    // color：筐的主色（1.3 悬浮卡片）——标题圆点/选中环/拖拽空位全跟 Dock 上的筐色走
+    return { kind, name: basket.name, basketId: basket.id, color: basket.color, entries: view.entries };
   }
   if (kind === 'dir') {
     const listing = filebrowse.listEntries(payload.path);
@@ -2010,6 +2355,8 @@ function schedulePopupBlurClose(blurredAt = Date.now(), rechecks = 0) {
   popupBlurTimer = setTimeout(() => {
     popupBlurTimer = null;
     if (!popupWindow || popupWindow.isDestroyed()) return;
+    // QuickLook 预览窗（1.4.0）开着时弹窗钉住：预览盖在网格上，关预览回到弹窗
+    if (previewWindow && !previewWindow.isDestroyed()) return;
     // 注意不含"光标在桌面上"：点桌面关掉弹窗是用户明确的意思，这里不该豁免
     if (popupAutoCloseBlocked(false)) return;
     const mouse = mouseState.poll();
@@ -2726,20 +3073,57 @@ function registerIpc() {
 
   // Dock 条目 = 系统虚拟项（此电脑/回收站/天气）＋筐（文件夹，点击弹文件夹弹窗）＋快捷方式；
   // 隐藏的筐不上 Dock。快捷方式的名字在这里就定好（别名优先），渲染层只管画
-  ipcMain.handle('dock:get', () => ({
-    specials: settings.dock_specials
-      .filter((id) => process.platform === 'win32' || id === 'weather')   // 开始菜单等是 Windows 概念
-      .map((id) => specials.findSpecial(id))
-      .filter(Boolean)
-      .map((item) => ({ id: item.id, label: item.label, kind: item.kind || 'shell' })),
-    baskets: settings.baskets
-      .filter((basket) => basket.visible !== false)
-      .map((basket) => ({ id: basket.id, name: basket.name, color: basket.color })),
-    shortcuts: settings.dock_items.map((item) => ({
-      path: item,
-      name: dockmodel.displayName(item, settings.dock_aliases)
-    }))
-  }));
+// 筐的叠放预览（1.4.0）：前 4 个条目的图标 + 总数。按「筐内容签名」缓存——
+// 图标抽取走的是 PowerShell 管线，没缓存的话每次 Dock 刷新都要白抽一轮。
+const basketPreviewCache = new Map();   // id -> { key, payload }
+
+async function basketPreviewFor(basket) {
+  const view = basketView(basket);
+  const entries = view.entries || [];
+  const key = entries.map((entry) => entry.path).join('|');
+  const cached = basketPreviewCache.get(basket.id);
+  if (cached && cached.key === key) return cached.payload;
+  const icons = [];
+  for (const entry of entries.slice(0, 4)) {
+    try {
+      const url = await shellIcons.iconDataUrl(entry.path, 48);
+      if (url) icons.push(url);
+    } catch (_) {
+      /* 单个图标失败不拖垮整块预览 */
+    }
+  }
+  const payload = { count: entries.length, icons };
+  basketPreviewCache.set(basket.id, { key, payload });
+  return payload;
+}
+
+  ipcMain.handle('dock:get', async () => {
+    const baskets = [];
+    for (const basket of settings.baskets.filter((item) => item.visible !== false)) {
+      baskets.push({
+        id: basket.id,
+        name: basket.name,
+        color: basket.color,
+        // 叠放预览（1.4.0）：筐色底板上 2×2 摆前 4 个条目的图标 + 数量角标；
+        // 图标走既有抽取管线（命中缓存就是零成本），按筐内容签名缓存
+        preview: await basketPreviewFor(basket)
+      });
+    }
+    return {
+      specials: settings.dock_specials
+        .filter((id) => process.platform === 'win32' || id === 'weather')   // 开始菜单等是 Windows 概念
+        .map((id) => specials.findSpecial(id))
+        .filter(Boolean)
+        .map((item) => ({ id: item.id, label: item.label, kind: item.kind || 'shell' })),
+      baskets,
+      shortcuts: settings.dock_items.map((item) => ({
+        path: item,
+        name: dockmodel.displayName(item, settings.dock_aliases),
+        // 悬空条目（1.4.0）：指向的文件没了就如实标记，Dock 灰显 + 名字上墙，右键可清理
+        missing: !pathExists(item)
+      }))
+    };
+  });
 
   ipcMain.handle('special:icon', (_event, { id }) => specialIconFor(id));
 
@@ -2991,6 +3375,10 @@ function registerIpc() {
   // 从筐里把文件拖出去（格子 dragstart → 这里）：作为系统拖拽源交给资源管理器/桌面。
   // 拖出去 = 复制一份到落点，筐里那份保留——startDrag 拿不到"拖到哪了/放没放下"的回执，
   // 做不到"拖出去就从筐里消失"；真要移出用右键「移出到桌面」。
+  // 载荷纪律（DeskBox drag_contract 8.1.1 的坑）：startDrag 的 { file } 走原生 CF_HDROP，
+  // 只有 Files、不带文本格式——千万别改成渲染层 setData 文本路径再拖，那会被映射成
+  // text/plain+text/uri-list，接收端 dataTransfer.types 变三样，微信收得下、别的
+  // Electron 应用反而拒收。接收端（drop）也只认 api.pathsFromFiles() 给的文件列表。
   ipcMain.on('basket:item-drag', async (event, { path: target } = {}) => {
     if (!trustedSender(event)) {
       console.log(`[ipc] 拒绝非本应用窗口调用 basket:item-drag（${pageTag(event)}）`);
@@ -3308,6 +3696,7 @@ function bootstrap() {
   syncDock();
   installTray();
   startDockAutoHide();
+  registerDockHotkey();
   // 天气：图标在 Dock 上才去取（撤下来就不白打接口）
   if (settings.dock_specials.includes(specials.WEATHER_ID)) startWeatherRefresh();
   // 回收站：图标在 Dock 上才起空/满看门狗（同天气的取舍）

@@ -12,7 +12,6 @@ const { BrowserWindow, screen } = require('electron');
 const path = require('node:path');
 
 const behavior = require('./windowBehavior');
-const storeConstants = require('./store');
 
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
 
@@ -180,10 +179,13 @@ function listDisplays() {
 }
 
 // 文件夹弹窗：跟随「磨砂模式」设置——完全透明模式就是全透明，磨砂模式挂系统材质。
-// 置顶可聚焦（聚焦才能在失焦时自动关闭），不进任务栏，大小可调（右下角拖边缩放，主进程记住）。
+// 置顶可聚焦（聚焦才能在失焦时自动关闭），不进任务栏。
+// **刻意 resizable:false**：Windows 可缩放的无边框窗口左/右/下各有一圈 8px 隐形 resize 边、
+// 顶部没有，页面永远画不到那圈里——1.3 的悬浮卡片就被它衬成了"套盒"。关掉原生缩放后
+// 客户区＝窗口矩形，卡片才能铺满浑然一体；缩放走页面右下角把手（popup:resize → setBounds，
+// setBounds 不受 resizable 影响）。
 // 材质和 transparent 在窗口创建时锁定，所以改了模式要重新开一次弹窗才生效（本来就是每次点开重建）。
-// hasShadow：软投影交给窗口原生投影画在窗口矩形之外。以前用页面 box-shadow 画，投进去
-// 客户区外那圈透明 resize border、被窗口裁成一道暗框，和 1px 边框看着像"多重边框"。
+// hasShadow：软投影交给窗口原生投影画在窗口矩形之外。
 function createPopupWindow(options = {}) {
   const {
     width = 480,
@@ -201,10 +203,8 @@ function createPopupWindow(options = {}) {
     frame: false,
     show: false,
     hasShadow: true,
-    // 可缩放但不可移动：右下角边缘能拖大拖小，位置仍锚在 Dock 图标上方由主进程摆
-    resizable: true,
-    minWidth: storeConstants.POPUP_WIDTH_MIN,
-    minHeight: storeConstants.POPUP_HEIGHT_MIN,
+    // 缩放只走页面把手（见上），窗口本身不吃原生 resize 边
+    resizable: false,
     maximizable: false,
     minimizable: false,
     movable: false,
