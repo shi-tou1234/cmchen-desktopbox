@@ -15,4 +15,4 @@ docs/icon-proof/
 # 桌面快照是"程序没动桌面"的本地取证，含真实文件名，不进仓库（用 scripts/desktop_snapshot.py 现拍现比）
 docs/desktop_*
 .codex-scan/
-dist/
+dist*/

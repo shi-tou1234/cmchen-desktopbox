@@ -576,40 +576,160 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
-// ------------------------------------------------- 弹窗内拖动换位（3.9.0）
+// ------------------------------------------------- 弹窗内拖动换位（3.9.0；3.9.1 动画翻新）
 //
-// 指针手势：按住格子挪动，弹窗内实时画插入线，松手就把该条目重排到落点（走
-// basket:reorder，只改 basket.items 的登记顺序——显示顺序就是清单顺序，磁盘不动）。
+// 指针手势：按住格子挪过阈值——原格让位成一个虚线空位、「拎起来」的影子（图标＋名字）
+// 从原格弹起跟着鼠标走，空位实时滑到插入点、其余格子 FLIP 补间平移；松手就把该条目
+// 重排到落点（走 basket:reorder，只改 basket.items 的登记顺序——显示顺序就是清单顺序，
+// 磁盘不动），影子飞进新格子、格子回弹落定。
 // 手势中途把指针拖出弹窗 = 老语义「拖出去复制一份」：在探出边框那一刻把 OS 拖拽
 // （basket:item-drag → startDrag）从当前位置接手过去，弹窗内的换位就地作废。
 // 不借 OS 拖拽做弹窗内换位的原因：startDrag 的回环（拖回自己的窗口）实测不给页面
 // dragover/drop 事件（拖拽影子和 tooltip 都正常，页面却全程蒙在鼓里），指针事件才是稳的。
+// 格子也不能挂 HTML5 draggable：原生拖拽手势会把后续指针事件整个吞掉（真机实测）。
 
 const REORDER_START_PX = 6;   // 挪过这个距离才算"在拖"：单击选中的手感不受影响
 
-function clearReorderHint() {
-  for (const cell of el('grid').children) cell.classList.remove('drop-before', 'drop-after');
+let dragGhost = null;      // 跟着鼠标走的影子（整个手势期间存在，松手飞进落点后移除）
+let ghostRaf = 0;          // 影子跟手滑动的 rAF
+const ghostPos = { x: 0, y: 0 };     // 影子当前渲染位置（每帧向目标滑一段，跟手又不生硬）
+const ghostTarget = { x: 0, y: 0 };  // 影子要去的位置（=光标）
+
+// 减弱动画（#7）与系统「减少动效」：拖拽的全部动效（影子、滑位、落定）一起关
+function reorderMotionOk() {
+  return !document.body.classList.contains('reduce-motion') &&
+    !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
-// 在第 index 个格子前画一条插入线；index 等于条目数（追加到最后）就画在末格右缘
-function showReorderHint(index) {
-  clearReorderHint();
-  const cells = el('grid').children;
-  if (index >= 0 && index < cells.length) cells[index].classList.add('drop-before');
-  else if (cells.length) cells[cells.length - 1].classList.add('drop-after');
+// FLIP：记录 mutate 前每格的位置，mutate 后把挪了位的格子用一小段平移补间回原样。
+// 隐身的原格（display:none）rect 全零、记进表也会被跳过。
+function flipCells(grid, mutate) {
+  const before = new Map();
+  for (const node of grid.children) {
+    if (node.nodeType !== 1) continue;
+    const rect = node.getBoundingClientRect();
+    if (rect.width || rect.height) before.set(node, rect);
+  }
+  mutate();
+  if (!reorderMotionOk()) return;
+  for (const [node, rect0] of before) {
+    if (!node.isConnected) continue;
+    const rect1 = node.getBoundingClientRect();
+    const dx = rect0.left - rect1.left;
+    const dy = rect0.top - rect1.top;
+    if (dx || dy) {
+      node.animate(
+        [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
+        { duration: 170, easing: 'cubic-bezier(0.2, 0.8, 0.3, 1)' }
+      );
+    }
+  }
+}
+
+// 抓起（挪过阈值那一刻）：原格隐身让位、虚线空位落在原位、「拎起来」的影子从原格弹起
+function liftCell(drag, event) {
+  const grid = el('grid');
+  const placeholder = document.createElement('div');
+  placeholder.className = 'drag-placeholder';
+  placeholder.style.height = `${drag.cell.offsetHeight}px`;
+  drag.placeholder = placeholder;
+  drag.at = [...grid.children].indexOf(drag.cell);          // 空位先落在原位（其余格子的下标）
+  grid.insertBefore(placeholder, drag.cell);
+  drag.cell.classList.add('dragging-source');               // 与上一步同一次布局：格子数不增不减
+
+  const cellRect = drag.cell.getBoundingClientRect();
+  const img = drag.cell.querySelector('img');
+  const nameEl = drag.cell.querySelector('.name');
+  const ghost = document.createElement('div');
+  ghost.className = 'drag-ghost';
+  const card = document.createElement('div');
+  card.className = 'drag-ghost-card';
+  const ghostImg = document.createElement('img');
+  ghostImg.draggable = false;
+  if (img) ghostImg.src = img.src;
+  const ghostName = document.createElement('div');
+  ghostName.className = 'name';
+  ghostName.textContent = nameEl ? nameEl.textContent : drag.entry.name.replace(/\.(lnk|url)$/i, '');
+  card.append(ghostImg, ghostName);
+  ghost.append(card);
+  document.body.append(ghost);
+  // 影子上的"手握位置"：夹在格子矩形中带，别在边角上
+  drag.ghostDX = Math.min(Math.max(event.clientX - cellRect.left, 14), Math.max(cellRect.width / 2, 14));
+  drag.ghostDY = Math.min(Math.max(event.clientY - cellRect.top, 14), Math.max(cellRect.height / 2, 14));
+  drag.ghostW = ghost.offsetWidth;
+  drag.ghostH = ghost.offsetHeight;
+  ghostPos.x = cellRect.left + drag.ghostDX;   // 影子先贴在原格上，随后被"拎"到手里
+  ghostPos.y = cellRect.top + drag.ghostDY;
+  ghostTarget.x = event.clientX;
+  ghostTarget.y = event.clientY;
+  drag.placeGhost = () => {
+    // 影子贴着光标，但夹在弹窗客户区里，贴边时别被窗口裁掉半截
+    const x = Math.min(Math.max(ghostPos.x - drag.ghostDX, 2), Math.max(window.innerWidth - drag.ghostW - 2, 2));
+    const y = Math.min(Math.max(ghostPos.y - drag.ghostDY, 2), Math.max(window.innerHeight - drag.ghostH - 2, 2));
+    ghost.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  };
+  dragGhost = ghost;
+  drag.placeGhost();
+  if (reorderMotionOk()) {
+    const step = () => {
+      if (!dragGhost) { ghostRaf = 0; return; }
+      ghostPos.x += (ghostTarget.x - ghostPos.x) * 0.42;   // 每帧向光标滑 42%：跟手又有一点惯性
+      ghostPos.y += (ghostTarget.y - ghostPos.y) * 0.42;
+      drag.placeGhost();
+      ghostRaf = requestAnimationFrame(step);
+    };
+    ghostRaf = requestAnimationFrame(step);
+  }
+}
+
+// 影子退场：targetRect 给了就飞进那个矩形里缩小淡出（落位回填），没给就原地淡出
+function retireGhost(targetRect) {
+  const ghost = dragGhost;
+  if (!ghost) return;
+  dragGhost = null;
+  if (ghostRaf) {
+    cancelAnimationFrame(ghostRaf);
+    ghostRaf = 0;
+  }
+  if (!reorderMotionOk() || !targetRect) {
+    ghost.remove();
+    return;
+  }
+  const from = ghost.style.transform || 'translate3d(0px, 0px, 0px)';
+  const toX = targetRect.left + targetRect.width / 2 - ghost.offsetWidth / 2;
+  const toY = targetRect.top + targetRect.height / 2 - ghost.offsetHeight / 2;
+  const flight = ghost.animate(
+    [
+      { transform: from, opacity: 1 },
+      { transform: `translate3d(${toX}px, ${toY}px, 0) scale(0.88)`, opacity: 0.25 }
+    ],
+    { duration: 170, easing: 'cubic-bezier(0.2, 0.8, 0.3, 1)', fill: 'forwards' }
+  );
+  flight.onfinish = () => ghost.remove();
+  setTimeout(() => {
+    if (ghost.isConnected) ghost.remove();   // 兜底：动画回执等不到也别留尸体
+  }, 420);
 }
 
 function clearReorderDrag() {
-  if (reorderDrag) {
+  const drag = reorderDrag;
+  if (drag) {
     try {
-      reorderDrag.cell.releasePointerCapture(reorderDrag.pointerId);
+      drag.cell.releasePointerCapture(drag.pointerId);
     } catch (_) {
       /* 指针早释放了/格子已重建 */
     }
   }
   reorderDrag = null;
-  clearReorderHint();
+  if (drag && drag.placeholder && drag.placeholder.isConnected) {
+    // 取消/交棒：占位框滑回原位、原格现身，格子们温柔归位
+    flipCells(el('grid'), () => {
+      drag.placeholder.remove();
+      drag.cell.classList.remove('dragging-source');
+    });
+  }
   for (const cell of el('grid').children) cell.classList.remove('dragging-source');
+  retireGhost();
 }
 
 // 按下（左键、不带 Ctrl/Shift）：登记一场可能的换位手势，指针捕获到这格上，
@@ -624,9 +744,17 @@ function armReorderDrag(event, entry, cell) {
     pointerId: event.pointerId,
     startX: event.clientX,
     startY: event.clientY,
-    active: false,   // 过了位移阈值、真在拖
-    handedOff: false, // 已交给 OS 拖拽（拖出弹窗）
-    slot: -1
+    active: false,     // 过了位移阈值、真在拖
+    handedOff: false,  // 已交给 OS 拖拽（拖出弹窗）
+    placeholder: null,
+    at: -1,            // 空位此刻在「其余格子」里的下标
+    slot: -1,          // 折算回「含被拖项的全清单」的落点（发 basket:reorder 用）
+    from: -1,          // 被拖项在清单里的原位
+    ghostDX: 0,
+    ghostDY: 0,
+    ghostW: 0,
+    ghostH: 0,
+    placeGhost: null
   };
   try {
     cell.setPointerCapture(event.pointerId);
@@ -641,42 +769,53 @@ function reorderDragMove(event) {
   if (!drag.active) {
     if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < REORDER_START_PX) return;
     drag.active = true;
-    drag.cell.classList.add('dragging-source');
+    drag.from = currentEntries().findIndex((item) => item.path === drag.entry.path);
+    liftCell(drag, event);
   }
+  ghostTarget.x = event.clientX;
+  ghostTarget.y = event.clientY;
+  if (!reorderMotionOk() && drag.placeGhost) drag.placeGhost();   // 无动画：影子钉在光标上
   // 探出弹窗客户区 = 用户要拖出去：换位作废，OS 拖拽从当前光标位置接手
   if (
     event.clientX < 0 || event.clientY < 0 ||
     event.clientX >= window.innerWidth || event.clientY >= window.innerHeight
   ) {
     drag.handedOff = true;
-    clearReorderHint();
-    drag.cell.classList.remove('dragging-source');
+    clearReorderDrag();          // 占位框归位、影子退场（OS 拖拽自己的影子马上顶上）
     api.startItemDrag(drag.entry.path);
     return;
   }
-  // 指针落在网格上时算插入位：0..条目数（「插到第几个格子前面」）。按行主序逐格问
-  // 「这格是不是已经被指针越过了」——指针整格在它下方、或与它同行但越过了它的中线。
-  // 第一个还没被越过的格子就是插入点；全部越过（网格底部留白）就是追加到末尾。
-  // 注意同行必须看左右半边：只看竖直中线的话，同一行里中线以上的横向拖动永远算出 0。
+  // 插入位 = 指针在「其余格子」行主序里的位置 at：逐格问「这格是不是已经被指针越过了」
+  // ——整格在指针上方、或同行但越过了它的中线；全部越过（网格底部留白）就是追加到末尾。
+  // 同行必须看左右半边：只看竖直中线的话，同一行里中线以上的横向拖动永远算出 0。
+  // 发给主进程的落点折算回「含被拖项的全清单」：at 在原位之前照传，之后 +1 补回自己那格。
   const grid = el('grid');
   const rect = grid.getBoundingClientRect();
   const inside =
     event.clientX >= rect.left && event.clientX <= rect.right &&
     event.clientY >= rect.top && event.clientY <= rect.bottom;
-  let slot = grid.children.length;
+  const others = [...grid.children].filter((node) => node !== drag.cell && node !== drag.placeholder);
+  let at = others.length;
   if (inside) {
-    for (let i = 0; i < grid.children.length; i += 1) {
-      const box = grid.children[i].getBoundingClientRect();
+    for (let i = 0; i < others.length; i += 1) {
+      const box = others[i].getBoundingClientRect();
       const passed =
         event.clientY > box.bottom ||
         (event.clientY >= box.top && event.clientX > box.left + box.width / 2);
-      if (!passed) { slot = i; break; }
+      if (!passed) { at = i; break; }
     }
   } else if (event.clientY < rect.top) {
-    slot = 0;
+    at = 0;
   }
-  drag.slot = slot;
-  showReorderHint(slot);
+  if (at !== drag.at) {
+    drag.at = at;
+    // 空位滑到新插入点，其余格子 FLIP 平移让位
+    flipCells(grid, () => {
+      if (at >= others.length) grid.append(drag.placeholder);
+      else grid.insertBefore(drag.placeholder, others[at]);
+    });
+  }
+  drag.slot = at < drag.from ? at : at + 1;
   // 拖到网格上下边缘附近自动滚（条目多到出了滚动条才用得上）；move 帧率触发，步子给小
   const edge = 28;
   if (event.clientY < rect.top + edge) grid.scrollTop -= 9;
@@ -687,18 +826,57 @@ async function reorderDragEnd(event) {
   const drag = reorderDrag;
   if (!drag) return;
   const { cell, entry, active, handedOff, slot } = drag;
-  clearReorderDrag();
-  if (!active || handedOff || !cell.isConnected) return;
+  try {
+    cell.releasePointerCapture(drag.pointerId);
+  } catch (_) {
+    /* 指针早释放了 */
+  }
+  reorderDrag = null;   // 先摘手势状态：await 期间轮询/重画别再当成"拖拽中"
+  if (!active || handedOff || !cell.isConnected) {
+    // 没真拖起来（按下就松）/已交给 OS 拖拽：占位框滑回原位、影子退场
+    if (drag.placeholder && drag.placeholder.isConnected) {
+      flipCells(el('grid'), () => {
+        drag.placeholder.remove();
+        cell.classList.remove('dragging-source');
+      });
+    } else {
+      cell.classList.remove('dragging-source');
+    }
+    retireGhost();
+    return;
+  }
   suppressClick = true;   // 拖过的手势，松手那一下别把落点格子选中
-  if (!view || view.kind !== 'basket' || !Number.isInteger(slot) || slot < 0) return;
   const from = currentEntries().findIndex((item) => item.path === entry.path);
-  // 落回原位（含「落在自己紧后面」）就不动，省一次重画
-  if (from < 0 || slot === from || slot === from + 1) return;
+  // 落回原位（空位停在原格处或它紧后面）就不动：占位框滑回去、影子飞回原格
+  if (!view || view.kind !== 'basket' || !Number.isInteger(slot) || slot < 0 ||
+      from < 0 || slot === from || slot === from + 1) {
+    flipCells(el('grid'), () => {
+      if (drag.placeholder && drag.placeholder.isConnected) drag.placeholder.remove();
+      cell.classList.remove('dragging-source');
+    });
+    retireGhost(cell.isConnected ? cell.getBoundingClientRect() : null);
+    return;
+  }
+  // 真换位：占位框与原格都交给 render 重建（await 的几毫秒里画面停在"拎着"的状态）；
+  // 重画后影子飞进新格子、格子回弹落定
   const fresh = await api.reorderBasket(view.basketId, entry.path, slot);
   if (fresh && fresh.kind === 'basket') {
     view = fresh;
     homeView = fresh;
     render();
+    const landed = el('grid').querySelector(`[data-path="${CSS.escape(entry.path)}"]`);
+    if (landed) {
+      retireGhost(landed.getBoundingClientRect());
+      if (reorderMotionOk()) {
+        landed.classList.add('just-dropped');
+        landed.addEventListener('animationend', () => landed.classList.remove('just-dropped'), { once: true });
+      }
+    } else {
+      retireGhost();   // 没找到落点格（理论上不会）：影子原地淡出
+    }
+  } else {
+    cell.classList.remove('dragging-source');   // 重排没成（理论上不该发生）：原格现身、影子淡出
+    retireGhost();
   }
 }
 
@@ -798,7 +976,7 @@ function showPayload(payload) {
   homeView = payload;
   selection = new Set();
   anchorIndex = -1;
-  reorderDrag = null;   // 新内容把格子整个换掉了：上一场手势就算它结束了
+  clearReorderDrag();   // 新内容把格子整个换掉了：上一场手势连影子一起清掉
   suppressClick = false;
   iconSize = payload.iconSize || 48;
   // 磨砂模式的窗口底是一整块系统材质，动画得换个做法（见下面的 CSS）
