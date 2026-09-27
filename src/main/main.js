@@ -1841,7 +1841,9 @@ function pathExists(p) {
 // 扫描可整理的文件：桌面上的文件夹保持原位、点开头文件和 desktop.ini 跳过、
 // 已经是 Dock 条目/别的筐成员的跳过（动了会弄坏那边的登记）。
 function scanOrganizable() {
-  const root = sourceDir();
+  // **扫真实桌面**（shell 桌面），不是「收录来源目录」——后者可能被指到 E:\快捷方式
+  // 之类的集中文件夹，那里面的快捷方式早已在 Dock 上，不该被当成桌面文件再整一遍
+  const root = app.getPath('desktop');
   let dirents = [];
   try {
     dirents = fs.readdirSync(root, { withFileTypes: true });

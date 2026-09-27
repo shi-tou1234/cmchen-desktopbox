@@ -136,10 +136,6 @@ function makeNode(entry) {
       mini.src = url;
       stack.append(mini);
     }
-    const badge = document.createElement('span');
-    badge.className = 'dock-stack-badge';
-    badge.textContent = entry.preview.count > 99 ? '99+' : String(entry.preview.count);
-    stack.append(badge);
     item.append(stack);
     node.stack = stack;
   }

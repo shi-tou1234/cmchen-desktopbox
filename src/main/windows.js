@@ -125,6 +125,9 @@ function createBehaviorWindow(behaviorName, options = {}) {
   if (typeof win.setResizable === 'function') win.setResizable(Boolean(resolved.resizable));
   win.__behavior = profile.mode;
   win.setMenuBarVisibility?.(false);
+  // 菜单条藏起来不够：Electron 默认菜单的加速键（Ctrl+A 全选/Ctrl+R 刷新/F11…）仍然
+  // 活着且**抢在页面 keydown 之前**——弹窗里 Ctrl+A 全选失灵的真凶就是它。整个摘掉。
+  win.removeMenu?.();
   return win;
 }
 
@@ -160,6 +163,9 @@ function createWeatherCardWindow(options = {}) {
   });
   win.setAlwaysOnTop(true, 'popup');
   win.setMenuBarVisibility?.(false);
+  // 菜单条藏起来不够：Electron 默认菜单的加速键（Ctrl+A 全选/Ctrl+R 刷新/F11…）仍然
+  // 活着且**抢在页面 keydown 之前**——弹窗里 Ctrl+A 全选失灵的真凶就是它。整个摘掉。
+  win.removeMenu?.();
   return win;
 }
 
@@ -223,6 +229,9 @@ function createPopupWindow(options = {}) {
   });
   win.setAlwaysOnTop(true, 'floating');
   win.setMenuBarVisibility?.(false);
+  // 菜单条藏起来不够：Electron 默认菜单的加速键（Ctrl+A 全选/Ctrl+R 刷新/F11…）仍然
+  // 活着且**抢在页面 keydown 之前**——弹窗里 Ctrl+A 全选失灵的真凶就是它。整个摘掉。
+  win.removeMenu?.();
   return win;
 }
 
@@ -258,6 +267,9 @@ function createRenameWindow(options = {}) {
   });
   win.setAlwaysOnTop(true, 'floating');
   win.setMenuBarVisibility?.(false);
+  // 菜单条藏起来不够：Electron 默认菜单的加速键（Ctrl+A 全选/Ctrl+R 刷新/F11…）仍然
+  // 活着且**抢在页面 keydown 之前**——弹窗里 Ctrl+A 全选失灵的真凶就是它。整个摘掉。
+  win.removeMenu?.();
   return win;
 }
 
@@ -292,6 +304,9 @@ function createMenuWindow(options = {}) {
   });
   win.setAlwaysOnTop(true, 'popup');
   win.setMenuBarVisibility?.(false);
+  // 菜单条藏起来不够：Electron 默认菜单的加速键（Ctrl+A 全选/Ctrl+R 刷新/F11…）仍然
+  // 活着且**抢在页面 keydown 之前**——弹窗里 Ctrl+A 全选失灵的真凶就是它。整个摘掉。
+  win.removeMenu?.();
   return win;
 }
 

@@ -90,6 +90,33 @@ html, body {
   overflow: hidden;
 }
 
+/* 宝石玻璃面板（1.4.2）：与文件夹弹窗同一套底色语言——低饱和筐色彩调 + 右上角
+   一汪"极光" + 顶边内高光。settings 窗用这个（菜单/改名窗刻意保持全透明，不加）。 */
+:root {
+  --panel-accent: var(--basket-accent, #6e9bfe);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --panel-accent: var(--basket-accent, #3b74e0);
+  }
+}
+.panel--jewel {
+  background:
+    radial-gradient(460px 300px at 88% -8%, color-mix(in srgb, var(--panel-accent) 24%, transparent), transparent 68%),
+    radial-gradient(380px 260px at -6% 106%, color-mix(in srgb, var(--panel-accent) 11%, transparent), transparent 60%),
+    color-mix(in srgb, var(--panel-accent) 6%, rgba(22, 25, 34, 0.94));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10);
+}
+@media (prefers-color-scheme: light) {
+  .panel--jewel {
+    background:
+      radial-gradient(460px 300px at 88% -8%, color-mix(in srgb, var(--panel-accent) 18%, transparent), transparent 68%),
+      radial-gradient(380px 260px at -6% 106%, color-mix(in srgb, var(--panel-accent) 9%, transparent), transparent 60%),
+      color-mix(in srgb, var(--panel-accent) 6%, rgba(252, 252, 255, 0.96));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  }
+}
+
 .panel-head {
   height: 34px;
   display: flex;

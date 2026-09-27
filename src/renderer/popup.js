@@ -256,7 +256,9 @@ async function openEntry(entry) {
   }
 }
 
+let statusHoldUntil = 0;   // 某些提示（如拖出=复制）不想被 2 秒轮询重绘立刻冲掉
 function setStatus(text, isError = false) {
+  if (!text && Date.now() < statusHoldUntil) return;
   el('status').textContent = text || '';
   el('status').className = 'popup-status' + (isError ? ' error' : '');
 }
@@ -702,6 +704,7 @@ function liftCell(drag, event) {
   const nameEl = drag.cell.querySelector('.name');
   const ghost = document.createElement('div');
   ghost.className = 'drag-ghost';
+  ghost.style.width = cellRect.width + 'px';   // 跟随弹性列宽，别固定 94
   const card = document.createElement('div');
   card.className = 'drag-ghost-card';
   const ghostImg = document.createElement('img');
@@ -847,6 +850,10 @@ function reorderDragMove(event) {
     drag.handedOff = true;
     clearReorderDrag();          // 占位框归位、影子退场（OS 拖拽自己的影子马上顶上）
     api.startItemDrag(drag.entry.path);
+    // 拖出去 = 复制一份到落点（OS 拖拽拿不到"放哪了"的回执，做不到拖出即移出），
+    // 状态条把这个语义讲清楚，免得用户以为筐里那份没了、或落点根本没收到
+    setStatus('拖出 = 复制一份到落点，筐里保留；要把文件移出筐：右键 → 「移出到桌面」');
+    statusHoldUntil = Date.now() + 6000;
     return;
   }
   // 插入位 = 指针在「其余格子」行主序里的位置 at：逐格问「这格是不是已经被指针越过了」

@@ -242,9 +242,9 @@
     overflow-y: auto;
     padding: 10px 12px 14px;
     display: grid;
-    grid-template-columns: repeat(auto-fill, 94px);
+    /* 弹性列：480 宽正好 4 列铺满（不留空槽），拖大窗口自动加列 */
+    grid-template-columns: repeat(auto-fill, minmax(94px, 1fr));
     grid-auto-rows: min-content;
-    justify-content: start;
     align-content: start;
   }
   .popup-grid::-webkit-scrollbar { width: 10px; }
@@ -259,7 +259,6 @@
   .popup-grid::-webkit-scrollbar-button { display: none; }
   .popup-grid .cell {
     position: relative;   /* 插入线 ::after 的定位基准 */
-    width: 94px;
     padding: 9px 4px 7px;
     border-radius: var(--cell-radius);
     display: flex;
@@ -410,7 +409,6 @@
      抓起：原格隐身让位、虚线空位框（筐色）落在原位；「拎起来」的影子跟手；
      FLIP 平移；拖动中插入线（筐色竖条）标出落点；松手：影子飞进落点格、回弹落定。 */
   .drag-placeholder {
-    width: 94px;
     box-sizing: border-box;
     border-radius: var(--cell-radius);
     border: 1.5px dashed color-mix(in srgb, var(--panel-accent) 75%, transparent);
