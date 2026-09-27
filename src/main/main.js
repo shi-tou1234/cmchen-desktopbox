@@ -833,7 +833,9 @@ async function iconFor(target, size = 48) {
         : await electronIcon(source.path, size);
     if (dataUrl) break;
   }
-  cacheSet(iconCache, key, dataUrl);
+  // 空结果**不进缓存**：拖入文件的那一拍抽取可能临时失败（搬移还没落定/管线忙），
+  // 缓存了 '' 这条目就永久灰脸、重开弹窗都救不回来；不缓存则下次请求自动重试
+  if (dataUrl) cacheSet(iconCache, key, dataUrl);
   return dataUrl;
 }
 
@@ -2245,7 +2247,15 @@ function dockTargetAllowed(target) {
 // 立刻隐藏会看到窗口"啪"地消失，和打开时的抽出动画对不上。
 // reason 只进日志：自动收弹窗的路有好几条（鼠标离开、Dock 收起、失焦），
 // 出问题时日志里要能看出是哪条收的
+let popupPinned = false;   // 拖入/拖出发生后置 true：弹窗不再自动关，只认 ✕/Esc/再点一次/换内容
 function closeFolderPopup(reason = '?') {
+  // 拖入/拖出之后用户要求弹窗保持开着——四条自动收起的路（失焦/离开/Dock 收起/热键）
+  // 全部让路；显式的关闭（✕/Esc/再点一次/打开别的筐）照旧
+  if (popupPinned && ['blur', 'away', 'Dock 收起', '热键收起'].includes(reason)) {
+    console.log(`[popup] 已钉住，忽略自动收起（${reason}）`);
+    return;
+  }
+  popupPinned = false;
   console.log(`[popup] 收起（${reason}）`);
   clearTimeout(popupBlurTimer);
   popupBlurTimer = null;
@@ -2822,6 +2832,7 @@ function registerIpc() {
   guardHandle('basket:add', async (event, { basketId, paths } = {}) => {
     const basket = findBasket(basketId);
     if (!basket) return null;
+    popupPinned = true;                          // 拖入发生：弹窗钉住，等用户自己关
     return addPathsToBasket(basket, paths, `加入（来源 ${pageTag(event)}）`);
   });
 
@@ -3414,6 +3425,7 @@ async function basketPreviewFor(basket) {
   const dragOutWatches = new Set();
 
   guardHandle('basket:drag-out', (_event, { basketId, path: target } = {}) => {
+    popupPinned = true;                          // 拖出发生：弹窗钉住，等用户自己关
     if (!target) return { ok: false, error: 'no path' };
     const key = `${basketId}|${basketfiles.keyOf(target)}`;
     if (dragOutWatches.has(key)) return { ok: true, queued: true };

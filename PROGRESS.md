@@ -2043,3 +2043,11 @@ statusHoldUntil 6 秒防轮询冲掉）；⑥settings 窗加 `panel--jewel` 类�
 guardHandle 的参数叫 `_event` 却在体内引用 `trustedSender(event)`（ReferenceError）。
 弹窗网格固定四列 `repeat(4, minmax(0,1fr))`（窄筐窗口不再掉三列）。真机全链路验证：
 拖 演示01 到桌面 → 桌面副本出现、demo_basket 原件进回收站、清单同步移除、回收站图标刷新。
+
+### 1.4.4（同晚）：拖拽后弹窗钉住 ＋ 图标灰脸根因
+
+①拖入/拖出之后弹窗不再自动收起（用户要求只认 ✕）：`popupPinned` 置位后，四条自动收起
+（blur/away/Dock 收起/热键收起）在 closeFolderPopup 入口让路，显式关闭（✕/Esc/再点一次/
+换内容）照旧并清钉。②拖入后新条目图标灰脸的根因：`iconFor` 把抽取失败的**空结果也写进
+iconCache**，那一拍失败（搬移落定前/管线忙）就永久灰脸；改为空结果不缓存＋渲染层异步补取
+失败隔 2.5 秒重试（最多两轮）。1.4.3 → 1.4.4，157 条全绿，静默升级数据完好。

@@ -163,12 +163,18 @@ function makeCell(entry, index) {
   } else {
     // 载荷里没有（算图标超时了）：退回异步取，先用兜底图标垫着
     img.src = fallbackIcon();
-    api
-      .getIcon(entry.path, ICON_REQUEST_PX)
-      .then((dataUrl) => {
-        if (dataUrl) img.src = dataUrl;
-      })
-      .catch(() => {});
+    // 异步补取：拖入文件的那一拍抽取可能临时失败（主进程已改成失败不缓存），
+    // 这里失败/为空就隔 2.5 秒再试，最多两轮，图标总会跟上来
+    const fillIcon = (attempt) => {
+      api
+        .getIcon(entry.path, ICON_REQUEST_PX)
+        .then((dataUrl) => {
+          if (dataUrl) img.src = dataUrl;
+          else if (attempt < 2) setTimeout(() => fillIcon(attempt + 1), 2500);
+        })
+        .catch(() => {});
+    };
+    fillIcon(0);
   }
 
   // 图标坐在釉面底板上（宝石玻璃设计）：底板颜色跟文件类型走
