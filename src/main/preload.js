@@ -135,6 +135,7 @@ contextBridge.exposeInMainWorld('deskbasket', {
   organizeUndo: () => ipcRenderer.invoke('organize:undo'),
   // 空格预览 QuickLook（1.4.0）
   previewOpen: (payload) => ipcRenderer.invoke('preview:open', payload),
+  dragOutItem: (basketId, path) => ipcRenderer.invoke('basket:drag-out', { basketId, path }),
   previewRead: (payload) => ipcRenderer.invoke('preview:read', payload),
   // 改名：开一个钉在 Dock 上方的小输入窗（Electron 没有 window.prompt，Dock 又收不到键盘）
   openRename: (payload) => ipcRenderer.invoke('rename:open', payload),

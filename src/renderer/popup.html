@@ -242,8 +242,8 @@
     overflow-y: auto;
     padding: 10px 12px 14px;
     display: grid;
-    /* 弹性列：480 宽正好 4 列铺满（不留空槽），拖大窗口自动加列 */
-    grid-template-columns: repeat(auto-fill, minmax(94px, 1fr));
+    /* 固定四列（用户指定：窄窗口也不许掉成三列）；窗口加宽时格子等比变宽 */
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     grid-auto-rows: min-content;
     align-content: start;
   }

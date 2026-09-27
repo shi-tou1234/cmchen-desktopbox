@@ -850,9 +850,10 @@ function reorderDragMove(event) {
     drag.handedOff = true;
     clearReorderDrag();          // 占位框归位、影子退场（OS 拖拽自己的影子马上顶上）
     api.startItemDrag(drag.entry.path);
-    // 拖出去 = 复制一份到落点（OS 拖拽拿不到"放哪了"的回执，做不到拖出即移出），
-    // 状态条把这个语义讲清楚，免得用户以为筐里那份没了、或落点根本没收到
-    setStatus('拖出 = 复制一份到落点，筐里保留；要把文件移出筐：右键 → 「移出到桌面」');
+    // 拖出去 = **移出**（1.4.3）：主进程等松手后把筐里原件收进回收站（可恢复），
+    // 落点的复制归用户——净效果和资源管理器同盘拖动一致。误拖了？回收站找得回来。
+    api.dragOutItem(view.basketId, drag.entry.path);
+    setStatus('拖出 = 移出到落点，筐里不再保留（误拖可从回收站找回）');
     statusHoldUntil = Date.now() + 6000;
     return;
   }

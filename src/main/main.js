@@ -3405,6 +3405,79 @@ async function basketPreviewFor(basket) {
     }
   });
 
+  // 拖出弹窗 = **移出**（1.4.3，用户口径：拖出来文件就归落点、筐里不再保留）。
+  // startDrag 拿不到回执，所以渲染层交棒时登记一场「等松手」：松手（侦察进程报按键
+  // 松开）＋ 400ms 落定之后，把筐里的原件送进**回收站**（可恢复，不碰「绝不删除」底线）
+  // 并从清单摘掉——净效果与资源管理器同盘拖动一致。
+  // 两条安全线：① 松手位置还在弹窗内容区里 = 拖回来取消，原件原样保留；
+  //             ② 侦察进程不在/报数不可信 → 放弃整套判定，原件保留（宁可仍是复制）。
+  const dragOutWatches = new Set();
+
+  guardHandle('basket:drag-out', (_event, { basketId, path: target } = {}) => {
+    if (!target) return { ok: false, error: 'no path' };
+    const key = `${basketId}|${basketfiles.keyOf(target)}`;
+    if (dragOutWatches.has(key)) return { ok: true, queued: true };
+    dragOutWatches.add(key);
+    const startedAt = Date.now();
+    const timer = setInterval(async () => {
+      const mouse = mouseState.poll();
+      if (!mouse.active || !mouse.known) {
+        clearInterval(timer);
+        dragOutWatches.delete(key);
+        console.log('[basket] 拖出判定放弃：鼠标侦察进程不可用，原件保留（仍是复制语义）');
+        return;
+      }
+      if (mouse.held) {
+        if (Date.now() - startedAt > 30000) {
+          clearInterval(timer);
+          dragOutWatches.delete(key);
+          console.log('[basket] 拖出判定超时放弃：30 秒没等到松手');
+        }
+        return;                                   // 还按着：OS 拖拽没结束
+      }
+      clearInterval(timer);
+      dragOutWatches.delete(key);
+      await new Promise((resolve) => setTimeout(resolve, 400));   // 等落点把复制写稳
+      // 松手在弹窗内容区里 = 用户把东西拖回来了：视为取消
+      try {
+        if (popupWindow && !popupWindow.isDestroyed()) {
+          const bounds = popupWindow.getContentBounds();
+          const cursor = screen.getCursorScreenPoint();
+          if (
+            cursor.x >= bounds.x && cursor.x < bounds.x + bounds.width &&
+            cursor.y >= bounds.y && cursor.y < bounds.y + bounds.height
+          ) {
+            console.log('[basket] 拖出取消（松手在弹窗里），原件保留：' + target);
+            return;
+          }
+        }
+      } catch (_) {
+        /* 判不了位置就按正常移出走 */
+      }
+      // 归属校验（与删除同一底线）：条目必须还登记在这个筐里
+      const basket = findBasket(basketId);
+      if (!basket) return;
+      const canonical = (basket.items || []).find(
+        (item) => basketfiles.keyOf(item) === basketfiles.keyOf(target)
+      );
+      if (!canonical || !fs.existsSync(canonical)) return;
+      try {
+        await shell.trashItem(canonical);          // 进回收站，可恢复——不碰「绝不删除」底线
+      } catch (error) {
+        console.log('[basket] 拖出移出失败（原件保留）：' + basketfiles.errorText(error));
+        return;
+      }
+      replaceBasket(
+        basketModel.updateItems(basket, (basket.items || []).filter((it) => !basketfiles.samePath(it, canonical)))
+      );
+      syncDock();
+      prewarmBasketIcons();
+      recycleWatchTick();
+      console.log(`[basket] 拖出移出：${canonical} 已进回收站（落点的复制归用户），从筐清单移除`);
+    }, 120);
+    return { ok: true };
+  });
+
   // 渲染层报"有东西正拖在弹窗上"（dragover 起、dragleave 出窗或 drop 止）：
   // 拖拽期间弹窗不许自动收——它就是这个文件唯一可能的落点
   ipcMain.on('popup:drag-state', (_event, payload = {}) => {
