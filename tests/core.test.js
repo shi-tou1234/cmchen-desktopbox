@@ -1121,3 +1121,69 @@ test('图标 fresh：绕过按天缓存现拉、写回后普通请求读到新�
     store.__setRootForTests(null);
   }
 });
+
+test('图标抽取失败不写内存缓存：负缓存期内不重试，过 TTL 自动放行重试并把图补上', async () => {
+  // 真机报障：此电脑 / 回收站 / 天气三个 shell 虚拟项同时破图，只有重启 Dock 才恢复。
+  // 根因是抽取失败时把空串写进了 memory——requestIcon 开头 memory 命中就直接返回，
+  // 于是这个图标在本次进程生命周期内永远返回空、再也不问 shell。
+  // 这里锁两半：失败不当成有效缓存（负缓存期内直接回空串、不起进程），
+  // 且负缓存会过期放行（否则只是把「坏到重启」换成「坏到 TTL」，不算修好）。
+  store.__setRootForTests(tmpdir());
+  const request = 'p::{DEADBEEF-0000-0000-0000-0000NEGCACHE}';
+  const answers = ['', 'PNGRECOVERED'];   // 第 1 次空表（PowerShell 挂了），第 2 次正常
+  let calls = 0;
+  shellIcons.__setBatchRunnerForTests(async (requests) => {
+    const answer = answers[calls] || '';
+    calls += 1;
+    return { icons: answer ? new Map([[requests[0], answer]]) : new Map() };
+  });
+  try {
+    const failed = await shellIcons.requestIcon(request);
+    assert.strictEqual(failed, '', '抽不出图时回空串，渲染层摆占位图');
+    assert.strictEqual(calls, 1, '第一次确实起了进程去问 shell');
+
+    const withinTtl = await shellIcons.requestIcon(request);
+    assert.strictEqual(withinTtl, '', '负缓存期内仍回空串');
+    assert.strictEqual(calls, 1, '负缓存期内不再起 PowerShell（否则一个坏图标能把机器打满）');
+
+    // TTL 只有 30 秒，测试里等不起——直接把过期时刻改老，模拟「TTL 已到」
+    shellIcons.__expireFailuresForTests();
+    const afterTtl = await shellIcons.requestIcon(request);
+    assert.ok(afterTtl.endsWith('PNGRECOVERED'), 'TTL 到了要自动放行重试，把图标补回来');
+    assert.strictEqual(calls, 2, '放行后确实重新问了一次 shell');
+
+    const hot = await shellIcons.requestIcon(request);
+    assert.ok(hot.endsWith('PNGRECOVERED'));
+    assert.strictEqual(calls, 2, '补回来的图进内存缓存，之后命中不再起进程');
+  } finally {
+    shellIcons.__setBatchRunnerForTests(null);
+    store.__setRootForTests(null);
+  }
+});
+
+test('fresh 不受负缓存限制：现拉永远真问 shell（回收站补拉不能被自己上次失败挡住）', async () => {
+  // 回收站看门狗的补拉走 { fresh: true }。若 fresh 也查负缓存，它会连着三次秒失败
+  // 然后放弃——补拉机制等于被这个缓存废掉。这里锁住 fresh 必须旁路。
+  store.__setRootForTests(tmpdir());
+  const request = 'p::{DEADBEEF-0000-0000-0000-0000FRESHBYPASS}';
+  const answers = ['', 'PNGBAFTERFRESH'];   // 普通请求先败，fresh 紧接着就该拿到
+  let calls = 0;
+  shellIcons.__setBatchRunnerForTests(async (requests) => {
+    const answer = answers[calls] || '';
+    calls += 1;
+    return { icons: answer ? new Map([[requests[0], answer]]) : new Map() };
+  });
+  try {
+    const failed = await shellIcons.requestIcon(request);
+    assert.strictEqual(failed, '');
+    assert.strictEqual(calls, 1);
+
+    // 不等 TTL，直接 fresh——负缓存里那条「失败」必须挡不住它
+    const fresh = await shellIcons.requestIcon(request, undefined, { fresh: true });
+    assert.ok(fresh.endsWith('PNGBAFTERFRESH'), 'fresh 绕过负缓存，真去问了 shell');
+    assert.strictEqual(calls, 2);
+  } finally {
+    shellIcons.__setBatchRunnerForTests(null);
+    store.__setRootForTests(null);
+  }
+});

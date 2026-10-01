@@ -880,6 +880,17 @@ function specialIconFor(id) {
   if (process.platform !== 'win32') {
     return Promise.resolve(id === specials.WEATHER_ID ? WEATHER_FALLBACK_ICON_DATA_URL : '');
   }
+  // 答不出就排一次补拉：渲染层只问这一次，拿到空串就摆占位图，不会自己再问。
+  // 补拉成功走 sendSpecialIcon 广播，dock.js 收到直接换 img.src。
+  // 回收站另有看门狗在盯着状态变化，这条只兜「启动时抽不出来」这种情况。
+  const answer = askShellForSpecialIcon(id, special);
+  answer.then((dataUrl) => {
+    if (!dataUrl) scheduleSpecialIconRetry(id);
+  });
+  return answer;
+}
+
+function askShellForSpecialIcon(id, special) {
   // 回收站：看门狗正在现拉新图就等它一下（上限 2 秒），首屏直接拿到新状态，
   // 不会先闪一张按天缓存里的旧图再被广播换掉；超时才退回缓存，广播稍后照样会来。
   if (id === 'recyclebin' && recycleIconPending) {
@@ -1010,6 +1021,56 @@ function stopRecycleWatch() {
   recycleIconRetryTimer = null;
   recycleWatchToken = '';
   recycleIconRetries = 0;
+}
+
+// ---------------------------------------------------------------- shell 虚拟项图标的补拉
+//
+// 真机报障：此电脑 / 回收站 / 天气三个 shell 虚拟项同时破图（只剩占位图），重启 Dock 才恢复。
+// 两个原因叠在一起，缺一个都修不好：
+//   1. 缓存侧——抽取失败时把空串写进了 shellIcons 的内存缓存，之后每次请求都命中空串、
+//      永远不再问 shell。已修：失败不写 memory，改记带 TTL 的负缓存自动放行重试。
+//   2. 触发侧——渲染层每个图标只问一次（dock.js），拿到空串就摆占位图，
+//      唯一的恢复途径是主进程广播 special:icon-changed，而 dock.js 还直接忽略空 dataUrl。
+//      回收站本来就有补拉（scheduleRecycleRetry），此电脑与天气没有，于是永远没人再问。
+// 这里给剩下的 shell 虚拟项补上同一套形状：失败 → 隔 SPECIAL_RETRY_MS 重试 →
+// 拿到就广播，渲染层直接换 img.src（不整块重画，理由同 applyWeather）。
+const SPECIAL_RETRY_MS = RECYCLE_RETRY_MS;      // 沿用补拉间隔
+const SPECIAL_MAX_RETRIES = RECYCLE_MAX_RETRIES; // 沿用连败上限
+const specialIconRetries = new Map();           // id -> 已用掉的补拉次数
+const specialIconRetryTimers = new Map();       // id -> 定时器句柄
+
+function scheduleSpecialIconRetry(id) {
+  const used = specialIconRetries.get(id) || 0;
+  if (used >= SPECIAL_MAX_RETRIES) return;
+  if (specialIconRetryTimers.has(id)) return;   // 已在排队，不叠第二个
+  specialIconRetries.set(id, used + 1);
+  console.log(`[special] ${id} 图标抽取失败，第 ${used + 1}/${SPECIAL_MAX_RETRIES} 次补拉排在 ${SPECIAL_RETRY_MS}ms 后`);
+  const timer = setTimeout(() => {
+    specialIconRetryTimers.delete(id);
+    const special = specials.findSpecial(id);
+    if (!special) return;
+    // 不走 fresh：负缓存只挡普通请求，fresh 语义是「缓存一概不算」。
+    // 这里要的就是「按正常路径重新问一次 shell」——失败已经不入 memory，重新问必然真问。
+    shellIcons
+      .parsingNameIconDataUrl(special.parsingName, shellIcons.ICON_PX)
+      .then((dataUrl) => {
+        if (!dataUrl) {
+          scheduleSpecialIconRetry(id);   // 再败就再排，连败到上限就歇着
+          return;
+        }
+        specialIconRetries.delete(id);    // 成功：预算清零，下次再坏从头来
+        sendSpecialIcon(id, dataUrl);
+        console.log(`[special] ${id} 补拉成功，已广播给 Dock`);
+      })
+      .catch(() => scheduleSpecialIconRetry(id));
+  }, SPECIAL_RETRY_MS);
+  specialIconRetryTimers.set(id, timer);
+}
+
+function stopSpecialIconRetries() {
+  for (const timer of specialIconRetryTimers.values()) clearTimeout(timer);
+  specialIconRetryTimers.clear();
+  specialIconRetries.clear();
 }
 
 // 打开开始菜单：模拟按一下 Win 键（keybd_event 注入，全局生效，不需要窗口焦点）。
@@ -3816,12 +3877,22 @@ if (!singleInstance) {
     nativeTheme.themeSource = 'dark';
     registerIpc();
     bootstrap();
-    screen.on('display-metrics-changed', () => {
+    // 三个显示事件都要接：display-metrics-changed 只在「度量变了」时发，
+    // 而插拔显示器主要走 display-added / display-removed——只挂 metrics-changed 的话，
+    // 拔掉外接屏而剩余内屏度量恰好没变，就什么都不会触发（这里本来就写着「显示器增减
+    // 也要处理」，只是事件没挂全）。三条共用一个处理函数，免得以后再漏。
+    const onDisplaysChanged = () => {
       applyDockGeometry();
+      // 常驻模式下 z 序位置也得重做：Dock 是靠 windowLayer 一步步下沉到桌面层的，
+      // 换屏/拔插之后那个相对位置不再成立，不重做就会留在旧屏那一层。
+      applyDockLayerMode();
       // 显示器增减：下拉列表（displays）与选屏结果都可能变，重解析并广播
       applyTheme();
       broadcastState();
-    });
+    };
+    screen.on('display-metrics-changed', onDisplaysChanged);
+    screen.on('display-added', onDisplaysChanged);
+    screen.on('display-removed', onDisplaysChanged);
   });
 
   app.on('window-all-closed', () => {
@@ -3832,6 +3903,7 @@ if (!singleInstance) {
     // 定时器留着会把进程吊住：退出前明确停掉
     stopWeatherRefresh();
     stopRecycleWatch();
+    stopSpecialIconRetries();
     stopWeatherCardWatch();
     if (dockWatchTimer) clearInterval(dockWatchTimer);
     // 鼠标状态那个 PowerShell 小循环也要收掉，别留一个孤儿进程

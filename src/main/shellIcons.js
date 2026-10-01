@@ -48,6 +48,12 @@ const DISK_SWEEP_EVERY = 50;    // 每写这么多次磁盘缓存，后台扫一
 const DISK_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;  // 磁盘缓存文件超过 30 天即删
 const DEBOUNCE_MS = 30;     // 攒一小会儿再起进程，把同一批请求合成一次调用
 const TIMEOUT_MS = 30000;
+// 抽取失败的负缓存存活时长。失败**不能**写进 memory（见 runBatch），但也不能
+// 「不缓存就每次都重试」——那会让一个真拿不到的图标每来一个请求就起一个 PowerShell。
+// 折中：只记一个失败时刻，TTL 内直接回空串不重试，TTL 到了自动放行重试。
+// 「自动放行」是关键：虚拟项签名按天失效，没有 TTL 的话一次失败就坏到跨天/坏到重启。
+const FAILURE_TTL_MS = 30000;
+const FAILURE_CACHE_MAX = 500;   // 负缓存条数上限（键含按天滚动的签名，不封顶会一直长）
 const CACHE_DIR_NAME = 'icon-cache';
 // 固定字面量：不按环境变量或 PATH 挑可执行文件，避免被换成别的程序
 const POWERSHELL_EXE = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
@@ -542,6 +548,13 @@ const memory = new Map();   // `${request}|${signature}|${px}` -> dataURL
 // （见 requestIcon），保证不跟「可能拍在状态变化之前」的在途请求合并。
 // 条目里的 key 永远是规范缓存键——回填、写盘、写内存都按它来。
 const pending = new Map();  // 排队键 -> { key, request, px, resolvers, fresh }
+// 抽取失败的负缓存：键同上，值是失败时刻。
+//
+// 为什么单独一张表、为什么失败结果不写 memory：requestIcon 开头 memory 命中就直接返回，
+// 一旦把空串写进 memory，这个图标在本次进程生命周期内就永远返回空、再也不问 shell
+// （真机报障：此电脑/回收站/天气三个 shell 虚拟项同时破图，只有重启 Dock 才恢复）。
+// 失败只记在这里，TTL 到了自动放行重试。
+const failures = new Map();
 let freshSeq = 0;           // fresh 排队键的序号（只要保证不重复，不承重）
 let flushTimer = null;
 let diskWriteCount = 0;     // 距上次后台清扫又写了多少次磁盘缓存
@@ -555,6 +568,20 @@ function memorySet(key, value) {
   memory.set(key, value);
   while (memory.size > MEMORY_CACHE_MAX) {
     memory.delete(memory.keys().next().value);
+  }
+}
+
+// 记一次抽取失败。只进负缓存，绝不碰 memory——memory 是「确定拿到过」的图才配待的地方。
+// 顺手扫一遍超龄项并封顶：键里含按天滚动的签名，没人再访问的条目不会被自然清掉。
+function noteFailure(key, now = Date.now()) {
+  failures.delete(key);
+  failures.set(key, now);
+  if (failures.size <= FAILURE_CACHE_MAX) return;
+  for (const [k, at] of failures) {
+    if (now - at >= FAILURE_TTL_MS) failures.delete(k);
+  }
+  while (failures.size > FAILURE_CACHE_MAX) {
+    failures.delete(failures.keys().next().value);
   }
 }
 
@@ -676,13 +703,19 @@ async function runBatch(px, chunk) {
     const base64 = icons.get(entry.request) || '';
     const dataUrl = base64 ? `data:image/png;base64,${base64}` : '';
     if (base64) {
+      failures.delete(entry.key);
       writeDisk(entry.key, base64);
       memorySet(entry.key, dataUrl);
-    } else if (!entry.fresh) {
-      memorySet(entry.key, dataUrl);   // 普通请求失败回空串：上层退回通用图标（沿用原行为）
+    } else {
+      // 失败（含空串）一律不写 memory：写进去就是「本次进程内永远返回空、再也不问 shell」，
+      // 等于坏到重启为止。改记负缓存，TTL 到了自动放行重试。
+      // 磁盘也不写（下面 writeDisk 只在成功分支），所以重启必然重新抽取——
+      // 「重启就好了」一直成立，但不该是唯一的出路。
+      noteFailure(entry.key);
     }
-    // fresh 失败：不拿空串盖掉手里那张还对的图（否则一次 PowerShell 抖动
-    // 就把好好显示着的图标变成「破图占位」），由调用方决定何时重试
+    // fresh 与普通请求同走这一条：都不拿空串盖掉手里那张还对的图（否则一次 PowerShell
+    // 抖动就把好好显示着的图标变成「破图占位」），何时重试交给调用方决定
+    // （回收站看门狗有补拉，此电脑/天气见 main.js 的 scheduleSpecialIconRetry）。
     for (const resolve of entry.resolvers) resolve(dataUrl);
   }
 }
@@ -738,6 +771,15 @@ function requestIcon(request, px = ICON_PX, opts = {}) {
     if (cached) {
       memorySet(key, cached);
       return Promise.resolve(cached);
+    }
+    // 负缓存：刚失败过就先回空串，别每来一个请求就起一个 PowerShell。
+    // TTL 到了自动放行重试——这正是「失败不写 memory」能生效的前提。
+    // fresh 不查这张表：现拉的语义就是「缓存一概不算」，回收站看门狗的补拉
+    // 不能被自己上一次失败记录挡住，否则补拉会连着三次秒失败然后放弃。
+    const failedAt = failures.get(key);
+    if (failedAt !== undefined) {
+      if (Date.now() - failedAt < FAILURE_TTL_MS) return Promise.resolve('');
+      failures.delete(key);
     }
   }
   const queueKey = fresh ? `${key}#fresh:${(freshSeq += 1)}` : key;
@@ -796,9 +838,18 @@ function parsingNameIconDataUrl(parsingName, px = ICON_PX, opts) {
   return requestIcon(encodeParsingNameRequest(parsingName), px, opts);
 }
 
+// 把负缓存里所有条目的失败时刻改到 TTL 之前（等价于「已经放了 30 秒」）。
+// 给测试用的注入口（同 __setBatchRunnerForTests）：TTL 30 秒在单测里干等不起，
+// 但「TTL 到了必须自动放行重试」这条正是本次修复的核心，不能不测。
+function __expireFailuresForTests() {
+  const old = Date.now() - FAILURE_TTL_MS - 1;
+  for (const key of [...failures.keys()]) failures.set(key, old);
+}
+
 module.exports = {
   ICON_PX,
   MARKER,
+  __expireFailuresForTests,
   __setBatchRunnerForTests,
   aumidFromLink,
   aumidOf,
