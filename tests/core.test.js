@@ -20,6 +20,13 @@ const behavior = require('../src/main/windowBehavior');
 // 两种写法在 mac/Linux 上就会对不上键（Windows 上因为盘符恰好是绝对的，看不出问题）。
 const DESK = process.platform === 'win32' ? 'C:/Users/me/Desktop' : '/Users/me/Desktop';
 const SCUT = process.platform === 'win32' ? 'E:/shortcuts' : '/shortcuts';
+// 筐条目夹具的根目录，同理必须是该平台的绝对路径。这两条曾写死 'C:\\a\\…'，
+// 在 mac/Linux 上它不是绝对路径：normalizeBasket 存的是 path.resolve 过的（拼上了工作目录），
+// 而 reorderItems 拿去比对的 pathKey 只做 normalize、不 resolve —— 两边键对不上，
+// reorderItems 返回 null，测试读 .items 就炸 `Cannot read properties of null`。
+// 症状是 GitHub Actions 的 linux/macos 两个 job 挂在这两条上，而 Windows 全绿。
+const ROOT_A = process.platform === 'win32' ? 'C:/a' : '/a';
+const ROOT_OUT = process.platform === 'win32' ? 'C:/elsewhere' : '/elsewhere';
 
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'deskbasket-test-'));
@@ -237,40 +244,45 @@ test('移除条目只动数据，不碰磁盘', () => {
 });
 
 test('拖动换位：只重排 items 顺序，落点按「插到第几格前面」折算', () => {
-  const basket = baskets.normalizeBasket({
+  const seed = baskets.normalizeBasket({
     id: 'b1',
-    items: ['C:\\a\\甲.txt', 'C:\\a\\乙.txt', 'C:\\a\\丙.txt', 'C:\\a\\丁.txt']
+    items: ['甲.txt', '乙.txt', '丙.txt', '丁.txt'].map((name) => `${ROOT_A}/${name}`)
   });
+  // 期望值一律取 seed.items 里**已规范化**的那一份，不拿夹具原串去比：
+  // normalizeBasket 会先 normalize 一遍（Windows 上 'C:/a/甲.txt' 存成 'C:\a\甲.txt'），
+  // 拿夹具原串去比等于把平台差异写进断言。
+  const [jia, yi, bing, ding] = seed.items;
   // 甲（第 0 格）拖到第 3 格前面：拿走甲后落点左移一格 → 乙 丙 甲 丁
-  const forward = baskets.reorderItems(basket, 'C:\\a\\甲.txt', 3);
-  assert.deepStrictEqual(forward.items, ['C:\\a\\乙.txt', 'C:\\a\\丙.txt', 'C:\\a\\甲.txt', 'C:\\a\\丁.txt']);
+  const forward = baskets.reorderItems(seed, `${ROOT_A}/甲.txt`, 3);
+  assert.deepStrictEqual(forward.items, [yi, bing, jia, ding]);
   // 再把甲拖回第 0 格前面：拿走后落点不左移（0 在原位之前）→ 甲 乙 丙 丁
-  const back = baskets.reorderItems(forward, 'C:\\a\\甲.txt', 0);
-  assert.deepStrictEqual(back.items, ['C:\\a\\甲.txt', 'C:\\a\\乙.txt', 'C:\\a\\丙.txt', 'C:\\a\\丁.txt']);
+  const back = baskets.reorderItems(forward, `${ROOT_A}/甲.txt`, 0);
+  assert.deepStrictEqual(back.items, [jia, yi, bing, ding]);
   // 落回原位 / 落在自己紧后面（视觉上没动）：原样返回，不生成新清单
-  const still = baskets.reorderItems(basket, 'C:\\a\\乙.txt', 1);
-  assert.strictEqual(still, basket);
-  const stillAfter = baskets.reorderItems(basket, 'C:\\a\\乙.txt', 2);
-  assert.strictEqual(stillAfter, basket);
+  const still = baskets.reorderItems(seed, `${ROOT_A}/乙.txt`, 1);
+  assert.strictEqual(still, seed);
+  const stillAfter = baskets.reorderItems(seed, `${ROOT_A}/乙.txt`, 2);
+  assert.strictEqual(stillAfter, seed);
   // 末尾追加（index = 条目数）
-  const append = baskets.reorderItems(basket, 'C:\\a\\乙.txt', 4);
-  assert.deepStrictEqual(append.items, ['C:\\a\\甲.txt', 'C:\\a\\丙.txt', 'C:\\a\\丁.txt', 'C:\\a\\乙.txt']);
+  const append = baskets.reorderItems(seed, `${ROOT_A}/乙.txt`, 4);
+  assert.deepStrictEqual(append.items, [jia, bing, ding, yi]);
 });
 
 test('拖动换位：越界落点被夹住，清单外的路径被拒', () => {
-  const basket = baskets.normalizeBasket({
+  const seed = baskets.normalizeBasket({
     id: 'b1',
-    items: ['C:\\a\\甲.txt', 'C:\\a\\乙.txt', 'C:\\a\\丙.txt']
+    items: ['甲.txt', '乙.txt', '丙.txt'].map((name) => `${ROOT_A}/${name}`)
   });
+  const [jia, yi, bing] = seed.items;
   // 头一项拖到「第 99 格前面」= 追加到末尾；负数落点夹到 0
-  const clamped = baskets.reorderItems(basket, 'C:\\a\\甲.txt', 99);
-  assert.deepStrictEqual(clamped.items, ['C:\\a\\乙.txt', 'C:\\a\\丙.txt', 'C:\\a\\甲.txt']);
-  const clampedLow = baskets.reorderItems(basket, 'C:\\a\\乙.txt', -5);
-  assert.deepStrictEqual(clampedLow.items, ['C:\\a\\乙.txt', 'C:\\a\\甲.txt', 'C:\\a\\丙.txt']);
-  assert.strictEqual(baskets.reorderItems(basket, 'C:\\别处\\外人.txt', 1), null);
-  assert.strictEqual(baskets.reorderItems(basket, '', 1), null);
+  const clamped = baskets.reorderItems(seed, `${ROOT_A}/甲.txt`, 99);
+  assert.deepStrictEqual(clamped.items, [yi, bing, jia]);
+  const clampedLow = baskets.reorderItems(seed, `${ROOT_A}/乙.txt`, -5);
+  assert.deepStrictEqual(clampedLow.items, [yi, jia, bing]);
+  assert.strictEqual(baskets.reorderItems(seed, `${ROOT_OUT}/外人.txt`, 1), null);
+  assert.strictEqual(baskets.reorderItems(seed, '', 1), null);
   // 非整数落点（渲染层不会传，兜底）按原位折算：原样返回
-  assert.strictEqual(baskets.reorderItems(basket, 'C:\\a\\乙.txt', NaN), basket);
+  assert.strictEqual(baskets.reorderItems(seed, `${ROOT_A}/乙.txt`, NaN), seed);
 });
 
 test('筐尺寸被夹在合法范围', () => {
