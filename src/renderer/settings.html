@@ -89,6 +89,17 @@
           <input type="checkbox" id="dockAlways">
         </div>
         <div class="row">
+          <label for="dockHotkey">唤出/收起热键</label>
+          <input type="text" id="dockHotkey" maxlength="40" placeholder="F9" spellcheck="false">
+        </div>
+        <div class="row">
+          <label for="dockPeekHotkey">按住即抬热键（按住＝抬到最上面、可以直接点，松手＝落回原位）</label>
+          <input type="text" id="dockPeekHotkey" maxlength="40" placeholder="Ctrl+Win+Z" spellcheck="false">
+        </div>
+        <div class="row" style="display:block">
+          <span class="hint">两个热键不能填同一个（同一个组合键只能挂一个功能）。「按住即抬」默认 Ctrl+Win+Z：三个键都在左手，右手全程不用离开鼠标；系统自己占用的是 Win+E / Win+D / Win+R 这类**不带 Ctrl** 的组合（外加 Win+Ctrl+Q 等少数几个），输入法的中英切换是 Ctrl+Space / Shift+Space，都不是它——也刻意避开 Ctrl+Q、Ctrl+W 这类"退出/关窗"的常用键。Win 键写成 Win / Super / Meta 都认。键盘带 F13～F24 那排键的话填 F13 更冷门（Windows 与所有应用最多只绑到 F12）。两个框都填「」＝关闭。</span>
+        </div>
+        <div class="row">
           <label for="dockDisplay">Dock 放在哪块屏</label>
           <select id="dockDisplay"></select>
         </div>

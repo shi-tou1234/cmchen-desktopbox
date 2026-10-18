@@ -1029,6 +1029,32 @@ test('桌面层：判据用的类名必须都在 dockmodel 的桌面外壳类里
   }
 });
 
+test('桌面层：插不进那个窗口时必须报 DENIED，不能装成"努力过但没走到"', () => {
+  // 真机踩到的：输入法框架那些看不见的窗口会拒绝被跨越（SetWindowPos 返回 false +
+  // ERROR_ACCESS_DENIED），实测 800 次尝试全被拒、邻居窗口始终不变。老写法把返回值丢掉、
+  // 一路重试到步数上限，日志里打出来的是 STILL_MOVING steps=800，看着像走了很远。
+  // 那个读法会把人带偏（以为是步数不够，去加步数），而加步数根本没用。
+  const source = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '..', 'src', 'main', 'windowLayer.js'),
+    'utf8'
+  );
+  assert.match(
+    source,
+    /if \(-not \[DeskBasketLayer\]::SetWindowPos\(/,
+    '必须检查 SetWindowPos 的返回值'
+  );
+  assert.match(source, /\$result = 'DENIED'/, '被拒时要报 DENIED');
+  assert.match(source, /LastError\(\)/, '要把 Win32 错误码带回来（ERROR_ACCESS_DENIED=5）');
+});
+
+test('桌面层：步数上限要够走到桌面层', () => {
+  // 实测从 Dock 往下走到最近的 WorkerW 是 309 步（底下压着 295 个看不见的助手窗口）
+  assert.ok(
+    windowLayer.MAX_STEPS >= 400,
+    `步数上限 ${windowLayer.MAX_STEPS} 不够走到桌面层（实测要 309 步）`
+  );
+});
+
 test('桌面层：窗口句柄按小端读出，拿不到回 "0" 不抛异常', () => {
   assert.strictEqual(
     windowLayer.handleOf({ getNativeWindowHandle: () => Buffer.from([0x78, 0x56, 0x34, 0x12]) }),

@@ -38,6 +38,8 @@ const shellIcons = require('./shellIcons');
 const recyclebin = require('./recyclebin');
 const specials = require('./specials');
 const windowLayer = require('./windowLayer');
+const keyHold = require('./keyHold');
+const zorder = require('./zorder');
 const winFactory = require('./windows');
 const organize = require('./organize');
 const autostart = require('./autostart');
@@ -1587,6 +1589,9 @@ function cursorNearDock() {
 function tickDockAutoHide() {
   if (!dockWindow || dockWindow.isDestroyed()) return;
   if (!settings.dock_enabled) return;
+  // 按住 peek 时 Dock 由用户"拿着"：这一拍它必须待在最上面（见 peek 那节），
+  // 不能再被自动收起/常驻复位那两条路改回去——判定与位置此时都归 beginPeek/endPeek 管。
+  if (peekHeld) return;
   if (!settings.dock_auto_hide) {
     // 常驻显示：一直贴在底边
     if (!dockRevealed) {
@@ -1602,11 +1607,7 @@ function tickDockAutoHide() {
       slideDockTo(dockTargetGeometry());
       // 自动隐藏的任务栏会在光标贴底边时弹出来，并且它自己会重新置顶；
       // 这里把 Dock 再抬到最前，否则刚滑出来就被任务栏盖住。
-      try {
-        dockWindow.moveTop();
-      } catch (_) {
-        /* 个别平台没有 moveTop：忽略即可 */
-      }
+      setDockTopmost(true);
     }
     return;
   }
@@ -1637,13 +1638,67 @@ function startDockAutoHide() {
 // 「自动收起」＝置顶，这样滑出来时盖得住同样贴着底边的任务栏。
 function applyDockLayerMode() {
   if (!dockWindow || dockWindow.isDestroyed()) return;
-  const topmost = Boolean(settings.dock_auto_hide);
-  try {
-    dockWindow.setAlwaysOnTop(topmost, 'floating');
-  } catch (_) {
-    /* 个别平台没有这个能力：忽略 */
+  // 按住 peek 期间不往下压：此刻用户正在用它，任何"同步一下层级"的调用（改设置、换屏、
+  // 显示器增减）都不能把 Dock 埋回桌面层——松开时 endPeek 会重做一次这里。
+  if (peekHeld) {
+    setDockTopmost(true);
+    return;
   }
-  if (!topmost) placeDockOnDesktopLayer(dockWindow);
+  const topmost = Boolean(settings.dock_auto_hide);
+  setDockTopmost(topmost);
+  // 常驻模式不再做「桌面层逐步下沉」：普通非置顶窗口的可观测行为与它一致
+  // （桌面露出时可见、被窗口盖住时不可见），而那次外部 SetWindowPos 走链会把
+  // Electron 的置顶/窗口树账本搞失同步——peek 抬不起来（set 静默失效）与
+  // 「显示了但 DOM 鼠标事件为零」两个 bug 都是它触发的。真机实测详见 zorder.js 文件头。
+  // if (!topmost) placeDockOnDesktopLayer(dockWindow);
+}
+
+// 抬到/放回最上面。两条路并用，各管一件事：
+//   1) Electron 的 setAlwaysOnTop —— **输入靠它**：Chromium 派发鼠标事件用的是它自家的
+//      aura 窗口树，只有 Electron 自己"真抬过"，渲染层才收得到输入（真机 CDP 实测：
+//      外部 SetWindowPos 抬升画面正常、DOM 事件为零——用户报"能显示但点不动"的后半句）。
+//      同步版 set(true) 在被「桌面层放置」打断过的窗口上会静默失效（内部置顶账本与真实
+//      WS_EX_TOPMOST 位失同步，set(false)→set(true) 同一回合里下发也会被吞），
+//      所以状态翻转那一拍先 false、隔一个事件循环回合再 true，强制账本重新下发；
+//   2) zorder 助手的 SetWindowPos —— **可见性靠它**：上面那次 Electron 抬升在失同步的
+//      窗口上可能不改真实样式位，外部直连 SetWindowPos 保证物理上真的置顶。
+// 看门狗每拍只做便宜的重申（3s 一发，任务栏抢前排够用），账本重置只在翻转那一拍做一次。
+let zorderSent = { on: null, at: 0 };
+
+function setDockTopmost(topmost) {
+  if (!dockWindow || dockWindow.isDestroyed()) return;
+  const want = Boolean(topmost);
+  const now = Date.now();
+  if (zorderSent.on === want && now - zorderSent.at < 3000) return;
+  const changed = zorderSent.on !== want;
+  zorderSent = { on: want, at: now };
+  try {
+    if (want && changed) {
+      dockWindow.setAlwaysOnTop(false, 'floating');
+      setTimeout(() => {
+        if (!dockWindow || dockWindow.isDestroyed()) return;
+        try {
+          dockWindow.setAlwaysOnTop(true, 'floating');
+          dockWindow.moveTop();
+        } catch (_) {
+          /* 忽略 */
+        }
+      }, 30);
+    } else {
+      dockWindow.setAlwaysOnTop(want, 'floating');
+      if (want) dockWindow.moveTop();
+    }
+  } catch (_) {
+    /* 个别平台没有：忽略 */
+  }
+  zorder.ensureRunning();
+  zorder.apply(windowLayer.handleOf(dockWindow), want).then((result) => {
+    if (!result.ok) {
+      console.log(`[dock] SetWindowPos 置顶失败 err=${result.err}（want=${want}）`);
+    } else if (result.top !== want) {
+      console.log(`[dock] SetWindowPos 置顶后核对不符：want=${want} 实际=${result.top}`);
+    }
+  });
 }
 
 function placeDockOnDesktopLayer(win) {
@@ -1679,7 +1734,8 @@ function createDockWindow() {
   winFactory.loadPage(win, 'dock.html');
   win.once('ready-to-show', () => {
     win.show();
-    if (!autoHide) placeDockOnDesktopLayer(win);
+    // 常驻模式的「桌面层下沉」已停用（见 applyDockLayerMode 里的说明：
+    // 外部 SetWindowPos 走链会让 Electron 的置顶/窗口树账本失同步，peek 两个 bug 的总根源）
   });
   win.on('closed', () => {
     dockWindow = null;
@@ -1805,6 +1861,7 @@ function warmEntryIcons(entries, size) {
 function syncDock() {
   if (!settings.dock_enabled) {
     if (dockWindow && !dockWindow.isDestroyed()) {
+      endPeek('Dock 被关掉');   // 先落回：peek 状态不能带着一个已经销毁的窗口挂在下面
       dockWindow.destroy();
       dockWindow = null;
     }
@@ -1841,8 +1898,11 @@ function syncDockItems() {
 // globalShortcut 组合键（默认 F9）做「唤出/收起」开关。Windows 会静默吞掉全局热键
 // （别的应用抢注、切输入法、睡眠唤醒），所以配一个看门狗：掉了就再挂回去。
 let dockHotkeyWatch = null;
+let dockHotkeyRegistered = '';   // 真正挂上系统的那一个：换键时先把旧的摘掉（F9 会一直按旧的生效）
 
 function toggleDockByHotkey() {
+  // 按住 peek 期间 Dock 在最上面且是"用户拿着"的状态：F9 这时按不得把它收走
+  if (peekHeld) return;
   if (!settings.dock_auto_hide) return;   // 常驻模式下 Dock 永远在，热键无事可做
   if (dockRevealed) {
     dockRevealed = false;
@@ -1859,10 +1919,20 @@ function toggleDockByHotkey() {
 
 function registerDockHotkey() {
   const combo = String(settings.dock_hotkey || '').trim();
+  if (dockHotkeyRegistered && dockHotkeyRegistered !== combo) {
+    // 换键/关掉：先把上一个组合键摘掉，否则它还挂在系统里一直生效（改设置.json 也是同一条路）
+    try {
+      globalShortcut.unregister(dockHotkeyRegistered);
+    } catch (_) {
+      /* 注册表里已经没了：继续 */
+    }
+    dockHotkeyRegistered = '';
+  }
   if (!combo) return;
   try {
     if (globalShortcut.isRegistered(combo)) globalShortcut.unregister(combo);
     const ok = globalShortcut.register(combo, toggleDockByHotkey);
+    dockHotkeyRegistered = ok ? combo : '';
     if (ok) console.log(`[hotkey] Dock 唤出热键已注册：${combo}`);
     else console.log(`[hotkey] 热键 ${combo} 注册失败（可能被别的程序占用）`);
   } catch (error) {
@@ -1882,6 +1952,240 @@ function registerDockHotkey() {
         /* 查询失败下一轮再试 */
       }
     }, 60 * 1000);
+  }
+}
+
+// ------------------------------------------------------------------ 按住即抬（peek，1.5.0）
+//
+// 常驻模式下 Dock 待在桌面层，被任何窗口盖住就够不着（README 常见问题里那条只能靠"改成自动收起"
+// 来绕）。这里是那把梯子：按住一个全局组合键 → Dock 抬到最上面并立刻滑出来，鼠标直接操作；
+// 松开就按原设置放回去（常驻 → 不置顶＋下沉桌面层；自动收起 → 恢复原来的收/放状态）。
+//
+// 抬起靠 globalShortcut（Electron 原生、零延迟，和 F9 一个形状，带 60s 看门狗），
+// 松手靠 keyHold（Win32 GetAsyncKeyState 小循环，见 keyHold.js），它从启动就常驻。
+// 为什么不是反过来——轮询当抬起触发：GetAsyncKeyState **分不出真按着和幽灵状态**。单独点一下
+// Win（开始菜单把这次按键吃掉）之后 LWIN 还会报一阵子"按着"，那段时间里按 Ctrl+Z 就被凑成
+// 整组键、Dock 被平白抬起来（用户报过一次）。WM_HOTKEY 只认真实按键，没这个问题。
+// 注册不上全局热键时才让轮询顶上去（那时"幽灵键被按住"总比"整个功能没反应"好，
+// keyHold 里还有一层"修饰键必须被亲眼看见按下过"的可信标记兜着）。
+// 于是 beginPeek/endPeek 都写成幂等的：谁先谁后、或者同一边连报几次都无所谓。
+// 兜底看门狗盯的是"侦察进程还活着没有"：心跳断了（进程死了/起不来/非 Windows）超过
+// PEEK_STALE_MS 就强制落回，PEEK_MAX_MS 再加一道死守上限——Dock 绝不会被卡在置顶状态。
+// 心跳是 keyHold.js 里每 10 拍重报一次同一个状态；没有它，按住期间整个循环一声不吭，
+// 这里会误判成"问不到按键状态"，真机上按 3 秒就被强制落回（用户报"图标出来了但点不动"）。
+const PEEK_STALE_MS = 2500;   // 多久没有"还按着"的报数就当已经松开
+const PEEK_MAX_MS = 15000;    // 死守上限：键卡住（幽灵按键）或看门狗失灵也不让 Dock 永远压在最上面
+const PEEK_GUARD_MS = 500;    // 看门狗的心跳
+const PEEK_RELEASE_CONFIRM_MS = 120;  // 松手要连着报两拍才算（见 onPeekKeyState）
+
+let peekHeld = false;
+let peekRestore = null;     // 按下之前的收放状态：松手时原样恢复
+let peekStartedAt = 0;
+let peekSignalAt = 0;       // 最后一次拿到按键报数的时间
+let peekGuardTimer = null;
+let peekReleaseTimer = null;
+let peekHotkeyWatch = null;
+let peekHotkeyRegistered = '';   // 真正挂上系统的那一个：换键/关掉时先摘旧的（同 dock_hotkey）
+let peekLoggedUnavailable = false;
+
+// 组合键的可用性：写得认不出来（空串、只有修饰键、不认识的键）就不给用，别让它静默失灵
+function peekCombo() {
+  return String(settings.dock_peek_hotkey || '').trim();
+}
+
+function peekSpec() {
+  return keyHold.specFor(peekCombo());
+}
+
+// 主键（那个非修饰键）的组号：松手只看它，修饰键的异步状态会自己抖（Win 键最明显）
+function peekMainIndex() {
+  return keyHold.mainGroupIndex(peekCombo());
+}
+
+// 抬起：z 序到最上面 + 不管收没收起都滑出来。两步之后都抬一次：滑出来那一拍自动隐藏的
+// 任务栏会自己冒头并重新置顶，只抬一次会被它抢回前排。
+// from 只是为了日志：抬起到底是热键消息到的还是按键侦察报的，两条都会来（都来也无妨，幂等）。
+function beginPeek(from = '按键侦察') {
+  cancelPeekRelease();   // "还按着"：任何待落的确认窗口立刻作废（两条触发路径共用这一句）
+  if (peekHeld) return;
+  if (!dockWindow || dockWindow.isDestroyed() || !settings.dock_enabled) return;
+  peekHeld = true;
+  peekRestore = { revealed: dockRevealed };
+  peekStartedAt = Date.now();
+  peekSignalAt = 0;
+  setDockTopmost(true);
+  if (!dockRevealed) {
+    dockRevealed = true;
+    dockLeftAt = 0;
+    slideDockTo(dockTargetGeometry());
+  }
+  setDockTopmost(true);
+  keyHold.ensureRunning(peekSpec(), peekMainIndex());
+  startPeekGuard();
+  console.log(`[peek] 抬起：${peekCombo()}（${from}）`);
+}
+
+// 落回：先按原设置摆位置（自动收起模式下松手时鼠标不在 Dock 上就直接滑回去），
+// 再把层级还回去——常驻模式那一步是异步下沉（PowerShell 逐步下沉，见 windowLayer）。
+function endPeek(reason) {
+  if (!peekHeld) return;
+  peekHeld = false;
+  stopPeekGuard();
+  cancelPeekRelease();
+  const restore = peekRestore;
+  peekRestore = null;
+  keyHold.scheduleIdleStop();
+  if (dockWindow && !dockWindow.isDestroyed()) {
+    if (restore && settings.dock_auto_hide && !restore.revealed && !cursorNearDock()) {
+      dockRevealed = false;
+      dockLeftAt = 0;
+      slideDockTo(dockHiddenGeometry());
+    }
+    applyDockLayerMode();
+  }
+  console.log(`[peek] 落回（${reason}）`);
+}
+
+function startPeekGuard() {
+  if (peekGuardTimer) clearInterval(peekGuardTimer);
+  peekGuardTimer = setInterval(tickPeekGuard, PEEK_GUARD_MS);
+}
+
+function stopPeekGuard() {
+  if (!peekGuardTimer) return;
+  clearInterval(peekGuardTimer);
+  peekGuardTimer = null;
+}
+
+// 看门狗只做两件事：确认"用户确实还按着"，以及把 Dock 死死按在最上面。
+function tickPeekGuard() {
+  if (!peekHeld) return;
+  const now = Date.now();
+  if (now - peekStartedAt >= PEEK_MAX_MS) {
+    endPeek('按住超过 15 秒，强制落回');
+    return;
+  }
+  const key = keyHold.poll(now);
+  if (key.known) peekSignalAt = key.at;
+  const baseline = peekSignalAt || peekStartedAt;
+  if (now - baseline >= PEEK_STALE_MS) {
+    if (!key.known && !peekLoggedUnavailable) {
+      peekLoggedUnavailable = true;
+      console.log('[peek] 问不到按键状态（需要 Windows 的 GetAsyncKeyState）：按住期间到点自动落回');
+    }
+    endPeek('按键报数断了');
+    return;
+  }
+  // 按住期间每隔一拍再抬一次：自动隐藏的任务栏、别的置顶窗口都可能在我们抬完之后
+  // 又抢回前排（自动收起模式的滑动里已经为任务栏补过一次同样的抬），不补这一下就
+  // 会出现"图标还在最上面那层、鼠标却点不动"。
+  setDockTopmost(true);
+}
+
+// 侦察进程报 HELD/IDLE：与 globalShortcut 同一对幂等的进出口，谁先到都算
+//
+// 松手这一拍要**连着报两拍**才落回：按住期间个别键的异步状态偶尔会抖一下（合成按键实测能在
+// 按住的中途掉出 bits=110 又回来几百毫秒），照单全收的话 Dock 会在用户手里闪一下再弹回来。
+// 120ms 确认窗口对"松手要立马"是看不出来的延迟，而足以吞掉那种抖动；抬起那侧不防抖，
+// 按下必须零延迟到位。
+function onPeekKeyState(held) {
+  if (held === null) return;   // 问不到：由看门兜底
+  if (held) {
+    beginPeek('按键侦察');
+    // 侦察这一路是"自己看出来的抬起"，比热键消息更容易被幽灵键骗。把这一拍它到底看见了
+    // 哪几个键、各自按下多久打进日志：报障时全靠这句分辨"Win 键是幽灵按着"和"人真按了"。
+    const seen = keyHold.describeReport(keyHold.lastDetail(), keyHold.keyGroups(peekCombo()));
+    if (seen) console.log(`[peek] 侦察观测：${seen}`);
+    return;
+  }
+  if (!peekHeld || peekReleaseTimer) return;
+  peekReleaseTimer = setTimeout(() => {
+    peekReleaseTimer = null;
+    endPeek('松手');
+  }, PEEK_RELEASE_CONFIRM_MS);
+}
+
+function cancelPeekRelease() {
+  if (!peekReleaseTimer) return;
+  clearTimeout(peekReleaseTimer);
+  peekReleaseTimer = null;
+}
+
+keyHold.onChange(onPeekKeyState);
+
+// 注册"按住即抬"的全局热键 + 让按键侦察循环常驻。
+//
+// 为什么两个都要，而且侦察循环是**主路**：globalShortcut 靠系统把 WM_HOTKEY 送到我们窗口，
+// 这条路真机上会莫名其妙地收不到（同一份构建、同一组键，注入按键时上一轮能触发、
+// 下一轮就不触发——注册日志都还在，纯粹是消息没来）。侦察循环问的是物理按键、
+// 不依赖任何消息投递，所以**抬起由它兜底保证**，globalShortcut 只是零延迟的快路。
+// 代价是常驻一个 PowerShell 小循环（每 ${POLL_MS}ms 三个 GetAsyncKeyState），
+// 与 mouseState 同一个量级，功能关掉时立刻收掉。
+function registerPeekHotkey() {
+  const combo = peekCombo();
+  const dockCombo = String(settings.dock_hotkey || '').trim();
+  if (!combo || combo === dockCombo) {
+    // 同一个组合键只能有一个回调，后注册的顶掉先注册的：关掉或与 F9 撞车时只能让位。
+    // 上一次注册的那个必须摘掉，否则它还挂在系统里一直生效。
+    unregisterPeekHotkey(combo ? '与 Dock 唤出热键相同' : '已关闭');
+    if (combo) {
+      console.log(`[peek] ${combo} 已留给 Dock 唤出热键，按住即抬这次不注册（可在设置里换一个）`);
+    } else {
+      keyHold.stop();
+    }
+    if (!combo && peekHotkeyWatch) {
+      clearInterval(peekHotkeyWatch);
+      peekHotkeyWatch = null;
+    }
+    return;
+  }
+  if (peekHotkeyRegistered !== combo) unregisterPeekHotkey('热键已换');
+  try {
+    if (globalShortcut.isRegistered(combo)) globalShortcut.unregister(combo);
+    const ok = globalShortcut.register(combo, () => beginPeek('热键'));
+    peekHotkeyRegistered = ok ? combo : '';
+    // 两条路都要：热键消息零延迟、且不会被幽灵键骗；轮询不漏发（真机上 WM_HOTKEY 会漏）。
+    // 所以注册成功与否，轮询都留着当触发源——幽灵键由 keyHold 的"边沿新鲜度"规则挡。
+    keyHold.setTriggerEnabled(true);
+    if (ok) {
+      console.log(`[peek] 按住即抬热键已注册：${combo}（另有按键侦察兜底）`);
+    } else {
+      console.log(`[peek] 热键 ${combo} 注册失败（可能被别的程序占用），改由按键侦察判定抬起`);
+    }
+  } catch (error) {
+    keyHold.setTriggerEnabled(true);
+    console.log(`[peek] 热键 ${combo} 注册异常：${basketfiles.errorText(error)}，改由按键侦察判定抬起`);
+  }
+  // 按键侦察常驻：抬起与"系统没把 WM_HOTKEY 送来"这两种情况都靠它
+  keyHold.keepRunning(peekSpec(), peekMainIndex());
+  // 置顶助手也预热：peek 第一次抬升要等它起来（Add-Type 编译约半秒），启动就起好，
+  // 用户第一次按热键就是热的
+  zorder.ensureRunning();
+  if (!peekHotkeyWatch) {
+    peekHotkeyWatch = setInterval(() => {
+      if (!peekCombo()) {
+        clearInterval(peekHotkeyWatch);
+        peekHotkeyWatch = null;
+        return;
+      }
+      try {
+        if (!globalShortcut.isRegistered(peekCombo())) registerPeekHotkey();
+      } catch (_) {
+        /* 查询失败下一轮再试 */
+      }
+    }, 60 * 1000);
+  }
+}
+
+function unregisterPeekHotkey(reason) {
+  if (!peekHotkeyRegistered) return;
+  const combo = peekHotkeyRegistered;
+  peekHotkeyRegistered = '';
+  try {
+    globalShortcut.unregister(combo);
+    console.log(`[peek] ${reason}：${combo} 已从系统里摘掉`);
+  } catch (_) {
+    /* 系统里已经没有了：继续 */
   }
 }
 
@@ -2379,6 +2683,9 @@ function popupPointerNear() {
 //   · 光标停在桌面上：多半正走去抓一个文件（这一条只用于 Dock 收起的连带关闭，
 //     弹窗自己的离开判定给它的是"长预算"而不是"豁免"，见 startPopupAwayWatch）。
 function popupAutoCloseBlocked(includeDesktop = true) {
+  // 按住 peek 期间这是一次有意的临时交互（用户正拿手在 Dock 上）：任何"自动收"的路径都让路，
+  // 等松手落回之后，各条规矩照旧接手。
+  if (peekHeld) return true;
   if (popupPointerNear()) return true;
   const mouse = mouseState.poll();
   if (mouse.held || popupDragActive()) return true;
@@ -3702,7 +4009,8 @@ async function basketPreviewFor(basket) {
     'accent_mode', 'theme_mode', 'reduce_motion',
     'icon_size', 'shortcuts_dir', 'basket_dir',
     'dock_enabled', 'dock_auto_hide', 'dock_icon_size', 'dock_magnify',
-    'dock_bottom_gap', 'dock_display', 'dock_specials', 'weather_city'
+    'dock_bottom_gap', 'dock_display', 'dock_specials', 'weather_city',
+    'dock_hotkey', 'dock_peek_hotkey'
   ]);
   const SETTINGS_PATCH_DENIED = new Set(['baskets', 'dock_items']);
 
@@ -3734,12 +4042,25 @@ async function basketPreviewFor(basket) {
       dock_bottom_gap: settings.dock_bottom_gap,
       dock_display: settings.dock_display,
       dock_specials: (settings.dock_specials || []).join(','),
+      dock_hotkey: settings.dock_hotkey,
+      dock_peek_hotkey: settings.dock_peek_hotkey,
       shortcuts_dir: settings.shortcuts_dir,
       theme_mode: settings.theme_mode,
       weather_city: settings.weather_city,
       basket_count: settings.baskets.length
     };
     settings = store.mergedSettings({ ...settings, ...(patch || {}) });
+    // 认不出来的组合键退回默认，别让它静默失灵（手改过 settings.json 或在面板里打错都会走到这）：
+    // 只有修饰键、写错的键名、"Ctrl+" 这种都不可能判出"什么时候松开"，整个功能就没意义了。
+    // 空串不算写错——那是"关掉这个功能"，得放行。
+    if (settings.dock_peek_hotkey && !keyHold.specFor(settings.dock_peek_hotkey)) {
+      console.log(`[peek] 认不出来的组合键「${settings.dock_peek_hotkey}」，退回默认 ${store.DEFAULTS.dock_peek_hotkey}`);
+      settings.dock_peek_hotkey = store.DEFAULTS.dock_peek_hotkey;
+    }
+    if (settings.dock_peek_hotkey === settings.dock_hotkey) {
+      // 同一个组合键只能有一个回调：与 F9 撞了就只能二选一，这边让"按住即抬"让位（log 见注册处）
+      console.log(`[peek] 与 Dock 唤出热键相同（${settings.dock_peek_hotkey}），按住即抬这次不注册`);
+    }
     // 主题要在 persist（=广播）之前解析好：nativeTheme 先切，页面配色（媒体查询）
     // 与系统材质会跟着 state:changed 同一拍到位
     if (settings.theme_mode !== before.theme_mode) applyTheme();
@@ -3763,6 +4084,14 @@ async function basketPreviewFor(basket) {
     const binWas = before.dock_specials.includes('recyclebin');
     if (binOn && !binWas) startRecycleWatch();   // 刚把回收站摆上 Dock
     if (!binOn && binWas) stopRecycleWatch();    // 撤下来就别每秒扫盘了
+    // 热键换了要立刻重挂：Electron 的注册状态不会自己跟着设置走（以前只能改完重启）。
+    // 唤出热键先挂——它与"按住即抬"撞车时由它优先（那边会让路并摘掉自己，见 registerPeekHotkey）。
+    // 唤出热键也变了的话同样要重判一次撞车，所以两个条件都算。
+    const dockHotkeyChanged = settings.dock_hotkey !== before.dock_hotkey;
+    if (dockHotkeyChanged) registerDockHotkey();
+    if (dockHotkeyChanged || settings.dock_peek_hotkey !== before.dock_peek_hotkey) {
+      registerPeekHotkey();
+    }
     if (settings.dock_enabled !== before.dock_enabled) syncDock();
     else if (settings.dock_auto_hide !== before.dock_auto_hide) {
       // 常驻 ⇄ 自动收起：切换置顶，常驻时重新放到桌面层
@@ -3803,7 +4132,8 @@ async function basketPreviewFor(basket) {
   const RESETTABLE_KEYS = [
     'accent_mode', 'theme_mode', 'reduce_motion', 'icon_size',
     'dock_enabled', 'dock_auto_hide', 'dock_icon_size',
-    'dock_magnify', 'dock_bottom_gap', 'dock_display', 'weather_city'
+    'dock_magnify', 'dock_bottom_gap', 'dock_display', 'weather_city',
+    'dock_hotkey', 'dock_peek_hotkey'
   ];
   ipcMain.handle('settings:reset', () => {
     const patch = {};
@@ -3814,7 +4144,10 @@ async function basketPreviewFor(basket) {
   ipcMain.handle('autostart:get', () => ({
     enabled: autostart.isEnabled(),
     command: autostart.currentCommand(),
-    supported: autostart.isSupported()
+    supported: autostart.isSupported(),
+    // 渲染层要分 win32/macOS 说不同的话（见 autostart.js 的两条实现），而它那边
+    // contextIsolation 下没有 process，只能由主进程把平台报过去
+    platform: process.platform
   }));
 
   ipcMain.handle('autostart:set', (_event, { enabled }) => {
@@ -3845,6 +4178,7 @@ function bootstrap() {
   installTray();
   startDockAutoHide();
   registerDockHotkey();
+  registerPeekHotkey();
   // 天气：图标在 Dock 上才去取（撤下来就不白打接口）
   if (settings.dock_specials.includes(specials.WEATHER_ID)) startWeatherRefresh();
   // 回收站：图标在 Dock 上才起空/满看门狗（同天气的取舍）
@@ -3906,8 +4240,13 @@ if (!singleInstance) {
     stopSpecialIconRetries();
     stopWeatherCardWatch();
     if (dockWatchTimer) clearInterval(dockWatchTimer);
-    // 鼠标状态那个 PowerShell 小循环也要收掉，别留一个孤儿进程
+    if (peekGuardTimer) clearInterval(peekGuardTimer);
+    if (peekHotkeyWatch) clearInterval(peekHotkeyWatch);
+    cancelPeekRelease();
+    // 鼠标状态、按键状态、置顶助手那几个 PowerShell 小循环也要收掉，别留孤儿进程
     mouseState.stop();
+    keyHold.stop();
+    zorder.stop();
   });
 }
 

@@ -37,6 +37,16 @@ const DEFAULTS = {
   dock_items: [],
   dock_aliases: {},            // 快捷方式在 Dock 上的显示名：只存设置，绝不动磁盘上的文件名
   dock_hotkey: 'F9',           // Dock 唤出/收起的全局热键（'' = 关闭；双击 Ctrl 那种要底层钩子，Electron 做不了）
+  // 按住即抬（peek）：按住就把 Dock 抬到最上面并滑出来，松手按原设置落回。
+  // 默认 Ctrl+Win+Z：三个键都在左手（Ctrl 与 Z 同侧、Win 用拇指），右手全程不用离开鼠标；
+  // 系统留给自己的只有 Win+E / Win+D / Win+R 这类**不带 Ctrl** 的组合，以及 Win+Ctrl+Q
+  // （快速助手）等少数几个，而 Ctrl+Win+Z 不在其中，输入法的中英切换（Ctrl+Space /
+  // Shift+Space）也不是它。真机实测这台机器上 `Ctrl+Win+Z` 空闲、注册成功。
+  // 另外刻意避开 Ctrl+Q、Ctrl+W 这种"退出/关窗"的常用键。
+  // 键盘带 F13～F24 那排键的话填 F13 更硬（Windows 与所有应用最多只绑到 F12）。
+  // 'Win' / 'Super' / 'Meta' 三种写法这里都认（见 keyHold.js 的修饰键表）。
+  // '' = 关闭。合法性由 keyHold.specFor 判，认不出来会退回这个默认值（见 main.js 的设置补丁）。
+  dock_peek_hotkey: 'Ctrl+Win+Z',
   dock_specials: ['windows', 'thispc', 'recyclebin', 'weather'],   // windows = 开始菜单（最左）  // 系统虚拟项：此电脑、回收站、天气
   dock_removed: [],
   // 天气城市：只存一个名字，经纬度每次启动重新查（一次地理编码请求，代价极低，
@@ -238,6 +248,7 @@ function mergedSettings(raw) {
   );
   out.dock_items = normalizePathList(raw.dock_items);
   out.dock_hotkey = typeof raw.dock_hotkey === 'string' ? raw.dock_hotkey.trim().slice(0, 40) : DEFAULTS.dock_hotkey;
+  out.dock_peek_hotkey = typeof raw.dock_peek_hotkey === 'string' ? raw.dock_peek_hotkey.trim().slice(0, 40) : DEFAULTS.dock_peek_hotkey;
   out.shortcuts_dir = normalizeSourceDir(raw.shortcuts_dir);
   out.basket_dir = normalizeBasketDir(raw.basket_dir);
   out.dock_bottom_gap = clampInt(

@@ -155,6 +155,8 @@ function render() {
   el('dockIconSize').value = settings.dock_icon_size;
   el('dockMagnify').value = settings.dock_magnify;
   el('dockBottomGap').value = settings.dock_bottom_gap;
+  setUnfocused('dockHotkey', settings.dock_hotkey || '');
+  setUnfocused('dockPeekHotkey', settings.dock_peek_hotkey || '');
   setUnfocused('sourceDir', settings.shortcuts_dir || '');
   setUnfocused('basketDir', settings.basket_dir || '');
   el('dockCount').textContent =
@@ -359,6 +361,30 @@ el('dockBottomGap').addEventListener('change', (event) => {
   push({ dock_bottom_gap: Number(event.target.value) }, 'Dock 离底边的距离已更新');
 });
 
+// 两个热键框：回车/失焦时提交，主进程立刻重挂（不用重启）。主进程会把认不出来的组合键
+// 退回默认值，所以这里提交完都把输入框同步成 settings 里回来的那份真值——
+// 用例就是"打错了一个键名"：用户填 F13x，看见的仍是它最后稳定下来的样子。
+async function applyHotkey(id, key) {
+  const raw = String(el(id).value || '').trim();
+  await push({ [key]: raw });
+  const settled = key === 'dock_hotkey'
+    ? (settings.dock_hotkey || '')
+    : (settings.dock_peek_hotkey || '');
+  el(id).value = settled;
+  if (!settled) flash(key === 'dock_hotkey' ? '唤出热键已关闭' : '按住即抬已关闭');
+  else if (settled !== raw) flash('认不出来的组合键，已用：' + settled);
+  else {
+    flash(
+      key === 'dock_hotkey'
+        ? '唤出热键已改成 ' + settled
+        : '按住即抬已改成 ' + settled + '（按住试试）'
+    );
+  }
+}
+
+el('dockHotkey').addEventListener('change', () => applyHotkey('dockHotkey', 'dock_hotkey'));
+el('dockPeekHotkey').addEventListener('change', () => applyHotkey('dockPeekHotkey', 'dock_peek_hotkey'));
+
 // 系统图标（此电脑 / 回收站 / 天气）：整份列表交回主进程（顺序固定，天气总在回收站旁边）
 for (const [, boxId] of SPECIAL_ORDER) {
   el(boxId).addEventListener('change', () => {
@@ -513,8 +539,10 @@ el('autostart').addEventListener('change', async (event) => {
 async function refreshAutostart() {
   const info = await api.getAutostart();
   el('autostart').checked = info.enabled;
+  // 平台由主进程报（platform）：渲染层是 contextIsolation 的，process 根本不存在，
+  // 在这儿读它会抛 ReferenceError，那行字从此永远填不上
   el('autostartInfo').textContent = info.supported
-    ? (process.platform === 'win32'
+    ? (info.platform === 'win32'
         ? '当前注册表内容：' + (info.command || '（未启用）')
         : (info.enabled ? '已开启（跟随系统登录）' : '未开启'))
     : '当前平台不支持';

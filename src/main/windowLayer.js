@@ -23,10 +23,16 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 
 const MARKER = 'DESKBASKET_LAYER ';
-// 下沉步数上限要留足：系统里可能夹着一大串看不见的助手窗口（实测遇到过联想的一串
-// 管道窗口 \\.\pipe\LenovoLeFileTask 连续十几个），多下沉几步只是把它挪到更靠桌面
-// 的位置，不影响可见结果。
-const MAX_STEPS = 200;
+// 下沉步数上限：实测走到桌面层要 309 步（这台机器上 Dock 底下压着 295 个看不见的
+// 助手窗口：输入法框架的 IME/MSCTFIME UI、UWP 的 CoreWindow、GDI+ Hook 之类），
+// 原来 200 步不够用；留 600 够走完还留余量，再多只是白花时间。
+//
+// 注意更大的上限**也解决不了**这台机器上的另一个问题：那些看不见的窗口会拒绝被跨越
+// （SetWindowPos 直接返回 false + ERROR_ACCESS_DENIED(5)，连 SWP_NOZORDER 都一样，
+// 说明拒的是"拿这个窗口当插入点"这件事本身，不是 z 序算法）。实测 800 次尝试全部被拒、
+// 邻居窗口始终不变，所以这一层怎么加步数都过不去。这种情况现在会报 DENIED 而不是
+// STILL_MOVING（见下面那段），别再把它读成"努力过但没走到"。
+const MAX_STEPS = 600;
 // 固定字面量：不按环境变量或 PATH 挑可执行文件，避免被换成别的程序
 const POWERSHELL_EXE = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
@@ -48,6 +54,13 @@ public static class DeskBasketLayer {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int X, int Y, int cx, int cy, uint flags);
 
+    [DllImport("kernel32.dll")]
+    public static extern uint GetLastError();
+
+    public static uint LastError() {
+        return GetLastError();
+    }
+
     public static string ClassOf(IntPtr hWnd) {
         StringBuilder buffer = new StringBuilder(256);
         GetClassName(hWnd, buffer, 256);
@@ -66,6 +79,8 @@ if ($dock -eq [IntPtr]::Zero) {
 # 桌面层的类名，与 src/main/dockmodel.js 的 SHELL_WINDOW_CLASSES 保持一致
 $desktopClasses = @('Progman', 'WorkerW', 'SysListView32')
 $seen = @()
+$denied = 0
+$lastError = 0
 $result = 'STILL_MOVING'
 for ($i = 0; $i -lt ${MAX_STEPS}; $i++) {
     # GW_HWNDNEXT = 2：z 序里紧挨在下面的那个窗口
@@ -74,9 +89,18 @@ for ($i = 0; $i -lt ${MAX_STEPS}; $i++) {
     $className = [DeskBasketLayer]::ClassOf($below)
     if ($desktopClasses -contains $className) { $result = 'ABOVE_DESKTOP'; break }
     $seen += $className
-    [DeskBasketLayer]::SetWindowPos($dock, $below, 0, 0, 0, 0, (0x0001 -bor 0x0002 -bor 0x0010)) | Out-Null
+    if (-not [DeskBasketLayer]::SetWindowPos($dock, $below, 0, 0, 0, 0, (0x0001 -bor 0x0002 -bor 0x0010))) {
+        # 插不进去：真机上就是这些窗口在拒绝（见文件头）。原样再试一千次也是同一个结果，
+        # 所以立刻停，并把拒绝次数与错误码报回去——不然日志里的 STILL_MOVING steps=2000
+        # 看着像"努力过但没走到"，实际是"一步都没挪动"。
+        $denied += 1
+        $lastError = [DeskBasketLayer]::LastError()
+        break
+    }
 }
-Write-Output ('${MARKER}' + $result + ' steps=' + $seen.Count + ' last=' + (($seen | Select-Object -Last 3) -join '>'))
+if ($denied -gt 0) { $result = 'DENIED' }
+Write-Output ('${MARKER}' + $result + ' steps=' + $seen.Count + ' denied=' + $denied +
+              ' err=' + $lastError + ' last=' + (($seen | Select-Object -Last 3) -join '>'))
 `;
 
 // Electron 给的句柄是 Buffer（Windows 上是窗口句柄的小端字节序）
@@ -157,4 +181,10 @@ function placeOnDesktopLayer(win) {
   });
 }
 
-module.exports = { DESKTOP_CLASSES: ['Progman', 'WorkerW', 'SysListView32'], MARKER, handleOf, placeOnDesktopLayer };
+module.exports = {
+  DESKTOP_CLASSES: ['Progman', 'WorkerW', 'SysListView32'],
+  MARKER,
+  MAX_STEPS,
+  handleOf,
+  placeOnDesktopLayer
+};
