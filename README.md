@@ -128,14 +128,14 @@ scripts/         一键启动器、应用图标生成、桌面只读取证脚本
 - **1.3** 拖拽换位动画翻新；NSIS 安装包（桌面/开始菜单快捷方式、可卸载）。
 - **1.0 – 1.2** 磨砂贴底、Dock、筐数据模型、内置资源管理器、天气、回收站空/满实时图标、开机自启（原 3.x 系列对应改名）。
 
-逐版本的实施细节与真机取证见 [`PROGRESS.md`](PROGRESS.md)。
+逐版本的实施细节与真机取证见各次提交说明（本仓库的提交信息按发布批次写得比较长，根因与验证都在里面）。
 
 ## 致谢
 
 本项目的**产品规则与交互设计**从下列优秀开源项目获得直接启发（只借鉴思想与规则，未复制任何代码，实现均为独立完成）：
 
-- [DeskBox](https://github.com/Tianyu199509/DeskBox)（GPL-3.0，© Tianyu199509 及其贡献者）——「一键整理」的克制规则（预览先行、一类 ≥2 项、最多 4 筐、失败逐条解释、事务可回滚）、叠放预览的形态，以及拖拽数据载荷只放 `Files` 的跨应用兼容性结论，均参考其公开文档与设计；它的契约文档文化也是本仓库 `PROGRESS.md` 的写作范本。
-- [Flow Launcher](https://github.com/Flow-Launcher/Flow.Launcher)（MIT）与 [Raycast](https://www.raycast.com)——弹窗面板设计语言的参考（素色面板、发丝分隔、快捷键提示脚栏）。
+- [DeskBox](https://github.com/Tianyu199509/DeskBox)（GPL-3.0，© Tianyu199509 及其贡献者）——「一键整理」的克制规则（预览先行、一类 ≥2 项、最多 4 筐、失败逐条解释、事务可回滚）、叠放预览的形态，以及拖拽数据载荷只放 `Files` 的跨应用兼容性结论，均参考其公开文档与设计；它的契约文档文化也影响了本仓库提交说明与代码注释的写法。
+- [Flow Launcher](https://github.com/Flow-Launcher/Flow.Launcher)（MIT）与 [Raycast](https://www.raycast.com)——弹窗面板设计语言的参考（素色面板、发丝分隔）。
 
 同时感谢：
 

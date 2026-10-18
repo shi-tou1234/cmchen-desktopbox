@@ -1,7 +1,7 @@
 'use strict';
 
 // 一键启动器的纯逻辑单测：只测"一次启动尝试怎么判读"和"判读依据与主进程日志的一致性"，
-// 真机启动（进程真的起来、Dock 真的就绪）属于端到端行为，见 PROGRESS 里的实测记录。
+// 真机启动（进程真的起来、Dock 真的就绪）属于端到端行为，见提交说明里的实测记录。
 
 const test = require('node:test');
 const assert = require('node:assert');

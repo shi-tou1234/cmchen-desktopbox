@@ -910,7 +910,7 @@ function askShellForSpecialIcon(id, special) {
 // 回收站图标是状态相关的（空/满两张不同，shell 按当前状态现给），但 shellIcons 的
 // 虚拟项缓存按天失效——当天第一问是什么状态，之后一整天 Dock 上都是那张图；在
 // 资源管理器里删东西/清空，主进程也全然不知（真机报障：图标答不出「回收站里到底
-// 有没有文件」，取证见 PROGRESS）。
+// 有没有文件」，取证见对应批次的提交说明）。
 //
 // 修法把「探状态」与「取图」拆开：
 //   - 探：每秒 recyclebin.probeToken() 扫一遍各盘 $Recycle.Bin\SID 目录的 mtime

@@ -1047,6 +1047,15 @@ grip.addEventListener('pointercancel', endGrip);
 
 // ---------------------------------------------------------------- 启动
 
+// 卡片圆角贴着 Windows 原生窗口圆角画：无边框 acrylic 窗口的可见轮廓是 DWM 裁的，
+// 实测是 8 物理像素且不随 DPI 放大（150% 缩放下仍是 8px）。CSS 里写死 px 会在高 DPI
+// 下差出小半个圆角，两道弧之间的缝露出没染色的 acrylic、原生硬裁剪叠在卡片描边上，
+// 看起来就是"边框小毛刺 / 像叠了好几张贴图"。所以按 devicePixelRatio 换算成物理 8px。
+// （popup.html 的 --card-radius 里有同一段说明，那边是读不到 DPR 时的兜底。）
+function syncCardRadius() {
+  document.documentElement.style.setProperty('--card-radius', `${8 / (window.devicePixelRatio || 1)}px`);
+}
+
 // 铺开一份内容并播"从图标抽出来"的动画。
 // 图标已经在载荷里（主进程算好的 dataURL），所以这一帧就是终态、没有待解码的图片。
 function showPayload(payload) {
@@ -1059,8 +1068,8 @@ function showPayload(payload) {
   iconSize = payload.iconSize || 48;
   // 磨砂模式的窗口底是一整块系统材质，动画得换个做法（见下面的 CSS）
   document.body.classList.toggle('glass', payload.glass === true);
-  // 视图种类挂 body 上：脚栏的快捷键提示只给筐视图（dir 里 F2/换位那套不成立）
-  document.body.dataset.kind = payload.kind === 'dir' ? 'dir' : 'basket';
+  // 每次铺内容都重算一次圆角：窗口可能在别的显示器上被复用（DPR 会变）
+  syncCardRadius();
   // 筐的主色（1.3 启动器式设计）：头部圆点、选中格、拖拽空位/插入线跟 Dock 上的筐色走；
   // dir 视图/颜色缺失时**移掉**这个变量（设空串会让 CSS 的 var() 兜底失效），CSS 侧回落系统蓝
   const accent = payload.kind === 'basket' && typeof payload.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(payload.color)

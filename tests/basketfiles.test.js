@@ -1,7 +1,7 @@
 'use strict';
 
 // 筐的磁盘落地（3.3.0）：文件夹命名、重名顺延、移动/复制决策、复制校验。
-// 只测纯函数与可注入 IO 的部分；真正的移动/复制在真机上验（见 PROGRESS）。
+// 只测纯函数与可注入 IO 的部分；真正的移动/复制在真机上验（见提交说明）。
 
 const test = require('node:test');
 const assert = require('node:assert');

@@ -19,7 +19,12 @@
      */
 
   :root {
-    --card-radius: 14px;
+    /* 卡片圆角必须贴着 Windows 原生窗口圆角画。无边框 acrylic 窗口的可见轮廓是 DWM
+       裁出来的（实测本机：8 物理像素的圆角，不随 DPI 放大——150% 缩放下仍是 8px）。
+       页面圆角比它大时，两道弧之间会露出一圈没染过色的 acrylic 材质，原生裁剪还是硬边
+       （带台阶），叠上原生投影就成了用户报的「边框小毛刺 / 像叠了好几张贴图」。
+       精确值由 popup.js 按 devicePixelRatio 写入（8/dpr），这里给读不到时的兜底。 */
+    --card-radius: 8px;
     --cell-radius: 12px;
     /* 深色主题：宝石玻璃。--basket-accent 由 JS 设成 Dock 上那颗筐的颜色，
        缺失（dir 视图）时回落一颗系统蓝 */
@@ -318,8 +323,8 @@
   .popup-grid .cell .name { margin-top: 0; }
 
   /* ---------------------------------------------------------------- 脚栏
-     一条安静的提示带：左边状态消息（平时空着），右边快捷键键帽；
-     上缘分隔线用筐色淡淡地染一下头，跟头部呼应。 */
+     只留一条安静的状态消息带（平时空着）；上缘分隔线用筐色淡淡地染一下头，
+     跟头部呼应。 */
   .card-foot {
     flex: 0 0 auto;
     display: flex;
@@ -344,31 +349,6 @@
   @media (prefers-color-scheme: light) {
     .popup-status.error { color: #b05e1e; }
   }
-  .foot-hints {
-    flex: 0 0 auto;
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  body[data-kind="dir"] .foot-hints { display: none; }
-  .hint {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    color: var(--faint-fg);
-    font-size: 11px;
-    white-space: nowrap;
-  }
-  .hint kbd {
-    font: 600 10px/1.7 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-    color: var(--dim-fg);
-    background: var(--grp-bg);
-    box-shadow: inset 0 0 0 1px var(--grp-edge);
-    border-radius: 4px;
-    padding: 0 5px;
-  }
-
   .empty-tip {
     position: absolute;
     inset: 64px 26px 44px;
@@ -522,12 +502,6 @@
       <div class="popup-grid" id="grid" role="listbox" aria-multiselectable="true" aria-label="文件列表"></div>
       <footer class="card-foot">
         <div class="popup-status" id="status"></div>
-        <div class="foot-hints" aria-hidden="true">
-          <span class="hint"><kbd>↵</kbd>打开</span>
-          <span class="hint"><kbd>F2</kbd>重命名</span>
-          <span class="hint"><kbd>Del</kbd>删除</span>
-          <span class="hint"><kbd>拖动</kbd>换位</span>
-        </div>
       </footer>
       <div class="empty-tip" id="emptyTip" style="display:none"></div>
     </section>

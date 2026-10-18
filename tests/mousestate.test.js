@@ -1,7 +1,7 @@
 'use strict';
 
 // 全局鼠标状态（拖拽判定）的纯逻辑单测：只测协议解析与"问不到时的兜底"，
-// PowerShell 那段循环属于真机行为（见 PROGRESS 里的拖拽复现记录）。
+// PowerShell 那段循环属于真机行为（见提交说明里的拖拽复现记录）。
 
 const test = require('node:test');
 const assert = require('node:assert');
