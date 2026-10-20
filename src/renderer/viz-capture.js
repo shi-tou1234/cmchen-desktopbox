@@ -33,6 +33,13 @@ let lastPumpAt = 0;
 let restarts = 0;
 let retryTimer = 0;
 let retryCount = 0;
+// 静音重连：环回流绑的是「取流那一刻的默认输出设备」。用户把声音从笔记本喇叭挪到
+// 显示器（HDMI/DP）后，旧流还对着老设备读，读到的永远是零——表现为"换了个输出就没频谱"。
+// 静音超过 SILENCE_RESTART_MS 就拆掉重连一次，重新绑到当前的默认设备。
+const SILENCE_RESTART_MS = 6000;
+let silenceStart = 0;
+let silenceRestarts = 0;
+let deviceChangeTimer = 0;
 let freq = null;
 let started = false;
 
@@ -174,6 +181,14 @@ function pump() {
     for (let j = lo; j < hi; j++) if (freq[j] > peak) peak = freq[j];
     out[i] = peak;
   }
+  // 「整帧全零」是判断环回绑错设备的唯一信号：有声就清零静音计时，
+  // 连续静音则交给下面的看门狗去重连（重新绑当前的默认输出设备）。
+  if (out.some((v) => v > 0)) {
+    silenceStart = 0;
+    silenceRestarts = 0;
+  } else if (!silenceStart) {
+    silenceStart = Date.now();
+  }
   api.vizBands(out);
 }
 
@@ -253,7 +268,19 @@ window.addEventListener('pagehide', () => stopAll(false));
 // 音频轨被系统悄悄掐断）→ 自己拆掉重来。最多重来 5 次，坏设备上别无限重启。
 setInterval(() => {
   if (!stream || !audioCtx) return;
-  if (Date.now() - lastPumpAt < 3000) return;
+  if (Date.now() - lastPumpAt < 3000) {
+    // pump 还在跑：看是不是"绑错了设备"的静音
+    if (silenceStart && Date.now() - silenceStart > SILENCE_RESTART_MS && silenceRestarts < 3) {
+      silenceRestarts += 1;
+      silenceStart = Date.now();   // 重置计时：连续静音也别连环拆，3 次后等设备变化或声音回来
+      note(`silence rebind #${silenceRestarts}`);
+      report('重新绑定音频输出…');
+      stopAll(false);
+      started = false;
+      start();
+    }
+    return;
+  }
   if (restarts >= 5) return;
   restarts += 1;
   note(`watchdog restart #${restarts}`);
@@ -262,5 +289,21 @@ setInterval(() => {
   started = false;
   start();
 }, 4000);
+
+// 设备插拔（插上/拔掉显示器、耳机）也会让旧环回流失效：收到事件就重连一次（防抖 1 秒）。
+if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    if (!stream) return;
+    if (deviceChangeTimer) return;
+    deviceChangeTimer = setTimeout(() => {
+      deviceChangeTimer = 0;
+      if (!stream) return;
+      note('devicechange -> rebind');
+      stopAll(false);
+      started = false;
+      start();
+    }, 1000);
+  });
+}
 
 start();
