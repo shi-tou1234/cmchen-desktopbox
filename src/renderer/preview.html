@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file:; media-src 'self' file:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file:; media-src 'self' file: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'">
 <title>DeskBasket 预览</title>
 <link rel="stylesheet" href="common.css">
 <style>
@@ -51,6 +51,17 @@
   main pre::-webkit-scrollbar { width: 9px; }
   main pre::-webkit-scrollbar-thumb { background: rgba(128, 132, 144, 0.4); border-radius: 8px; }
   .none { color: var(--dim-fg); font-size: 12.5px; text-align: center; line-height: 2; }
+
+  /* 音频律动（频谱条）：播放器在上、画布在下，铺满内容区。 */
+  .player {
+    width: 100%; height: 100%; display: flex; flex-direction: column;
+    align-items: stretch; justify-content: center; gap: 14px; padding: 16px 22px 18px;
+  }
+  .player audio { width: 100%; }
+  .player .viz { flex: 1 1 auto; width: 100%; min-height: 96px; display: block; }
+  @media (prefers-reduced-motion: reduce) {
+    .player .viz { display: none; }
+  }
 
   /* 窗口淡入（1.4.1）：弹窗/菜单都有进场动画，这两扇别再「啪」地出现 */
   @keyframes win-in {

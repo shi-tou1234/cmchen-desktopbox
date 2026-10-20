@@ -19,6 +19,7 @@ const { execFileSync, spawn } = require('node:child_process');
 const {
   app,
   BrowserWindow,
+  desktopCapturer,
   globalShortcut,
   Menu,
   Tray,
@@ -50,6 +51,15 @@ const basketfiles = require('./basketfiles');
 
 const APP_NAME = 'DeskBasket';
 const DOCK_PADDING = 8;
+
+// 关掉 Windows 的"窗口遮挡计算"。
+//
+// 频谱绘制窗要压在桌面层（工具要求的"跟 Dock 一样，只出现在桌面上"）。它正好落在
+// Dock 窗口那块矩形里——Dock 虽然整块透明，但 Chromium 只按窗口矩形算遮挡，于是判定
+// 频谱窗"被完全盖住"，把它的 requestAnimationFrame / 合成一起停掉：画面定格在最后一帧，
+// 改设置触发重排才会重画一次（真机日志里 draw page hidden 一直不翻回 visible，就是它）。
+// 绘制窗本身还有定时器 + backgroundThrottling:false 兜底，这个开关是釜底抽薪。
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 
 // 文件夹弹窗：位置在 Dock 上方；大小由设置 popup_width/height 决定（可在右下角拖着改，见 persistPopupSize）
 const POPUP_EDGE_GAP = 8;    // 弹窗与屏幕左右/上边的最小距离
@@ -1874,8 +1884,9 @@ function syncDock() {
     return;
   }
   applyDockGeometry();
-  // 不再单独给 Dock 发一份 state:changed（PE-3）：走到这里的改动静辄先 persist 过，
-  // broadcastState 已经全窗口发过一遍，dock.js 的 onStateChanged 会跟着刷新；
+  // Dock 条目增减会改 Dock 宽度 → 贴在它上方的律动条跟着重算落点
+  viz.position();
+  // 不再单独给 Dock 发一份 state:changed（PE-3）：走到这里的改动静辄先 persist 过，broadcastState 已经全窗口发过一遍，dock.js 的 onStateChanged 会跟着刷新；
   // 新建窗口那条路由页面自己 getState，也不需要补发。
 }
 
@@ -2382,103 +2393,32 @@ guardHandle('organize:undo', async () => {
 
 // ------------------------------------------------------------------ QuickLook 空格预览（1.4.0）
 //
-// 筐弹窗里选中文件按空格 = 弹出大图预览（图片直接看、文本读前 400KB、音视频给播放器），
-// 再按空格/Esc 关闭。窗口失焦即关（与弹窗/菜单同一口径）。读取接口只对预览窗自己放行，
-// 别的页面拿不到任意路径的文件内容。
+// 开窗/读文件/是否开着，整块搬到了 ./preview.js——读文件的三个 IPC 只对预览窗自己放行，
+// 边界逻辑跟窗口一起放在那边更清楚。这里只注入它需要的外围能力。
 
-let previewWindow = null;
-const PREVIEW_TEXT_MAX = 400 * 1024;
-const PREVIEW_IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.ico', '.avif'];
-const PREVIEW_MEDIA_EXTS = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.mp3', '.wav', '.flac', '.m4a', '.ogg'];
-const PREVIEW_TEXT_EXTS = ['.txt', '.md', '.csv', '.log', '.json', '.js', '.ts', '.py', '.c', '.cpp', '.h', '.css', '.html', '.xml', '.yml', '.yaml', '.ini', '.bat', '.ps1', '.java'];
-
-function previewKindOf(name) {
-  const lowered = String(name || '').toLowerCase();
-  const dot = lowered.lastIndexOf('.');
-  const ext = dot > 0 ? lowered.slice(dot) : '';
-  if (PREVIEW_IMAGE_EXTS.includes(ext)) return 'image';
-  if (PREVIEW_MEDIA_EXTS.includes(ext)) return 'media';
-  if (PREVIEW_TEXT_EXTS.includes(ext)) return 'text';
-  return 'none';
-}
-
-function closePreviewWindow() {
-  if (previewWindow && !previewWindow.isDestroyed()) previewWindow.destroy();
-  previewWindow = null;
-}
-
-guardHandle('preview:open', (_event, { path: target } = {}) => {
-  closeMenuIfOpen();
-  if (!target || !pathExists(target)) return { ok: false, error: '文件不存在' };
-  try {
-    if (fs.statSync(target).isDirectory()) return { ok: false, error: '文件夹不支持预览' };
-  } catch (_) {
-    return { ok: false, error: '文件读不了' };
-  }
-  closePreviewWindow();
-  const area = screen.getPrimaryDisplay().workArea;
-  const width = 720;
-  const height = 520;
-  previewWindow = winFactory.createRenameWindow({
-    width,
-    height,
-    x: Math.round(area.x + (area.width - width) / 2),
-    y: Math.round(area.y + (area.height - height) / 2),
-    glass: false,
-    title: `${APP_NAME} 预览`
-  });
-  attachDiagnostics(previewWindow, 'preview');
-  winFactory.loadPage(previewWindow, 'preview.html', { path: target });
-  const win = previewWindow;
-  win.once('ready-to-show', () => {
-    if (win.isDestroyed()) return;
-    win.show();
-    win.focus();
-  });
-  // **不做**失焦即关：预览窗从弹窗里唤出时，弹窗收起的焦点震荡会立刻把它也带走。
-  // 关闭只走三条路：空格 / Esc / 点 ✕（预览页里都有监听）。
-  win.on('closed', () => {
-    if (previewWindow === win) previewWindow = null;
-  });
-  return { ok: true };
+const preview = require('./preview').createPreviewController({
+  guardHandle,
+  winFactory,
+  attachDiagnostics,
+  appName: APP_NAME,
+  closeMenuIfOpen,
+  pathExists
 });
 
-// 文件内容只给预览窗自己：别的页面来问一律拒绝（任意路径读文件的口子必须收紧）
-guardHandle('preview:read', (event, { path: target } = {}) => {
-  if (!previewWindow || previewWindow.isDestroyed() || event.sender !== previewWindow.webContents) {
-    return { ok: false, error: 'denied' };
-  }
-  if (!target || !pathExists(target)) return { ok: false, error: '文件不存在' };
-  let stat = null;
-  try {
-    stat = fs.statSync(target);
-  } catch (_) {
-    return { ok: false, error: '文件读不了' };
-  }
-  const kind = previewKindOf(target);
-  const payload = {
-    ok: true,
-    kind,
-    name: path.basename(target),
-    size: stat.size,
-    mtime: stat.mtime.toISOString(),
-    url: kind === 'image' || kind === 'media'
-      ? 'file:///' + encodeURI(target).replace(/#/g, '%23').replace(/\?/g, '%3F')
-      : ''
-  };
-  if (kind === 'text') {
-    try {
-      const handle = fs.openSync(target, 'r');
-      const buffer = Buffer.alloc(Math.min(stat.size, PREVIEW_TEXT_MAX));
-      const read = fs.readSync(handle, buffer, 0, buffer.length, 0);
-      fs.closeSync(handle);
-      payload.text = buffer.toString('utf8', 0, read);
-      payload.truncated = read < stat.size;
-    } catch (error) {
-      return { ok: false, error: basketfiles.errorText(error) };
-    }
-  }
-  return payload;
+// ------------------------------------------------------------------ 音乐律动频谱（1.6.0）
+//
+// 整块逻辑搬到了 ./viz.js（两扇窗 + FFT 中转 + 诊断日志都在那边），这里只注入它需要的能力：
+//   · 位置/宽度跟着 Dock 与设置走 → 用 dockTargetGeometry / activeDisplay / settings
+//   · 建窗、开页面 → 用 winFactory / attachDiagnostics
+//   · 取屏幕源那条 IPC 要走可信发送方校验 → 把 guardHandle 一起给它
+const viz = require('./viz').createVizController({
+  getSettings: () => settings,
+  dockTargetGeometry,
+  activeDisplay,
+  winFactory,
+  attachDiagnostics,
+  appName: APP_NAME,
+  guardHandle
 });
 
 // ------------------------------------------------------------------ 窗口：文件夹弹窗（自研磨砂）
@@ -2736,7 +2676,7 @@ function schedulePopupBlurClose(blurredAt = Date.now(), rechecks = 0) {
     popupBlurTimer = null;
     if (!popupWindow || popupWindow.isDestroyed()) return;
     // QuickLook 预览窗（1.4.0）开着时弹窗钉住：预览盖在网格上，关预览回到弹窗
-    if (previewWindow && !previewWindow.isDestroyed()) return;
+    if (preview.isOpen()) return;
     // 注意不含"光标在桌面上"：点桌面关掉弹窗是用户明确的意思，这里不该豁免
     if (popupAutoCloseBlocked(false)) return;
     const mouse = mouseState.poll();
@@ -3189,6 +3129,12 @@ function installTray() {
 // ------------------------------------------------------------------ IPC
 
 function registerIpc() {
+  // QuickLook 预览的三个通道（preview:open / preview:read / preview:media）
+  preview.registerIpc();
+
+  // 音乐律动那几个通道（viz:sources / viz:bands / viz:log / viz:status / viz:grant-state）
+  viz.registerIpc();
+
   ipcMain.handle('state:get', () => statePayload());
 
   guardHandle('basket:get', (_event, { basketId } = {}) => basketView(findBasket(basketId)));
@@ -4006,7 +3952,8 @@ async function basketPreviewFor(basket) {
   // baskets 必须走 basket:update（items/dir 以主进程为准的保护在那边），dock_items 走 dock:*；
   // 其余未知键一律忽略并记日志——渲染层不能借 patch 整体覆写配置。
   const SETTINGS_PATCH_KEYS = new Set([
-    'accent_mode', 'theme_mode', 'reduce_motion',
+    'accent_mode', 'theme_mode', 'reduce_motion', 'music_viz',
+    'viz_style', 'viz_theme', 'viz_width', 'viz_reflect', 'viz_position', 'viz_align',
     'icon_size', 'shortcuts_dir', 'basket_dir',
     'dock_enabled', 'dock_auto_hide', 'dock_icon_size', 'dock_magnify',
     'dock_bottom_gap', 'dock_display', 'dock_specials', 'weather_city',
@@ -4047,6 +3994,11 @@ async function basketPreviewFor(basket) {
       shortcuts_dir: settings.shortcuts_dir,
       theme_mode: settings.theme_mode,
       weather_city: settings.weather_city,
+      music_viz: settings.music_viz,
+      viz_width: settings.viz_width,
+      viz_position: settings.viz_position,
+      viz_align: settings.viz_align,
+      reduce_motion: settings.reduce_motion,
       basket_count: settings.baskets.length
     };
     settings = store.mergedSettings({ ...settings, ...(patch || {}) });
@@ -4065,6 +4017,22 @@ async function basketPreviewFor(basket) {
     // 与系统材质会跟着 state:changed 同一拍到位
     if (settings.theme_mode !== before.theme_mode) applyTheme();
     persist();
+    // 音乐律动：开关切换、或减弱动画被打开（律动属于装饰动画，一并收）→ 收敛到该开的开、该关的关；
+    // 只是换了 Dock 所在屏（activeDisplay 变了）→ 条子跟着挪到新屏底边。
+    if (
+      settings.music_viz !== before.music_viz ||
+      settings.reduce_motion !== before.reduce_motion
+    ) {
+      viz.applySetting();
+    } else if (
+      settings.dock_display !== before.dock_display ||
+      settings.viz_width !== before.viz_width ||
+      settings.viz_position !== before.viz_position ||
+      settings.viz_align !== before.viz_align
+    ) {
+      // 换屏 / 改了频谱宽度、位置、对齐：重新摆一次
+      viz.position();
+    }
     if (settings.weather_city !== before.weather_city) {
       // 换了城市：坐标要重新查，立刻刷一次（不等下一个 15 分钟）
       weatherPlace = null;
@@ -4117,6 +4085,8 @@ async function basketPreviewFor(basket) {
       // （内容刷新交给上面 persist 的 broadcastState，这里不用再单发一遍，PE-3；
       //  dock_magnify 决定顶部余量留多少——放大档位变了窗口高要跟着重算）
       applyDockGeometry();
+      // 律动条贴在 Dock 上方：Dock 宽度/落点一变，条子跟着重算，别留在旧位置
+      viz.position();
     }
     return settings;
   }
@@ -4130,7 +4100,7 @@ async function basketPreviewFor(basket) {
   // 「恢复默认」：设置窗口里能调的那些项回到 DEFAULTS；筐、Dock 条目、弹窗尺寸、
   // 开机自启这类用户数据/系统登记不动。
   const RESETTABLE_KEYS = [
-    'accent_mode', 'theme_mode', 'reduce_motion', 'icon_size',
+    'accent_mode', 'theme_mode', 'reduce_motion', 'music_viz', 'icon_size',
     'dock_enabled', 'dock_auto_hide', 'dock_icon_size',
     'dock_magnify', 'dock_bottom_gap', 'dock_display', 'weather_city',
     'dock_hotkey', 'dock_peek_hotkey'
@@ -4179,6 +4149,7 @@ function bootstrap() {
   startDockAutoHide();
   registerDockHotkey();
   registerPeekHotkey();
+  viz.applySetting();   // 音乐律动悬浮条：按当前设置决定开不开（关着时抓取窗/绘制窗都不建）
   // 天气：图标在 Dock 上才去取（撤下来就不白打接口）
   if (settings.dock_specials.includes(specials.WEATHER_ID)) startWeatherRefresh();
   // 回收站：图标在 Dock 上才起空/满看门狗（同天气的取舍）
@@ -4220,6 +4191,8 @@ if (!singleInstance) {
       // 常驻模式下 z 序位置也得重做：Dock 是靠 windowLayer 一步步下沉到桌面层的，
       // 换屏/拔插之后那个相对位置不再成立，不重做就会留在旧屏那一层。
       applyDockLayerMode();
+      // 音乐律动条也贴在活动屏底边：换屏/拔插后跟着挪，别留在旧屏
+      viz.position();
       // 显示器增减：下拉列表（displays）与选屏结果都可能变，重解析并广播
       applyTheme();
       broadcastState();

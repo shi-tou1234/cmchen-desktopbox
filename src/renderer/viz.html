@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+<title>DeskBasket 律动</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
+  body { user-select: none; cursor: default; }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+  <canvas id="viz"></canvas>
+  <!-- 顺序不能换：配色 → 画法 → 主循环（后两个依赖前一个挂出来的全局对象） -->
+  <script src="viz-theme.js"></script>
+  <script src="viz-painters.js"></script>
+  <script src="viz.js"></script>
+</body>
+</html>

@@ -235,6 +235,97 @@ function createPopupWindow(options = {}) {
   return win;
 }
 
+// 音乐律动频谱（绘制窗）：Dock 图标行上方一条透明、鼠标穿透的频谱带。
+// 它**只画不采**——真实频谱由隔壁的抓取窗（createVizCaptureWindow）做 FFT 后推过来（见 viz.js）。
+// 关键几点：
+//   · transparent:true + 全透明底——带子本身由页面自绘，四周完全透出去，绝不糊成一块黑；
+//   · focusable:false + skipTaskbar:true——它是背景装饰，不抢焦点、不进任务栏 / Alt-Tab；
+//   · **不置顶**：跟常驻 Dock 一样是个普通窗口，主进程 show 完之后会把它压到桌面层
+//     （windowLayer.placeOnDesktopLayer）。屏保级置顶会让它压在一切应用之上，正是要修掉的毛病；
+//   · resizable:false / movable:false——位置大小由主进程按设置摆，页面不需要拖。
+// 用 glassOptions(false)（完全透明），不走系统材质——频谱要的是「浮在桌面壁纸上的一层光」，
+// 拿磨砂去糊背后的窗口反而脏。
+function createVizWindow(options = {}) {
+  const { width = 960, height = 130, x, y, title = 'DeskBasket 律动' } = options;
+  const win = new BrowserWindow({
+    width,
+    height,
+    ...(Number.isInteger(x) ? { x } : {}),
+    ...(Number.isInteger(y) ? { y } : {}),
+    frame: false,
+    show: false,
+    hasShadow: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    focusable: false,
+    skipTaskbar: true,
+    title,
+    icon: APP_ICON,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      // 窗口被应用盖住 = 被当成后台页：默认会节流定时器、停掉绘制。频谱要一直"活着"，
+      // 不然露出来时是几秒前（甚至启动那一刻）的旧画面。
+      backgroundThrottling: false
+    },
+    ...glassOptions(false)
+  });
+  win.setMenuBarVisibility?.(false);
+  win.removeMenu?.();
+  return win;
+}
+
+// 音乐律动抓取窗：Chromium 系统音频环回（loopback）就在这里跑——用 desktopCapturer 拿屏幕源、
+// getUserMedia(chromeMediaSource:'desktop') 抓到的是**整机外放**（QQ音乐/网易云/网页都算），
+// 直接喂 Web Audio AnalyserNode 做**真·逐频段 FFT**（MediaStream 是本页实时源，不受 file:// 那种
+// 跨源污染限制，所以拿得到数据——这正是之前 Blob 方案在预览窗里做的事，只是源换成系统环回）。
+// 与绘制窗分成两扇的原因：
+//   · 绘制窗必须 focusable:false + 鼠标穿透（压在一切之上还不吃点击），这种窗在 Chromium 里
+//     无法承载"授权/取流"所需的聚焦与（回退时的）用户手势；抓取窗要能在静默授权失败时
+//     显出一个可点的"授权"面板，所以它 focusable:true、不穿透。
+//   · 抓取窗常驻后台做 FFT，绝不能被 Chromium 的后台节流掐掉 → backgroundThrottling:false，
+//     且用 setInterval（不是 rAF）读频谱：窗口隐藏时 rAF 会停，setInterval 不停。
+// 用**独立 session 分区**（partition）：主进程只给这一个分区放行 'media' 权限，
+// 不动默认 session，避免把麦克风/桌面共享权限意外开放给其它任何窗口。
+function createVizCaptureWindow(options = {}) {
+  const { width = 320, height = 96, x, y, title = 'DeskBasket 律动授权' } = options;
+  const win = new BrowserWindow({
+    width,
+    height,
+    ...(Number.isInteger(x) ? { x } : {}),
+    ...(Number.isInteger(y) ? { y } : {}),
+    frame: false,
+    show: false,
+    hasShadow: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    focusable: true,     // 需要能在静默失败时聚焦、接受一次"授权"点击
+    skipTaskbar: true,
+    alwaysOnTop: false,
+    title,
+    icon: APP_ICON,
+    backgroundColor: '#00000000',
+    transparent: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+      partition: 'persist:deskbasket-vizcap'
+    }
+  });
+  win.setMenuBarVisibility?.(false);
+  win.removeMenu?.();
+  return win;
+}
+
 // 改名输入窗：Electron 没有 window.prompt（调用会抛异常、把渲染进程卡住），
 // Dock 窗口又不可聚焦、收不到键盘，所以改名用一个钉在 Dock 上方的可聚焦小窗。
 // 不显示 name 之外的任何字段，输入完回车即提交。
@@ -317,6 +408,8 @@ module.exports = {
   createPopupWindow,
   createRenameWindow,
   createWeatherCardWindow,
+  createVizCaptureWindow,
+  createVizWindow,
   glassEnabled,
   glassOptions,
   listDisplays,

@@ -137,6 +137,25 @@ contextBridge.exposeInMainWorld('deskbasket', {
   previewOpen: (payload) => ipcRenderer.invoke('preview:open', payload),
   dragOutItem: (basketId, path) => ipcRenderer.invoke('basket:drag-out', { basketId, path }),
   previewRead: (payload) => ipcRenderer.invoke('preview:read', payload),
+  // 音频律动频谱：取音频字节给渲染层做 Blob（只对预览窗放行，见主进程 preview:media）
+  previewMedia: (payload) => ipcRenderer.invoke('preview:media', payload),
+  // 音乐律动悬浮条（Chromium 系统音频环回）：抓取窗取屏幕源、推 64 段 FFT 与状态、开关授权面板；
+  // 绘制窗收 viz:bands / viz:status 广播来画。通道口径见主进程 viz:* 注册处。
+  vizSources: () => ipcRenderer.invoke('viz:sources'),
+  vizBands: (bands) => ipcRenderer.send('viz:bands', { bands }),
+  vizStatus: (status) => ipcRenderer.send('viz:status', { status }),
+  vizLog: (text) => ipcRenderer.send('viz:log', { text: String(text || '') }),
+  vizGrantState: (show) => ipcRenderer.send('viz:grant-state', { show: Boolean(show) }),
+  onVizBands: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on('viz:bands', listener);
+    return () => ipcRenderer.removeListener('viz:bands', listener);
+  },
+  onVizStatus: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on('viz:status', listener);
+    return () => ipcRenderer.removeListener('viz:status', listener);
+  },
   // 改名：开一个钉在 Dock 上方的小输入窗（Electron 没有 window.prompt，Dock 又收不到键盘）
   openRename: (payload) => ipcRenderer.invoke('rename:open', payload),
   commitRename: (value) => ipcRenderer.invoke('rename:commit', { value }),

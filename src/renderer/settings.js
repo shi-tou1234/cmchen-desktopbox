@@ -11,6 +11,37 @@ const THEME_LABELS = {
   dark: '深色（浅色字，适合深色壁纸/磨砂）',
   light: '浅色（深色字，适合浅色壁纸）'
 };
+// 音乐律动的三个可调项：造型 / 配色 / 宽度
+const VIZ_STYLE_LABELS = {
+  bars: '柱状（一排音乐柱，带倒影）',
+  mirror: '对称柱（以中线上下对称）',
+  dots: '点阵（每段一颗跳动的光点）',
+  blocks: '电平块（LED 分段电平表）',
+  line: '曲线（一条发光的细亮线）'
+};
+const VIZ_THEME_LABELS = {
+  aurora: '极光 · 蓝紫',
+  ocean: '深海 · 蓝青',
+  sunset: '落日 · 橙粉',
+  mint: '薄荷 · 青绿',
+  mono: '月光 · 银白'
+};
+const VIZ_WIDTH_LABELS = {
+  narrow: '窄（680 px）',
+  medium: '中（960 px）',
+  wide: '宽（1240 px）'
+};
+const VIZ_POSITION_LABELS = {
+  dock: '贴在 Dock 图标行上方',
+  bottom: '屏幕底部（任务栏上方）',
+  center: '屏幕垂直居中',
+  top: '屏幕顶部'
+};
+const VIZ_ALIGN_LABELS = {
+  center: '居中（跟随 Dock / 屏幕）',
+  left: '靠左',
+  right: '靠右'
+};
 
 let settings = null;
 let displays = [];         // 主进程随 state 广播的显示器列表（#9）
@@ -39,6 +70,19 @@ function setUnfocused(id, value) {
 
 function flash(text) {
   el('hint').textContent = text;
+}
+
+// 填充一个 <select>：labels 是 { 值: 文案 }，顺序即选项顺序
+function fillSelect(id, labels, value) {
+  const host = el(id);
+  host.innerHTML = '';
+  for (const [key, label] of Object.entries(labels)) {
+    const option = document.createElement('option');
+    option.value = key;
+    option.textContent = label;
+    host.append(option);
+  }
+  host.value = value;
 }
 
 function renderBaskets() {
@@ -169,6 +213,13 @@ function render() {
   renderSpecials();
   renderWeather();
   el('reduceMotion').checked = Boolean(settings.reduce_motion);
+  el('musicViz').checked = Boolean(settings.music_viz);
+  fillSelect('vizStyle', VIZ_STYLE_LABELS, settings.viz_style);
+  fillSelect('vizTheme', VIZ_THEME_LABELS, settings.viz_theme);
+  fillSelect('vizWidth', VIZ_WIDTH_LABELS, settings.viz_width);
+  fillSelect('vizPosition', VIZ_POSITION_LABELS, settings.viz_position);
+  fillSelect('vizAlign', VIZ_ALIGN_LABELS, settings.viz_align);
+  el('vizReflect').checked = Boolean(settings.viz_reflect);
   renderBaskets();
   renderShortcuts();
   loading = false;
@@ -333,6 +384,30 @@ el('themeMode').addEventListener('change', (event) => {
 });
 el('reduceMotion').addEventListener('change', (event) => {
   push({ reduce_motion: event.target.checked }, event.target.checked ? '已减弱动画' : '动画已恢复');
+});
+el('musicViz').addEventListener('change', (event) => {
+  push(
+    { music_viz: event.target.checked },
+    event.target.checked ? '音乐律动已开启（放了音乐底部就会跳）' : '音乐律动已关闭'
+  );
+});
+el('vizStyle').addEventListener('change', (event) => {
+  push({ viz_style: event.target.value }, '频谱造型已切换');
+});
+el('vizTheme').addEventListener('change', (event) => {
+  push({ viz_theme: event.target.value }, '频谱配色已切换');
+});
+el('vizWidth').addEventListener('change', (event) => {
+  push({ viz_width: event.target.value }, '频谱宽度已更新');
+});
+el('vizPosition').addEventListener('change', (event) => {
+  push({ viz_position: event.target.value }, '频谱位置已更新');
+});
+el('vizAlign').addEventListener('change', (event) => {
+  push({ viz_align: event.target.value }, '频谱对齐已更新');
+});
+el('vizReflect').addEventListener('change', (event) => {
+  push({ viz_reflect: event.target.checked }, event.target.checked ? '已显示倒影' : '已隐藏倒影');
 });
 el('dockDisplay').addEventListener('change', (event) => {
   const raw = event.target.value;

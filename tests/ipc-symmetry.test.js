@@ -11,8 +11,17 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const preloadSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'preload.js'), 'utf8');
-const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
+const MAIN_DIR = path.join(__dirname, '..', 'src', 'main');
+const preloadSrc = fs.readFileSync(path.join(MAIN_DIR, 'preload.js'), 'utf8');
+
+// 主进程侧扫**所有模块**（main.js + viz.js / preview.js 这些拆出去的），只排除 preload.js
+// ——它是比对的另一端。拆模块时不用再来改这个测试。
+const mainSrc = fs
+  .readdirSync(MAIN_DIR)
+  .filter((name) => name.endsWith('.js') && name !== 'preload.js')
+  .sort()
+  .map((name) => fs.readFileSync(path.join(MAIN_DIR, name), 'utf8'))
+  .join('\n');
 
 // 显式白名单：确实允许「只发不收」的通道放这里（目前没有；留空位给以后）
 const WHITELIST = [];

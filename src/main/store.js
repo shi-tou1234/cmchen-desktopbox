@@ -20,6 +20,18 @@ const DEFAULTS = {
   accent_mode: 'off',          // off=完全透明（默认，领导指定）／acrylic=系统磨砂玻璃／blur=轻量模糊
   theme_mode: 'auto',          // auto=按壁纸亮度切深浅色／dark／light（见 theme.js）
   reduce_motion: false,        // 减弱动画：关掉入场/翻页/弹跳等装饰动画（保留悬停放大——它用 dock_magnify 单独控制）
+  music_viz: true,            // 音乐律动：屏幕底部一条随系统外放音量跳动的频谱条（QQ音乐/网易云/网页播放器都算）
+  // 频谱外形/配色（设置面板里可改）：
+  //   viz_style   bars=柱状（默认）／mirror=上下对称柱／wave=连贯波形
+  //   viz_theme   配色方案，见 VIZ_THEMES
+  //   viz_width   宽度档位：narrow / medium / wide
+  //   viz_reflect 柱子下方要不要倒影
+  viz_style: 'bars',
+  viz_theme: 'aurora',
+  viz_width: 'medium',
+  viz_reflect: true,
+  viz_position: 'dock',        // dock=贴 Dock 图标行 / bottom=屏幕底部 / center=屏幕中部 / top=屏幕顶部
+  viz_align: 'center',         // 水平对齐：center / left / right
   autostart: false,
   icon_size: 48,
   baskets: [],
@@ -66,6 +78,12 @@ const ACCENT_LABELS = {
 };
 const ICON_SIZE_MIN = 24;
 const ICON_SIZE_MAX = 128;
+// 频谱的三种造型 / 五套配色 / 三档宽度（设置面板的选项顺序也按这个来）
+const VIZ_STYLES = ['bars', 'mirror', 'dots', 'blocks', 'line'];
+const VIZ_THEMES = ['aurora', 'ocean', 'sunset', 'mint', 'mono'];
+const VIZ_WIDTHS = ['narrow', 'medium', 'wide'];
+const VIZ_POSITIONS = ['dock', 'bottom', 'center', 'top'];
+const VIZ_ALIGNS = ['center', 'left', 'right'];
 const DOCK_MAGNIFY_MIN = 0;    // 不放大
 const DOCK_MAGNIFY_MAX = 100;  // 最大放大一倍
 const DOCK_HIDE_DELAY_MIN = 100;
@@ -227,6 +245,17 @@ function mergedSettings(raw) {
     : DEFAULTS.theme_mode;
   out.reduce_motion =
     typeof raw.reduce_motion === 'boolean' ? raw.reduce_motion : DEFAULTS.reduce_motion;
+  out.music_viz =
+    typeof raw.music_viz === 'boolean' ? raw.music_viz : DEFAULTS.music_viz;
+  out.viz_style = VIZ_STYLES.includes(raw.viz_style) ? raw.viz_style : DEFAULTS.viz_style;
+  out.viz_theme = VIZ_THEMES.includes(raw.viz_theme) ? raw.viz_theme : DEFAULTS.viz_theme;
+  out.viz_width = VIZ_WIDTHS.includes(raw.viz_width) ? raw.viz_width : DEFAULTS.viz_width;
+  out.viz_reflect =
+    typeof raw.viz_reflect === 'boolean' ? raw.viz_reflect : DEFAULTS.viz_reflect;
+  out.viz_position = VIZ_POSITIONS.includes(raw.viz_position)
+    ? raw.viz_position
+    : DEFAULTS.viz_position;
+  out.viz_align = VIZ_ALIGNS.includes(raw.viz_align) ? raw.viz_align : DEFAULTS.viz_align;
   out.autostart = typeof raw.autostart === 'boolean' ? raw.autostart : DEFAULTS.autostart;
   out.icon_size = clampInt(raw.icon_size, DEFAULTS.icon_size, ICON_SIZE_MIN, ICON_SIZE_MAX);
   out.baskets = require('./baskets').normalizeBaskets(raw.baskets);
@@ -370,6 +399,11 @@ module.exports = {
   POPUP_HEIGHT_MIN,
   POPUP_HEIGHT_MAX,
   SETTINGS_BACKUP_SUFFIX,
+  VIZ_ALIGNS,
+  VIZ_POSITIONS,
+  VIZ_STYLES,
+  VIZ_THEMES,
+  VIZ_WIDTHS,
   backupPath,
   loadSettings,
   normalizeDockDisplay,

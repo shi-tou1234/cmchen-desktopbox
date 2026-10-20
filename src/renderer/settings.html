@@ -79,6 +79,41 @@
       </div>
 
       <div class="group">
+        <h3>音乐律动</h3>
+        <div class="row">
+          <label for="musicViz">显示频谱（Dock 上方一条，只在放声音时出现；QQ音乐/网易云/网页播放器都算）</label>
+          <input type="checkbox" id="musicViz">
+        </div>
+        <div class="row">
+          <label for="vizStyle">造型</label>
+          <select id="vizStyle"></select>
+        </div>
+        <div class="row">
+          <label for="vizTheme">配色</label>
+          <select id="vizTheme"></select>
+        </div>
+        <div class="row">
+          <label for="vizWidth">宽度</label>
+          <select id="vizWidth"></select>
+        </div>
+        <div class="row">
+          <label for="vizPosition">位置</label>
+          <select id="vizPosition"></select>
+        </div>
+        <div class="row">
+          <label for="vizAlign">水平对齐</label>
+          <select id="vizAlign"></select>
+        </div>
+        <div class="row">
+          <label for="vizReflect">柱子下方带倒影</label>
+          <input type="checkbox" id="vizReflect">
+        </div>
+        <div class="row" style="display:block">
+          <span class="hint">层级跟常驻 Dock 一样待在桌面层：桌面露出来时它在，任何应用窗口都能盖住它，不会压在别的程序上面。静音时画布是全空的，不会留一条空条。</span>
+        </div>
+      </div>
+
+      <div class="group">
         <h3>底部 Dock</h3>
         <div class="row">
           <label for="dockEnabled">显示 Dock（固定于桌面底部）</label>
