@@ -18,7 +18,7 @@ scripts/         启动器、图标生成、取证小工具（不参与打包）
 
 | 文件 | 负责 | 备注 |
 |---|---|---|
-| `main.js` | 窗口编排、Dock 收放/peek/热键、筐与文件搬运、托盘、IPC 注册、生命周期 | 逐步在瘦身：频谱、预览已拆出 |
+| `main.js` | 窗口编排、Dock 收放与层级、筐与文件搬运、托盘、IPC 注册、生命周期 | 逐步在瘦身：频谱、预览已拆出 |
 | `viz.js` | 音乐律动（1.6.0）：绘制窗 + 抓取窗 + FFT 中转 + 诊断日志 | `createVizController(deps)` 工厂，依赖从 main 注入 |
 | `preview.js` | QuickLook 空格预览：开窗、读文件、是否开着 | 同上，`createPreviewController(deps)` |
 | `windows.js` | 所有 BrowserWindow 的创建参数（材质、透明、层级、尺寸默认值） | 只描述窗口，不描述业务 |
@@ -26,7 +26,7 @@ scripts/         启动器、图标生成、取证小工具（不参与打包）
 | `store.js` | settings.json 读写、默认值、字段归一化 | 纯逻辑，有单测 |
 | `baskets.js` / `basketfiles.js` | 筐的数据模型 / 文件搬运管线（保护集、跨卷回退） | 纯逻辑，有单测 |
 | `organize.js` | 一键整理：扫描 → 分类规划 | 纯逻辑，有单测 |
-| `keyHold.js` / `mouseState.js` | 按住热键、全局鼠标状态 | 各自起一个侦察进程 |
+| `keyHold.js` / `mouseState.js` | 键位状态侦察（按下/松开的底层判定）、全局鼠标状态 | 各自起一个侦察进程 |
 | `zorder.js` / `windowLayer.js` | 置顶 / 桌面层摆放（SetWindowPos） | 通过一次性 PowerShell |
 | `shellIcons.js` | 快捷方式解析、图标抽取（不带小箭头） | 有缓存 |
 | `weather.js` | 天气取数（Open-Meteo）与城市解析 | 纯逻辑 + 网络 |
