@@ -105,6 +105,7 @@ function normalizeBasket(raw, fallbackId = 'b1') {
     dir: typeof raw.dir === 'string' ? raw.dir.trim() : '',
     // 颜色先保留用户已有的合法值；缺失/非法时置 null，交给 normalizeBaskets 统一分配
     color: isValidColor(raw.color),
+    pinned: Array.isArray(raw.pinned) ? [...new Set(raw.pinned.map(normalizePath).filter(Boolean))] : [],
     items
   };
 }
@@ -155,6 +156,7 @@ function removeItem(basket, rawPath) {
   const key = pathKey(rawPath || '');
   return {
     ...basket,
+    pinned: (basket.pinned || []).filter(item => pathKey(item) !== key),
     items: (basket.items || []).filter((item) => pathKey(item) !== key)
   };
 }

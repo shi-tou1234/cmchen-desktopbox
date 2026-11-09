@@ -1,7 +1,7 @@
 {
   "name": "deskbasket",
   "productName": "DeskBasket",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "桌面磨砂文件筐 ＋ 底部 Dock ＋ 实时天气（Electron 版，与 token 监测同架构）",
   "main": "src/main/main.js",
   "private": true,
@@ -11,7 +11,11 @@
     "dev": "electron . --dev",
     "pack": "electron-builder --dir",
     "dist": "electron-builder --win --x64 --publish never",
-    "make:icon": "python scripts/make_ico.py"
+    "make:icon": "python scripts/make_ico.py",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-native.ps1",
+    "predist": "npm run build:native",
+    "prepack": "npm run build:native",
+    "test:integration": "electron tests/integration/reliability.cjs"
   },
   "devDependencies": {
     "electron": "43.2.0",
@@ -26,8 +30,12 @@
     },
     "mac": {
       "target": [
-        { "target": "dmg" },
-        { "target": "zip" }
+        {
+          "target": "dmg"
+        },
+        {
+          "target": "zip"
+        }
       ],
       "category": "public.app-category.utilities"
     },
@@ -44,6 +52,7 @@
       "src/**/*",
       "assets/icon.ico",
       "assets/icon.png",
+      "assets/folders/*.webp",
       "package.json"
     ],
     "win": {
@@ -66,6 +75,12 @@
       "shortcutName": "DeskBasket",
       "artifactName": "DeskBasket-Setup-${version}.${ext}",
       "uninstallDisplayName": "DeskBasket 桌面文件筐"
-    }
+    },
+    "extraResources": [
+      {
+        "from": "native/DeskBasketState.exe",
+        "to": "native/DeskBasketState.exe"
+      }
+    ]
   }
 }

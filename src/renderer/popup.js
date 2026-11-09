@@ -8,6 +8,16 @@ let homeView = null;   // 初始视图（从筐导航出去后能回来）
 let iconSize = 48;
 // 图标请求 96px 源：150% 缩放下 48px 源是糊的（与 Dock 的预热/缓存键统一）
 const ICON_REQUEST_PX = 96;
+// 仅为可视区域附近的条目取系统图标，长文件夹不同时发起几百次 Shell 请求。
+const iconObserver = new IntersectionObserver(records => {
+  for (const record of records) {
+    if (!record.isIntersecting) continue;
+    iconObserver.unobserve(record.target);
+    const load = record.target.__loadIcon;
+    delete record.target.__loadIcon;
+    if (load) load(0);
+  }
+}, { rootMargin: '80px' });
 let selection = new Set();   // 选中的条目路径（筐视图支持多选：Ctrl 点选、Shift 连选、Ctrl+A 全选）
 let anchorIndex = -1;        // Shift 连选的起点
 let staggerNext = false;   // 下一次 render 要不要给格子做交错进场（只有"打开"那一次要）
@@ -15,6 +25,7 @@ let staggerTimer = 0;      // 摘 .stagger 的兜底定时器：等不到格子 
 let focusIndex = -1;       // 键盘光标停在哪个格子（roving tabindex：只有它进 Tab 序列，方向键在它之间挪）
 let reorderDrag = null;    // 进行中的拖动换位手势（见底部「弹窗内拖动换位」）
 let suppressClick = false; // 拖动换位松手后的那次 click 是"拖完了"，别当选择处理
+let closeStamp = 0;        // 收起后清空内容的"代次"：清之前对一下，期间又打开过就别清（见 releaseClosedContent）
 
 function currentEntries() {
   return (view && view.entries) || [];
@@ -105,6 +116,20 @@ function fallbackIcon() {
   return 'data:image/svg+xml;utf8,' + encodeURIComponent(full);
 }
 
+// 文件夹外观（Kimicon 图标包，12 张插画 = 6 造型 × 2 版本，见 src/main/folderskins.js）：
+// 主进程按目录分好一款并记进配置，这里只把 id 拼成图片路径。插画本身就是一个文件夹，
+// 所以它不坐彩色釉面底板（那种底是给文件图标垫色的），直接铺在格子上。
+const FOLDER_SKIN_DIR = '../../assets/folders/';
+
+function folderSkinUrl(id) {
+  return /^kimi-[0-9]{2}$/.test(String(id || '')) ? FOLDER_SKIN_DIR + id + '.webp' : '';
+}
+
+// 这一格用的是图标包还是系统图标（拖拽影子也要跟着换外观）
+function skinOf(entry) {
+  return entry && entry.isDir ? folderSkinUrl(entry.folderSkin) : '';
+}
+
 // ---------------------------------------------------------------- 渲染
 
 // 釉面底板的色相（宝石玻璃设计）：按扩展名给一类颜色（文档蓝、表格绿、图片粉…），
@@ -157,7 +182,11 @@ function makeCell(entry, index) {
 
   const img = document.createElement('img');
   img.draggable = false;   // 图标图片别自己可拖（原生图片拖拽会吃掉换位手势的指针事件）
-  if (entry.iconUrl) {
+  const skinUrl = skinOf(entry);
+  if (skinUrl) {
+    // 文件夹：直接画图标包里的那款（不用再问 shell 要系统图标，也不用异步补取）
+    img.src = skinUrl;
+  } else if (entry.iconUrl) {
     // 主进程已经把图标算好塞进载荷了：直接画，不用再等一次 IPC 和图片解码
     img.src = entry.iconUrl;
   } else {
@@ -166,20 +195,24 @@ function makeCell(entry, index) {
     // 异步补取：拖入文件的那一拍抽取可能临时失败（主进程已改成失败不缓存），
     // 这里失败/为空就隔 2.5 秒再试，最多两轮，图标总会跟上来
     const fillIcon = (attempt) => {
+      if (!cell.isConnected) return;
       api
         .getIcon(entry.path, ICON_REQUEST_PX)
         .then((dataUrl) => {
+          if (!cell.isConnected) return;
           if (dataUrl) img.src = dataUrl;
           else if (attempt < 2) setTimeout(() => fillIcon(attempt + 1), 2500);
         })
         .catch(() => {});
     };
-    fillIcon(0);
+    cell.__loadIcon = fillIcon;
+    iconObserver.observe(cell);
   }
 
-  // 图标坐在釉面底板上（宝石玻璃设计）：底板颜色跟文件类型走
+  // 图标坐在釉面底板上（宝石玻璃设计）：底板颜色跟文件类型走；
+  // 文件夹用图标包时底板只占位、不画底色（见 .plate.plain）
   const plate = document.createElement('div');
-  plate.className = 'plate';
+  plate.className = 'plate' + (skinUrl ? ' plain' : '');
   plate.style.setProperty('--h', String(hueFor(entry)));
   plate.append(img);
 
@@ -188,6 +221,11 @@ function makeCell(entry, index) {
   // 与桌面图标一致：快捷方式不带 .lnk/.url 后缀展示
   name.textContent = entry.name.replace(/\.(lnk|url)$/i, '');
 
+  if (entry.pinned) {
+    const badge = document.createElement('span');
+    badge.className = 'pin-badge'; badge.textContent = '★'; badge.title = '常用文件';
+    cell.append(badge);
+  }
   cell.append(plate, name);
 
   // 拖出去 = 把真文件作为系统拖拽源（落点收到一份复制，筐里保留——真要移出用右键
@@ -224,6 +262,7 @@ function makeCell(entry, index) {
     if (view.kind === 'basket') {
       items.push(
         { separator: true },
+        { key: 'pin', label: entry.pinned ? '取消常用固定' : '固定为常用（排在前面）' },
         { key: 'copy', label: '复制' },
         { key: 'trash', label: '删除（进回收站）' },
         { key: 'rename', label: '重命名' },
@@ -237,6 +276,9 @@ function makeCell(entry, index) {
         else api.openPath(entry.path);
       } else if (picked === 'reveal') {
         api.revealPath(entry.path);
+      } else if (picked === 'pin') {
+        const fresh = await api.pinItems(view.basketId, selectedEntries().map(e => e.path), !entry.pinned);
+        if (fresh) { view = fresh; homeView = fresh; render(); }
       } else if (picked === 'copy') {
         await copySelection();
       } else if (picked === 'trash') {
@@ -417,9 +459,12 @@ setInterval(async () => {
   if (reorderDrag) return;                                     // 正在拖动换位，别把拖着的格子换掉
   if (document.visibilityState !== 'visible') return;          // 窗口藏着就不白问
   try {
-    const fresh = await api.basketGet(view.basketId);
-    if (!fresh) return;
-    const paths = (a) => JSON.stringify((a.entries || []).map((entry) => entry.path));
+    const asked = view;                    // 记下这次问的是哪一版视图
+    const fresh = await api.basketGet(asked.basketId);
+    // 期间弹窗收起了（`view` 已被 releaseClosedContent 清成 null）或换了内容：
+    // 这一拍的结果作废，别再拿它去比对/重画
+    if (!view || view !== asked || !fresh) return;
+    const paths = (a) => JSON.stringify((a.entries || []).map((entry) => [entry.path, entry.pinned]));
     // 比对里加上 name：别处（设置面板）改了筐名，2 秒内标题与「⌂ 筐名」跟着刷新（C-1）。
     // 仍在原来这一次请求里比，不新增轮询，叠不出请求循环。
     if (fresh.name !== view.name || paths(view) !== paths(fresh)) {
@@ -457,6 +502,7 @@ function render(navDirection) {
   clearTimeout(staggerTimer);
   staggerTimer = 0;
   grid.classList.remove('stagger');
+  iconObserver.disconnect();
   grid.innerHTML = '';
 
   const entries = view.entries || [];
@@ -521,6 +567,7 @@ async function navigate(target, direction) {
 
 async function reloadHome() {
   // 筐内容被移除后刷新当前视图
+  if (!view) return;   // 收起了（内容已被 releaseClosedContent 清空）：没有视图可刷
   if (view.kind === 'basket') {
     const fresh = await api.popupReady();
     if (fresh) {
@@ -717,7 +764,7 @@ function liftCell(drag, event) {
   ghostImg.draggable = false;
   if (img) ghostImg.src = img.src;
   const ghostPlate = document.createElement('div');
-  ghostPlate.className = 'plate';
+  ghostPlate.className = 'plate' + (skinOf(drag.entry) ? ' plain' : '');
   ghostPlate.style.setProperty('--h', String(hueFor(drag.entry)));
   ghostPlate.append(ghostImg);
   const ghostName = document.createElement('div');
@@ -856,10 +903,9 @@ function reorderDragMove(event) {
     drag.handedOff = true;
     clearReorderDrag();          // 占位框归位、影子退场（OS 拖拽自己的影子马上顶上）
     api.startItemDrag(drag.entry.path);
-    // 拖出去 = **移出**（1.4.3）：主进程等松手后把筐里原件收进回收站（可恢复），
-    // 落点的复制归用户——净效果和资源管理器同盘拖动一致。误拖了？回收站找得回来。
+    // 没有原生成功回执，不删除源文件；取消或失败同样安全。
     api.dragOutItem(view.basketId, drag.entry.path);
-    setStatus('拖出 = 移出到落点，筐里不再保留（误拖可从回收站找回）');
+    setStatus('拖出按复制处理，原件保留。需要移动请用右键「移出到桌面」。');
     statusHoldUntil = Date.now() + 6000;
     return;
   }
@@ -1059,6 +1105,7 @@ function syncCardRadius() {
 // 铺开一份内容并播"从图标抽出来"的动画。
 // 图标已经在载荷里（主进程算好的 dataURL），所以这一帧就是终态、没有待解码的图片。
 function showPayload(payload) {
+  closeStamp += 1;   // 有新内容了：作废还在排队的那次"收起后清空"
   view = payload;
   homeView = payload;
   selection = new Set();
@@ -1101,7 +1148,32 @@ function showPayload(payload) {
 }
 
 // 主进程要收窗口时先让我们播"收回"动画
-if (api.onPopupClosing) api.onPopupClosing(() => document.body.classList.add('collapsed'));
+if (api.onPopupClosing) {
+  api.onPopupClosing(() => {
+    document.body.classList.add('collapsed');
+    releaseClosedContent();
+  });
+}
+
+// 收起之后把格子整片还回去（内存）：窗口是复用的，收起只是 hide——DOM 和解码过的图标位图
+// 会一直躺在渲染进程里。一个装了几百个条目的筐，光这一步就是几十 MB。下次打开主进程会把
+// 完整载荷重新推过来（onPopupData），所以清掉不影响任何功能。
+// 等收起动画放完再清（清早了会看见内容在收缩途中先空掉）；期间又被打开就作废这次清理。
+function releaseClosedContent() {
+  const stamp = ++closeStamp;
+  setTimeout(() => {
+    if (closeStamp !== stamp) return;                        // 期间又打开了：新内容留着
+    if (!document.body.classList.contains('collapsed')) return;
+    iconObserver.disconnect();
+    el('grid').replaceChildren();
+    view = null;
+    homeView = null;
+    selection = new Set();
+    anchorIndex = -1;
+    focusIndex = -1;
+    clearReorderDrag();
+  }, 320);
+}
 // 弹窗窗口是复用的：新内容从这里送进来（不用重新加载页面，动画从第一帧就顺）
 if (api.onPopupData) api.onPopupData((payload) => {
   if (payload) showPayload(payload);

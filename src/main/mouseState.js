@@ -16,6 +16,7 @@
 
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
+const path = require('node:path');
 
 // 固定字面量：不按 PATH 挑可执行文件，避免被换成别的程序（与 windowLayer / shellIcons 一致）
 const POWERSHELL_EXE = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
@@ -42,6 +43,51 @@ public static class DeskBasketMouse {
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X; public int Y; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindow(IntPtr hWnd, uint command);
+
+    [DllImport("user32.dll")]
+    public static extern int GetWindowLong(IntPtr hWnd, int index);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attribute, out int value, int size);
+
+    static bool Contains(RECT rect, POINT point) {
+        return point.X >= rect.Left && point.X < rect.Right && point.Y >= rect.Top && point.Y < rect.Bottom;
+    }
+
+    // WindowFromPoint 跳过鼠标穿透的 Dock；改为检查它前面的窗口，避免误把覆盖它的应用当成 Dock。
+    public static bool DockExposed(IntPtr dock, POINT point) {
+        RECT rect;
+        if (dock == IntPtr.Zero || !IsWindowVisible(dock) || IsIconic(dock) ||
+            !GetWindowRect(dock, out rect) || !Contains(rect, point)) return false;
+        IntPtr above = GetWindow(dock, 3); // GW_HWNDPREV：真实 Z 序里比 Dock 更靠前的窗口
+        for (int count = 0; above != IntPtr.Zero && count < 2048; count++) {
+            int cloaked;
+            bool hiddenDesktop = DwmGetWindowAttribute(above, 14, out cloaked, 4) == 0 && cloaked != 0;
+            if (IsWindowVisible(above) && !IsIconic(above) && !hiddenDesktop &&
+                (GetWindowLong(above, -20) & 0x20) == 0 &&
+                GetWindowRect(above, out rect) && Contains(rect, point)) return false;
+            above = GetWindow(above, 3);
+        }
+        return above == IntPtr.Zero;
+    }
+
     [DllImport("user32.dll")]
     public static extern bool GetCursorPos(out POINT p);
 
@@ -64,7 +110,28 @@ public static class DeskBasketMouse {
         return buffer.ToString();
     }
 
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+    [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public int Size; public RECT Monitor; public RECT Work; public uint Flags; }
+    [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    public static bool Fullscreen() {
+        IntPtr hwnd = GetForegroundWindow();
+        if (hwnd == IntPtr.Zero || IsIconic(hwnd)) return false;
+        string cls = ClassOf(hwnd);
+        if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd") return false;
+        uint pid; GetWindowThreadProcessId(hwnd, out pid);
+        if (pid.ToString() == Environment.GetEnvironmentVariable("DESKBASKET_PARENT_PID")) return false;
+        RECT rect; if (!GetWindowRect(hwnd, out rect)) return false;
+        MONITORINFO info = new MONITORINFO(); info.Size = Marshal.SizeOf(info);
+        if (!GetMonitorInfo(MonitorFromWindow(hwnd, 2), ref info)) return false;
+        return Math.Abs(rect.Left-info.Monitor.Left) <= 2 && Math.Abs(rect.Top-info.Monitor.Top) <= 2 &&
+            Math.Abs(rect.Right-info.Monitor.Right) <= 2 && Math.Abs(rect.Bottom-info.Monitor.Bottom) <= 2;
+    }
+
     public static string Report() {
+        // 所有窗口矩形与光标都使用物理像素；主进程用 screenToDipPoint 转成 Electron DIP。
+        SetThreadDpiAwarenessContext(new IntPtr(-4));
         int bits = 0;
         // 取最高位 0x8000 = "此刻按着"。
         // 别用最低位 0x0001：那是"上一次调用之后按过"的锁存位，这个循环每 125ms 自己查一次，
@@ -78,7 +145,10 @@ public static class DeskBasketMouse {
         IntPtr root = GetAncestor(WindowFromPoint(point), 2);
         string cls = ClassOf(root);
         int over = (cls == "Progman" || cls == "WorkerW") ? 1 : 0;
-        return bits.ToString() + ":" + over.ToString();
+        long handle;
+        Int64.TryParse(Environment.GetEnvironmentVariable("DESKBASKET_MOUSE_DOCK"), out handle);
+        int exposed = DockExposed(new IntPtr(handle), point) ? 1 : 0;
+        return bits.ToString() + ":" + over.ToString() + ":" + exposed.ToString() + ":" + point.X + ":" + point.Y + ":" + root.ToInt64() + ":" + (Fullscreen() ? "1" : "0");
     }
 }
 '@
@@ -94,10 +164,17 @@ while ($true) {
 // 一行报数 → { held, overDesktop }；不认识的行返回 null（协议出错不该当成"没拖拽"）
 function parseReport(line) {
   const text = String(line === undefined || line === null ? '' : line).trim();
-  const match = /^([0-9]{1,3}):([01])$/.exec(text);
+  const match = /^([0-9]{1,3}):([01])(?::([01]):(-?\d+):(-?\d+)(?::(\d+)(?::([01]))?)?)?$/.exec(text);
   if (!match) return null;
   const bits = Number(match[1]);
-  return { held: (bits & 3) !== 0, overDesktop: match[2] === '1' };
+  const report = { held: (bits & 3) !== 0, overDesktop: match[2] === '1' };
+  if (match[3] !== undefined) {
+    report.dockExposed = match[3] === '1';
+    report.pointer = { x: Number(match[4]), y: Number(match[5]) };
+    if (match[6] !== undefined) report.rootHandle = match[6];
+    if (match[7] !== undefined) report.fullscreen = match[7] === '1';
+  }
+  return report;
 }
 
 let child = null;
@@ -107,6 +184,7 @@ let startedAt = 0;
 let buffer = '';
 let idleTimer = null;
 let announced = false;
+let dockHandle = '0';
 
 function forget(proc) {
   if (child !== proc) return;
@@ -134,18 +212,26 @@ function stop() {
   }
 }
 
-function ensureRunning() {
+function ensureRunning(options = {}) {
+  const want = options.dockHandle === undefined ? dockHandle : String(options.dockHandle);
+  if (want !== dockHandle) {
+    stop();
+    dockHandle = /^\d+$/.test(want) ? want : '0';
+  }
   if (idleTimer) {
     clearTimeout(idleTimer);
     idleTimer = null;
   }
   if (child) return;
   if (process.platform !== 'win32' || !fs.existsSync(POWERSHELL_EXE)) return;
+  const packagedHelper = path.join(process.resourcesPath || '', 'native', 'DeskBasketState.exe');
+  const helper = fs.existsSync(packagedHelper) ? packagedHelper : path.resolve(__dirname, '../../native/DeskBasketState.exe');
+  const native = fs.existsSync(helper);
   let proc;
   try {
     proc = spawn(
-      POWERSHELL_EXE,
-      [
+      native ? helper : POWERSHELL_EXE,
+      native ? ['mouse'] : [
         '-NoProfile',
         '-NonInteractive',
         '-ExecutionPolicy',
@@ -153,7 +239,11 @@ function ensureRunning() {
         '-EncodedCommand',
         Buffer.from(SCRIPT, 'utf16le').toString('base64')
       ],
-      { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }
+      {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: { ...process.env, DESKBASKET_MOUSE_DOCK: dockHandle, DESKBASKET_PARENT_PID: String(process.pid) }
+      }
     );
   } catch (_) {
     return;
@@ -205,6 +295,10 @@ function poll(now = Date.now()) {
       known: true,
       held: latest.held,
       overDesktop: latest.overDesktop,
+      dockExposed: latest.dockExposed === true,
+      fullscreen: latest.fullscreen === true,
+      pointer: latest.pointer || null,
+      rootHandle: latest.rootHandle || null,
       grace: false,
       at: lastLineAt
     };

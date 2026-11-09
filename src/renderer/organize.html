@@ -55,7 +55,7 @@
     color: var(--dim-fg); font-size: 13px; cursor: pointer;
   }
   .xbtn:hover { background: rgba(226, 72, 72, 0.18); color: #ff8484; }
-  main { flex: 1 1 auto; overflow-y: auto; padding: 12px 14px; }
+  main { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 12px 14px; }
   main::-webkit-scrollbar { width: 9px; }
   main::-webkit-scrollbar-thumb { background: rgba(128, 132, 144, 0.4); border-radius: 8px; border: 2.5px solid transparent; background-clip: padding-box; }
 
@@ -129,6 +129,18 @@
     <span class="sp"></span>
     <button class="xbtn" id="btnClose" title="关闭">✕</button>
   </header>
+  <details id="rulesPanel" style="flex:0 0 auto;max-height:260px;overflow:auto;padding:10px 14px;border-bottom:1px solid var(--hairline)">
+    <summary>整理规则与排除项</summary>
+    <p style="font-size:12px">规则从上到下匹配；扩展名与关键词同时填写时必须同时满足。未命中继续使用默认分类，文件夹保持原位。</p>
+    <div id="rulesList"></div>
+    <button class="ghost" id="addRule">添加规则</button>
+    <label style="display:block;font-size:12px;margin-top:8px">忽略文件名（每行一项，支持 * 和 ?）<textarea id="excludeRules" rows="3" style="display:block;width:100%"></textarea></label>
+    <button class="ghost" id="saveRules">保存规则并重新预览</button>
+  </details>
+  <div id="previousUndo" style="display:none;padding:8px 14px;font-size:12px">
+    上次整理仍可撤销。<button class="ghost" id="undoPrevious">撤销上次整理</button>
+    <button class="ghost" id="forgetPrevious">保留结果，结束上次撤销记录</button>
+  </div>
   <main id="main"></main>
   <footer>
     <span class="note" id="note"></span>

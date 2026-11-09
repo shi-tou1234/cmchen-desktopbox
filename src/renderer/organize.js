@@ -12,18 +12,55 @@ const REASONS = {
   dir: '文件夹（保持原位）',
   missing: '文件已不存在',
   registered: '已在 Dock 或别的筐里',
-  hidden: '隐藏/系统文件'
+  hidden: '隐藏/系统文件',
+  excluded: '符合排除规则'
 };
 
 let plan = null;
 let chosen = new Set();          // 本轮勾选的类 id
 let executed = false;
+let busy = false;
+function renderRules() {
+  const host = el('rulesList'); host.replaceChildren();
+  for (const rule of plan.rules || []) addRuleRow(rule);
+  el('excludeRules').value = (plan.exclude || []).join('\n');
+  el('previousUndo').style.display = plan.undoable ? '' : 'none';
+  el('forgetPrevious').dataset.confirm = ''; el('forgetPrevious').textContent = '保留结果，结束上次撤销记录';
+}
+function addRuleRow(rule = {}) {
+  const row = document.createElement('div'); row.className = 'rule-row'; row.style.cssText = 'display:grid;grid-template-columns:18px repeat(3,minmax(0,1fr)) repeat(3,24px);align-items:center;gap:4px;margin:6px 0';
+  for (const [key, placeholder] of [['extensions','扩展名：pdf,docx'], ['keyword','文件名包含（可空）'], ['target','目标筐名称']]) {
+    const input = document.createElement('input'); input.dataset.key = key; input.placeholder = placeholder; input.value = rule[key] || ''; input.maxLength = key === 'target' ? 24 : 160; input.style.cssText = 'width:100%;min-width:0;box-sizing:border-box'; row.append(input);
+  }
+  const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = rule.enabled !== false; enabled.dataset.key = 'enabled'; enabled.title = '启用规则'; row.prepend(enabled);
+  for (const [label, direction] of [['↑', -1], ['↓', 1]]) {
+    const button = document.createElement('button'); button.textContent = label; button.style.padding = '4px'; button.title = '调整优先级';
+    button.onclick = () => { const sibling = direction < 0 ? row.previousElementSibling : row.nextElementSibling; if (sibling) { if (direction < 0) row.parentNode.insertBefore(row, sibling); else row.parentNode.insertBefore(sibling, row); } }; row.append(button);
+  }
+  const remove = document.createElement('button'); remove.textContent = '×'; remove.style.padding = '4px'; remove.title = '删除规则'; remove.onclick = () => row.remove(); row.append(remove); el('rulesList').append(row);
+}
+async function reloadPlan() { plan = await api.organizePlan(); chosen.clear(); executed = false; renderPlan(); renderRules(); }
+async function undoNow() {
+  if (busy) return;
+  busy = true; el('btnUndo').disabled = true; el('undoPrevious').disabled = true;
+  try {
+    const result = await api.organizeUndo();
+    await reloadPlan();
+    el('note').textContent = '已撤回 ' + result.done + ' 项；待处理 ' + result.remaining + ' 项。' + (result.failed || []).map(f => f.name + '：' + f.reason).join('；');
+    el('note').title = el('note').textContent;
+  } catch (error) { el('note').textContent = '撤销失败：' + error.message; }
+  finally { busy = false; el('undoPrevious').disabled = false; refreshGo(); }
+}
+
 
 function closeWindow() {
+  if (busy) return;
   window.close();
 }
 
 function renderPlan() {
+  el('btnGo').textContent = '开始整理'; el('btnCancel').style.display = ''; el('btnCancel').disabled = false;
+  el('btnUndo').style.display = 'none';
   const main = el('main');
   main.innerHTML = '';
   el('sub').textContent = plan.root ? '整理目标：' + plan.root : '';
@@ -119,13 +156,15 @@ function refreshGo() {
   const total = plan.groups
     .filter((g) => chosen.has(g.id))
     .reduce((sum, g) => sum + g.count, 0);
-  el('btnGo').disabled = total === 0;
+  el('btnGo').disabled = total === 0 || plan.undoable || busy;
   el('note').textContent = total
-    ? '将把 ' + total + ' 个文件按类搬进各自的筐（文件会移动进筐的文件夹，可撤销）'
+    ? '将把 ' + total + ' 个文件按类搬进各自的筐（文件移入目标筐；重名自动编号，不覆盖；可撤销）'
     : '勾选至少一类再开始';
 }
 
 async function execute() {
+  if (busy) return; busy = true;
+  el('btnClose').disabled = true; el('rulesPanel').inert = true;
   el('btnGo').disabled = true;
   el('btnCancel').disabled = true;
   el('note').textContent = '正在整理…（文件移动可能要几秒）';
@@ -138,7 +177,7 @@ async function execute() {
     el('note').textContent = '整理失败：' + (error && error.message || error);
     el('note').className = 'note error';
     el('btnCancel').disabled = false;
-  }
+  } finally { busy = false; el('btnClose').disabled = false; el('rulesPanel').inert = false; if (!executed) el('btnGo').disabled = false; }
 }
 
 function renderResult(outcome) {
@@ -157,7 +196,7 @@ function renderResult(outcome) {
     row.innerHTML = '<b>' + escapeHtml(result.name) + '</b>：' + escapeHtml(how) +
       '，现 ' + result.total + ' 项' + (result.failed.length ? '，<span class="warn">失败 ' + result.failed.length + '</span>' : '');
     if (result.moved) anyMoved = true;
-    for (const problem of result.failed) {
+    for (const problem of [...result.failed, ...(result.notes || [])]) {
       const detail = document.createElement('div');
       detail.className = 'warn';
       detail.style.fontSize = '11px';
@@ -167,9 +206,10 @@ function renderResult(outcome) {
     box.append(row);
   }
   main.append(box);
+  el('previousUndo').style.display = 'none';
   el('btnGo').textContent = '完成';
   el('btnGo').disabled = false;
-  el('btnGo').onclick = closeWindow;
+
   el('btnCancel').style.display = 'none';
   const undoable = outcome.undoable && anyMoved;
   el('btnUndo').style.display = '';
@@ -177,19 +217,7 @@ function renderResult(outcome) {
   el('note').textContent = undoable
     ? '整理完成。反悔了就点「撤销整理」，文件会原路搬回桌面。'
     : '整理完成。';
-  el('btnUndo').onclick = async () => {
-    el('btnUndo').disabled = true;
-    el('note').textContent = '正在撤回…';
-    try {
-      const undone = await api.organizeUndo();
-      el('note').textContent = '已搬回 ' + undone.done + ' 个文件' +
-        (undone.skipped ? '，' + undone.skipped + ' 个因原位被占/文件丢失跳过' : '');
-      el('btnUndo').style.display = 'none';
-    } catch (error) {
-      el('note').textContent = '撤销失败：' + (error && error.message || error);
-      el('note').className = 'note error';
-    }
-  };
+  el('btnUndo').onclick = undoNow;
 }
 
 function escapeHtml(text) {
@@ -207,10 +235,24 @@ window.addEventListener('keydown', (event) => {
 
 (async () => {
   try {
-    plan = await api.organizePlan();
-    renderPlan();
+    await reloadPlan();
   } catch (error) {
     el('note').textContent = '扫描失败：' + (error && error.message || error);
     el('note').className = 'note error';
   }
 })();
+
+el('addRule').onclick = () => addRuleRow();
+el('saveRules').onclick = async () => {
+  if (busy) return;
+  const rules = [...document.querySelectorAll('.rule-row')].map(row => Object.fromEntries([...row.querySelectorAll('input')].map(input => [input.dataset.key, input.type === 'checkbox' ? input.checked : input.value])));
+  if (rules.some(r => !r.target.trim() || (!r.extensions.trim() && !r.keyword.trim()))) { el('note').textContent = '每条规则需填写目标筐，以及扩展名或关键词。'; return; }
+  try { plan = await api.organizeRules(rules, el('excludeRules').value.split(/\r?\n/)); chosen.clear(); executed = false; renderPlan(); renderRules(); }
+  catch (error) { el('note').textContent = '保存失败：' + error.message; }
+};
+el('undoPrevious').onclick = undoNow;
+el('forgetPrevious').onclick = async () => {
+  if (busy) return;
+  if (el('forgetPrevious').dataset.confirm !== 'yes') { el('forgetPrevious').dataset.confirm = 'yes'; el('forgetPrevious').textContent = '再次点击确认结束（不移动文件）'; return; }
+  await api.organizeForgetUndo(); await reloadPlan();
+};

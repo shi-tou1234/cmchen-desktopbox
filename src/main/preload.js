@@ -92,6 +92,17 @@ contextBridge.exposeInMainWorld('deskbasket', {
   // 点击 Dock 条目：指向文件夹的弹文件夹弹窗（再点一次收起），其余交给系统打开
   activateDockItem: (itemPath, itemCenterX) =>
     ipcRenderer.invoke('dock:activate', { path: itemPath, itemCenterX }),
+  // Dock 空白处鼠标穿透：页面的命中测试结果推给主进程——
+  // true = 指针正压在某个条目上（窗口要把鼠标接回来），false = 在空白处（整窗穿透，别挡桌面）
+  setDockInteractive: (interactive) =>
+    ipcRenderer.send('dock:interactive', { interactive: Boolean(interactive) }),
+  // 主进程每 ~80ms 推一次光标位置（窗口内坐标）：光标静止时不会有 mousemove，
+  // 窗口滑到它底下之后页面得靠这一拍重新认一次指针在谁头上
+  onDockPointerProbe: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on('dock:pointer', listener);
+    return () => ipcRenderer.removeListener('dock:pointer', listener);
+  },
   // 点击 Dock 里的筐（文件夹）：切换对应弹窗
   toggleFolder: (payload, itemCenterX) =>
     ipcRenderer.invoke('folder:toggle', { ...payload, itemCenterX }),
@@ -132,6 +143,9 @@ contextBridge.exposeInMainWorld('deskbasket', {
   openOrganizer: () => ipcRenderer.invoke('window:organize'),
   organizePlan: () => ipcRenderer.invoke('organize:plan'),
   organizeExecute: (groups) => ipcRenderer.invoke('organize:execute', { groups }),
+  organizeRules: (rules, exclude) => ipcRenderer.invoke('organize:rules', { rules, exclude }),
+  organizeForgetUndo: () => ipcRenderer.invoke('organize:forget-undo'),
+  pinItems: (basketId, paths, pinned) => ipcRenderer.invoke('basket:pin', { basketId, paths, pinned }),
   organizeUndo: () => ipcRenderer.invoke('organize:undo'),
   // 空格预览 QuickLook（1.4.0）
   previewOpen: (payload) => ipcRenderer.invoke('preview:open', payload),
@@ -162,6 +176,8 @@ contextBridge.exposeInMainWorld('deskbasket', {
   cancelRename: () => ipcRenderer.invoke('rename:cancel'),
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', { patch }),
   resetSettings: () => ipcRenderer.invoke('settings:reset'),
+  // 性能面板：整程序所有进程的内存合计（主进程 app.getAppMetrics 汇总，见 main.js）
+  perfMetrics: () => ipcRenderer.invoke('perf:metrics'),
   // 「目录 → 浏览…」：主进程弹目录对话框，返回所选绝对路径（取消返回 null）。
   // purpose='baskets' 时是选筐的文件目录，标题与默认落点都不一样
   pickSourceDir: (purpose) => ipcRenderer.invoke('dir:pick', { purpose }),

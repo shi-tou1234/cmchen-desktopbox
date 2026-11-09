@@ -46,6 +46,12 @@ function createVizController(deps) {
   let vizCaptureWindow = null;
   let vizFirstBand = false;
   let vizBandCount = 0;
+  // 上一帧的峰值：静音（整帧全零）只转发"刚开始静音"那一帧，之后的重复静音帧全部丢在这里。
+  // 抓取窗静音时降到 4Hz 还在推零帧，全转发的话绘制窗会被一直"喂醒"、60fps 画空画布——
+  // 静音降频就白做了。丢帧之后绘制窗那边的 lastAt 停更，它自己会淡出、停帧（见 viz.js）。
+  let vizLastPeak = -1;
+  let drawIdleTimer = null;
+  let latestBands = null;
 
   // 一份小日志（上限 128KB）：apply / show / 桌面层放置 / 取流状态 / 首帧与每 250 帧的峰值。
   function vizLog(text) {
@@ -137,19 +143,23 @@ function createVizController(deps) {
       vizWindow = null;
       try { win.destroy(); } catch (_) { /* 可能已经没了 */ }
       setTimeout(() => {
-        if (vizEnabled() && !vizWindow) ensureVizWindow();
+        if (vizEnabled() && vizLastPeak > 0 && !vizWindow) ensureVizWindow();
       }, 1500);
     });
     win.once('ready-to-show', () => {
       if (win.isDestroyed()) return;
       win.__vizReady = true;   // 页面画好了才允许 showInactive，否则会闪一下白底
+      if (!vizEnabled()) return;
       revealVizWindow(win);
+      if (latestBands) sendToDraw('viz:bands', latestBands);
     });
     // 兜底：极少数机器上 show:false 的窗口不发 ready-to-show，只挂那一个事件会让条子永远不出现
     win.webContents.on('did-finish-load', () => {
       if (win.isDestroyed()) return;
       win.__vizReady = true;
+      if (!vizEnabled()) return;
       revealVizWindow(win);
+      if (latestBands) sendToDraw('viz:bands', latestBands);
     });
     win.on('closed', () => {
       if (vizWindow === win) vizWindow = null;
@@ -201,6 +211,7 @@ function createVizController(deps) {
     attachDiagnostics(win, 'vizcap');
     vizFirstBand = false;
     vizBandCount = 0;
+    vizLastPeak = -1;   // 新抓取窗：静音去重从零开始（否则上一扇窗留下的 0 会把它的第一帧吞掉）
     winFactory.loadPage(win, 'viz-capture.html');
     // 抓取窗的渲染进程要是挂了（音频设备切换、驱动崩溃），整条频谱就永远没数据了。
     // 它藏在屏幕外没人会发现——这里自己重建一个。
@@ -226,10 +237,12 @@ function createVizController(deps) {
     const settings = getSettings();
     vizLog(`apply enabled=${vizEnabled()} width=${settings.viz_width} pos=${settings.viz_position} align=${settings.viz_align}`);
     if (vizEnabled()) {
-      const win = ensureVizWindow();
-      win.setBounds(vizGeometry());
+      if (!settings.low_memory || vizLastPeak > 0) {
+        const win = ensureVizWindow(); win.setBounds(vizGeometry());
+      }
       ensureVizCaptureWindow();   // 抓取窗常驻后台，平时不显
     } else {
+      clearTimeout(drawIdleTimer); drawIdleTimer = null; latestBands = null; vizLastPeak = -1;
       if (vizCaptureWindow && !vizCaptureWindow.isDestroyed()) vizCaptureWindow.destroy();
       vizCaptureWindow = null;
       if (vizWindow && !vizWindow.isDestroyed()) vizWindow.destroy();
@@ -268,6 +281,21 @@ function createVizController(deps) {
       if (bands.length !== VIZ_BAND_COUNT) return;
       let peak = 0;
       for (const value of bands) if (value > peak) peak = value;
+      // 静音重复帧：不转发（见 vizLastPeak 的说明）。第一帧静音要留，绘制窗靠它开始淡出。
+      latestBands = bands;
+      if (peak > 0) {
+        clearTimeout(drawIdleTimer); drawIdleTimer = null;
+        ensureVizWindow();
+      } else if (getSettings().low_memory && !drawIdleTimer && vizWindow) {
+        drawIdleTimer = setTimeout(() => {
+          drawIdleTimer = null;
+          if (vizLastPeak !== 0) return;
+          if (vizWindow && !vizWindow.isDestroyed()) vizWindow.destroy();
+          vizWindow = null;
+        }, 5000);
+      }
+      if (peak === 0 && vizLastPeak === 0) return;
+      vizLastPeak = peak;
       if (!vizFirstBand) {
         vizFirstBand = true;
         vizLog(`bands first peak=${peak}`);

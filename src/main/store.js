@@ -20,6 +20,12 @@ const DEFAULTS = {
   accent_mode: 'off',          // off=完全透明（默认，领导指定）／acrylic=系统磨砂玻璃／blur=轻量模糊
   theme_mode: 'auto',          // auto=按壁纸亮度切深浅色／dark／light（见 theme.js）
   reduce_motion: false,        // 减弱动画：关掉入场/翻页/弹跳等装饰动画（保留悬停放大——它用 dock_magnify 单独控制）
+  idle_release: true,         // 空闲释放：筐弹窗/天气卡收起后闲置一会儿就销毁窗口，把渲染进程的内存还给系统（关掉＝一直留着热窗口，重新打开更快但常驻内存高）
+  low_memory: true,
+  focus_manual: false,
+  focus_fullscreen: true,
+  organize_rules: [],
+  organize_exclude: ['~$*', '*.tmp', '*.crdownload', '*.part'],
   music_viz: true,            // 音乐律动：屏幕底部一条随系统外放音量跳动的频谱条（QQ音乐/网易云/网页播放器都算）
   // 频谱外形/配色（设置面板里可改）：
   //   viz_style   bars=柱状（默认）／mirror=上下对称柱／wave=连贯波形
@@ -34,6 +40,10 @@ const DEFAULTS = {
   viz_align: 'center',         // 水平对齐：center / left / right
   autostart: false,
   icon_size: 48,
+  // 弹窗里的文件夹用哪套图标：'kimi' = Kimicon 图标包（默认）／'system' = Windows 原图标。
+  // folder_skins 是"每个文件夹分到哪一款"的账本（见 folderskins.js），分配一次就不再变。
+  folder_skin: 'kimi',
+  folder_skins: {},
   baskets: [],
   shortcuts_dir: '',           // 收录来源目录（Dock 自动收录、候选清单、文件对话框默认落点）；空 = 系统桌面
   basket_dir: basketfiles.DEFAULT_DIR,   // 筐的文件目录：每个筐在它下面有一个真实文件夹（见 basketfiles）
@@ -49,16 +59,6 @@ const DEFAULTS = {
   dock_items: [],
   dock_aliases: {},            // 快捷方式在 Dock 上的显示名：只存设置，绝不动磁盘上的文件名
   dock_hotkey: 'F9',           // Dock 唤出/收起的全局热键（'' = 关闭；双击 Ctrl 那种要底层钩子，Electron 做不了）
-  // 按住即抬（peek）：按住就把 Dock 抬到最上面并滑出来，松手按原设置落回。
-  // 默认 Ctrl+Win+Z：三个键都在左手（Ctrl 与 Z 同侧、Win 用拇指），右手全程不用离开鼠标；
-  // 系统留给自己的只有 Win+E / Win+D / Win+R 这类**不带 Ctrl** 的组合，以及 Win+Ctrl+Q
-  // （快速助手）等少数几个，而 Ctrl+Win+Z 不在其中，输入法的中英切换（Ctrl+Space /
-  // Shift+Space）也不是它。真机实测这台机器上 `Ctrl+Win+Z` 空闲、注册成功。
-  // 另外刻意避开 Ctrl+Q、Ctrl+W 这种"退出/关窗"的常用键。
-  // 键盘带 F13～F24 那排键的话填 F13 更硬（Windows 与所有应用最多只绑到 F12）。
-  // 'Win' / 'Super' / 'Meta' 三种写法这里都认（见 keyHold.js 的修饰键表）。
-  // '' = 关闭。合法性由 keyHold.specFor 判，认不出来会退回这个默认值（见 main.js 的设置补丁）。
-  dock_peek_hotkey: 'Ctrl+Win+Z',
   dock_specials: ['windows', 'thispc', 'recyclebin', 'weather'],   // windows = 开始菜单（最左）  // 系统虚拟项：此电脑、回收站、天气
   dock_removed: [],
   // 天气城市：只存一个名字，经纬度每次启动重新查（一次地理编码请求，代价极低，
@@ -78,6 +78,8 @@ const ACCENT_LABELS = {
 };
 const ICON_SIZE_MIN = 24;
 const ICON_SIZE_MAX = 128;
+// 弹窗里文件夹图标的两种外观（设置面板里可换）
+const FOLDER_SKIN_MODES = ['kimi', 'system'];
 // 频谱的三种造型 / 五套配色 / 三档宽度（设置面板的选项顺序也按这个来）
 const VIZ_STYLES = ['bars', 'mirror', 'dots', 'blocks', 'line'];
 const VIZ_THEMES = ['aurora', 'ocean', 'sunset', 'mint', 'mono'];
@@ -185,6 +187,21 @@ function normalizeAliases(raw) {
   return out;
 }
 
+// 文件夹外观的分配表：{ 绝对路径: Kimicon 下标 }。这里只校验"非负整数"——
+// 具体有几款由 folderskins.SKINS 说了算，越界的下标在渲染时会被当成没分配（回系统图标），
+// 以后图标包换数量也不用回来改配置。
+function normalizeFolderSkins(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    const target = normalizePath(key);
+    if (!target) continue;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) continue;
+    out[target] = value;
+  }
+  return out;
+}
+
 function clampInt(value, fallback, low, high) {
   if (typeof value !== 'number' || !Number.isInteger(value)) return fallback;
   if (value < low || value > high) return fallback;
@@ -245,6 +262,13 @@ function mergedSettings(raw) {
     : DEFAULTS.theme_mode;
   out.reduce_motion =
     typeof raw.reduce_motion === 'boolean' ? raw.reduce_motion : DEFAULTS.reduce_motion;
+  out.idle_release =
+    typeof raw.idle_release === 'boolean' ? raw.idle_release : DEFAULTS.idle_release;
+  for (const key of ['low_memory', 'focus_manual', 'focus_fullscreen']) {
+    out[key] = typeof raw[key] === 'boolean' ? raw[key] : DEFAULTS[key];
+  }
+  out.organize_rules = require('./organize').normalizeRules(raw.organize_rules).map(r => ({ ...r, extensions: r.extensions.join(',') }));
+  out.organize_exclude = Array.isArray(raw.organize_exclude) ? raw.organize_exclude.filter(x => typeof x === 'string').slice(0, 100).map(x => x.trim().slice(0, 160)).filter(Boolean) : [...DEFAULTS.organize_exclude];
   out.music_viz =
     typeof raw.music_viz === 'boolean' ? raw.music_viz : DEFAULTS.music_viz;
   out.viz_style = VIZ_STYLES.includes(raw.viz_style) ? raw.viz_style : DEFAULTS.viz_style;
@@ -258,6 +282,10 @@ function mergedSettings(raw) {
   out.viz_align = VIZ_ALIGNS.includes(raw.viz_align) ? raw.viz_align : DEFAULTS.viz_align;
   out.autostart = typeof raw.autostart === 'boolean' ? raw.autostart : DEFAULTS.autostart;
   out.icon_size = clampInt(raw.icon_size, DEFAULTS.icon_size, ICON_SIZE_MIN, ICON_SIZE_MAX);
+  out.folder_skin = FOLDER_SKIN_MODES.includes(raw.folder_skin)
+    ? raw.folder_skin
+    : DEFAULTS.folder_skin;
+  out.folder_skins = normalizeFolderSkins(raw.folder_skins);
   out.baskets = require('./baskets').normalizeBaskets(raw.baskets);
   out.dock_enabled =
     typeof raw.dock_enabled === 'boolean' ? raw.dock_enabled : DEFAULTS.dock_enabled;
@@ -277,7 +305,8 @@ function mergedSettings(raw) {
   );
   out.dock_items = normalizePathList(raw.dock_items);
   out.dock_hotkey = typeof raw.dock_hotkey === 'string' ? raw.dock_hotkey.trim().slice(0, 40) : DEFAULTS.dock_hotkey;
-  out.dock_peek_hotkey = typeof raw.dock_peek_hotkey === 'string' ? raw.dock_peek_hotkey.trim().slice(0, 40) : DEFAULTS.dock_peek_hotkey;
+  // 已退休的全局按住热键不再恢复；旧配置保存时一并迁出。
+  delete out.dock_peek_hotkey;
   out.shortcuts_dir = normalizeSourceDir(raw.shortcuts_dir);
   out.basket_dir = normalizeBasketDir(raw.basket_dir);
   out.dock_bottom_gap = clampInt(
@@ -363,7 +392,9 @@ function saveSettings(settings) {
   // 临时文件名是常量，且解析后必须仍在同一目录内。
   const tmp = path.resolve(root, `.settings-${process.pid}.tmp`);
   if (path.dirname(tmp) !== root) throw new Error('临时文件路径越界');
-  fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf8');
+  const fd = fs.openSync(tmp, 'w');
+  try { fs.writeFileSync(fd, JSON.stringify(merged, null, 2), 'utf8'); fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
   // 覆盖主文件之前，把「当前这份还能读出来的主文件」留一份 .bak（loadSettings 认的就是这份好文件）。
   // 原始文本只读一遍：这份 raw 既用来判断好坏（能 parse 才备份），也直接写进备份——
   // 不再为备份单独再 readFileSync 一次。备份失败不影响主写入——它只是多加一道保险，主文件已经原子落盘了。
@@ -392,6 +423,7 @@ module.exports = {
   DOCK_HIDE_DELAY_MIN,
   DOCK_MAGNIFY_MAX,
   DOCK_MAGNIFY_MIN,
+  FOLDER_SKIN_MODES,
   ICON_SIZE_MAX,
   ICON_SIZE_MIN,
   POPUP_WIDTH_MIN,
@@ -411,6 +443,7 @@ module.exports = {
   normalizeAlias,
   normalizeAliases,
   normalizeCity,
+  normalizeFolderSkins,
   normalizePath,
   normalizePathList,
   normalizeSourceDir,

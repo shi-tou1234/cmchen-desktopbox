@@ -9,6 +9,7 @@ src/main/        Electron 主进程（Node 环境）：窗口、IPC、文件、�
 src/renderer/    渲染层（浏览器环境）：每个窗口一个页面 + 若干脚本
 tests/           纯逻辑单测（node --test，不启动 Electron）
 scripts/         启动器、图标生成、取证小工具（不参与打包）
+assets/          图标资源：应用图标 + folders/ 下 12 张 Kimicon 文件夹插画（打包时按 package.json 的 files 带上）
 ```
 
 主进程和渲染层之间只有两条通路：`preload.js` 暴露的 `window.deskbasket.*`（invoke/send），
@@ -25,8 +26,9 @@ scripts/         启动器、图标生成、取证小工具（不参与打包）
 | `dockmodel.js` | Dock 的纯几何：布局、放大余量、落点、屏幕选择 | 纯函数，有单测 |
 | `store.js` | settings.json 读写、默认值、字段归一化 | 纯逻辑，有单测 |
 | `baskets.js` / `basketfiles.js` | 筐的数据模型 / 文件搬运管线（保护集、跨卷回退） | 纯逻辑，有单测 |
+| `folderskins.js` | 弹窗里文件夹的外观：把 12 款 Kimicon 分给各文件夹（同窗口不重款、分过的不再变） | 纯逻辑，有单测；图片在 `assets/folders/`，账本存 `settings.folder_skins` |
 | `organize.js` | 一键整理：扫描 → 分类规划 | 纯逻辑，有单测 |
-| `keyHold.js` / `mouseState.js` | 键位状态侦察（按下/松开的底层判定）、全局鼠标状态 | 各自起一个侦察进程 |
+| `mouseState.js` | 全局鼠标状态、Dock 在光标位置的真实 Z 序遮挡检查 | 复用同一个侦察进程，物理像素转 DIP；旧按住热键链路已移除 |
 | `zorder.js` / `windowLayer.js` | 置顶 / 桌面层摆放（SetWindowPos） | 通过一次性 PowerShell |
 | `shellIcons.js` | 快捷方式解析、图标抽取（不带小箭头） | 有缓存 |
 | `weather.js` | 天气取数（Open-Meteo）与城市解析 | 纯逻辑 + 网络 |
@@ -69,7 +71,7 @@ scripts/         启动器、图标生成、取证小工具（不参与打包）
                       └─ 桌面层窗口（透明、鼠标穿透、不置顶）
 ```
 
-- 绘制窗**常驻**、不清屏收放：静音时只是画布全空（没有"窗口消失/出现"的闪烁）；
+- 低内存模式只保留音频抓取窗，收到非零频段才创建绘制窗；连续静音 5 秒销毁绘制窗；普通模式保留热绘制窗。专注模式停止两扇窗，退出恢复用户设置；
 - 两扇窗都可能"看不见"（一个透明、一个在屏幕外），排查先看 `%APPDATA%\DeskBasket\viz.log`
   （apply / 桌面层放置 / 取流状态 / 首帧与每 250 帧峰值）；
 - Windows 的窗口遮挡计算会误判桌面层窗口，启动时用
@@ -80,5 +82,15 @@ scripts/         启动器、图标生成、取证小工具（不参与打包）
 
 - `tests/ipc-symmetry.test.js` 扫的是 **`src/main/` 下所有 .js（除 preload.js）**，所以把 IPC
   拆到新模块不会漏检；新增通道照样会被比对。
-- `dockmodel` / `store` / `baskets` / `organize` / `keyHold` 这些纯逻辑模块直接 `require` 测。
+- `dockmodel` / `store` / `baskets` / `organize` 这些纯逻辑模块直接 `require` 测。
 - 主进程里依赖 Electron 的部分不做单测，靠 `node --check`（语法）+ 真机冒烟。
+
+
+## 六、1.7.0 可靠性与性能边界
+
+- 文件落地管线串行排他创建目标。同盘普通文件使用硬链接后移除源名称；目录和跨盘文件复制、流式 SHA-256 校验后才移除源。符号链接/联接点不走递归复制删除。
+- 整理在源名称移除前保存恢复记录，配置临时文件 fsync 后原子替换；记录保存失败保留源与副本。完成后记录实际文件身份；撤销冲突保留记录供重试。文件系统并非事务，外部程序同时写文件及突然断电仍需用户核对，不声称全盘事务回滚。
+- 主进程统一拒绝重叠的筐文件操作；整理与撤销持有操作锁。异步预览重新获取当前筐，避免旧快照复活已移走的条目。
+- 原生状态助手分别提供鼠标/前台全屏与 zorder 模式，保留 PowerShell 回退。源码在 src/native，构建脚本在 scripts/build-native.ps1，父进程退出或管道关闭后停止。
+- 常用固定独立保存 pinned，显示层稳定置前，底层 items 手动顺序不变。
+- 低内存模式将图标内存缓存控制在每层 128 项 / 8MB 内，弹窗图标用 IntersectionObserver 请求可视区域附近条目；隐藏弹窗 5 秒、天气卡 3 秒释放。性能面板只计 Electron 进程，完整进程树基准另含原生/PowerShell 助手。

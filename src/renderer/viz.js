@@ -22,6 +22,10 @@ const DECAY = 0.13;          // 落的跟随系数（小＝掉得慢，有余韵
 const PEAK_FALL = 0.05;      // 峰值帽下落速度
 const QUIET_HOLD = 500;      // 整条安静这么久之后才开始淡出（别在鼓点间隙里闪）
 const FADE_OUT_MS = 300;     // 淡出用多久
+// 休眠（省 CPU/GPU）：淡出画完、柱子全落回 0 之后，这条 rAF 就停掉——画布已经清空，
+// 停在最后一帧也是全透明的，桌面上看不出区别。有声音的帧一到立刻唤醒（见 wake）。
+// 常年开着的桌面工具，静音时还 60fps 地画一张空画布是最没道理的开销。
+const SLEEP_GRACE_MS = 60;   // 淡出结束之后再等一帧，避免正好卡在最后一帧上
 
 // 版式（CSS px，窗口坐标）。主进程的 VIZ_BASELINE_Y 必须等于 TOP_PAD + BAR_MAX_H
 const PAD_X = 26;             // 左右留白（给两端淡出）
@@ -132,6 +136,7 @@ if (api && typeof api.onVizBands === 'function') {
     }
     bands = payload;
     lastAt = Date.now();
+    wake();                                    // 休眠中就靠这一下醒过来
   });
 }
 
@@ -144,6 +149,7 @@ function applyConfig(next) {
   note(`config style=${config.style} theme=${config.theme} reflect=${config.reflect}`);
   palette = VizTheme.palette(themeQuery.matches, config.theme);
   gradients = buildGradients();
+  wake();   // 睡着时改了造型/配色也得重画一帧，不然要等到下一次有声音才变
 }
 
 function configFromState(state) {
@@ -248,18 +254,52 @@ function tick() {
 // rAF 主导：只有它能稳定拿到合成帧（画面真的刷到屏幕上）。
 // 但窗口被应用盖住时 Chromium 可能把 rAF 停掉，所以再挂一个定时器兜底——
 // 超过 400ms 没出过帧就自己 tick 一次，保证画布内容不会烂在几秒前。
+let rafId = 0;
+let asleep = false;
 let lastRafAt = 0;
+let loggedSleep = false;
+
+// 能不能睡了：没有新帧、淡出已经放完、柱子全落回 0。
+// 三个条件缺一不可——早一帧睡下，屏幕上就会留着一根没收干净的光柱。
+function canSleep(now) {
+  if (lastAt > 0 && now - lastAt < STALE_MS) return false;
+  if (!quietSince) return false;
+  if (now - quietSince < QUIET_HOLD + FADE_OUT_MS + SLEEP_GRACE_MS) return false;
+  for (let i = 0; i < BAND_COUNT; i += 1) if (bars[i] !== 0) return false;
+  return true;
+}
+
 function frame() {
+  rafId = 0;
   lastRafAt = performance.now();
   tick();
-  requestAnimationFrame(frame);
+  if (canSleep(Date.now())) {
+    asleep = true;
+    if (!loggedSleep) {
+      loggedSleep = true;
+      note('rAF sleep（静音，画布已清空，停帧省电）');
+    }
+    return;   // paint() 刚把画布清空：停在最后一帧也是全透明的，桌面上看不出区别
+  }
+  rafId = requestAnimationFrame(frame);
+}
+
+// 有声音的帧一到就叫醒（见 onVizBands）——包括第一次启动，所以启动也走这里
+function wake() {
+  if (rafId) return;
+  asleep = false;
+  prevAt = 0;   // 重新起算 dt：睡过去的那段时间不能当成一帧
+  rafId = requestAnimationFrame(frame);
 }
 
 // ------------------------------------------------------------------ 启动
 
 document.addEventListener('visibilitychange', () => {
   // 窗口被重新显示（桌面露出来）时重设淡入起点，不然会把"藏着时跑完的淡入"直接硬切出来
-  if (!document.hidden) revealAt = Date.now();
+  if (!document.hidden) {
+    revealAt = Date.now();
+    wake();   // 睡着的时候被重新露出来：起一帧，把画布状态对齐（上面这行改的 revealAt 要生效）
+  }
   note(`page ${document.hidden ? 'hidden' : 'visible'}`);
 });
 
@@ -271,10 +311,14 @@ function syncTheme() {
 themeQuery.addEventListener('change', syncTheme);
 
 syncTheme();
-window.addEventListener('resize', resize);
+window.addEventListener('resize', () => {
+  resize();
+  wake();   // 尺寸变了要按新画布重画一帧（睡着时也得醒一次）
+});
 resize();
-requestAnimationFrame(frame);
+wake();
 setInterval(() => {
-  if (performance.now() - lastRafAt < 400) return;   // rAF 还活着：交给它，别抢帧
+  if (asleep) return;                                 // 睡着时不抢帧（否则等于没睡）
+  if (performance.now() - lastRafAt < 400) return;    // rAF 还活着：交给它，别抢帧
   tick();
 }, 250);

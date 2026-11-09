@@ -19,6 +19,11 @@
 const api = window.deskbasket;
 const BAND_COUNT = 64;
 const READ_MS = 40;   // 25fps：55ms 那档看着有点"跟不上鼓点"
+// 静音降频：没声音的时候没必要 25fps 地读 FFT、更没必要 25fps 地把 64 个数推过进程边界。
+// 连续静音一会儿就退到 4Hz 的"听一听"，有声立刻回到 25fps——听感上只差最多 250ms 的起步，
+// 而空闲时这条链的 CPU 和 IPC 少一个数量级（频谱是常驻功能，一天里绝大部分时间都没在放歌）。
+const IDLE_READ_MS = 250;
+const SILENT_IDLE_MS = 1200;
 // 频谱只看 40Hz–15kHz：这是音乐真正有能量的范围。按 0–22kHz 铺满 64 段的话，
 // 右半边（8kHz 以上）在流行乐里几乎是 0，屏幕上就是"只跳了左半条"。
 const F_MIN = 40;
@@ -28,6 +33,7 @@ let audioCtx = null;
 let analyser = null;
 let stream = null;
 let readTimer = 0;
+let idleSince = 0;   // 从哪一刻起一直是静音（0 = 还在响）：只用来决定采样频率，见 loopTick
 let resumeTimer = 0;
 let lastPumpAt = 0;
 let restarts = 0;
@@ -136,7 +142,7 @@ function attachStream(s) {
     if (went) return;
     went = true;
     if (stream) stream.getVideoTracks().forEach((t) => t.stop()); // 视频轨我们不用，关掉省电
-    readTimer = setInterval(pump, READ_MS);
+    readTimer = setTimeout(loopTick, 0);   // 节拍自己往下排（静音自动降频，见 loopTick）
     report('');
     note(`pump start ctx=${audioCtx ? audioCtx.state : '?'}`);
   };
@@ -164,7 +170,7 @@ function attachStream(s) {
 }
 
 function pump() {
-  if (!analyser || !freq || !audioCtx || !api || typeof api.vizBands !== 'function') return;
+  if (!analyser || !freq || !audioCtx || !api || typeof api.vizBands !== 'function') return -1;
   lastPumpAt = Date.now();
   analyser.getByteFrequencyData(freq);
   const n = freq.length;
@@ -172,6 +178,7 @@ function pump() {
   const out = new Array(BAND_COUNT);
   // 对数分组（每段约 1.6 个半音），取组内峰值：低频段窄、高频段宽，铺出来才是"音乐"的样子。
   // 段宽按频率算，不按 bin 序号算——按序号做 pow 分组会把太多段堆到 10kHz 以上，右半边永远空着。
+  let loudest = 0;
   for (let i = 0; i < BAND_COUNT; i++) {
     const loF = F_MIN * Math.pow(F_MAX / F_MIN, i / BAND_COUNT);
     const hiF = F_MIN * Math.pow(F_MAX / F_MIN, (i + 1) / BAND_COUNT);
@@ -180,20 +187,38 @@ function pump() {
     let peak = 0;
     for (let j = lo; j < hi; j++) if (freq[j] > peak) peak = freq[j];
     out[i] = peak;
+    if (peak > loudest) loudest = peak;
   }
   // 「整帧全零」是判断环回绑错设备的唯一信号：有声就清零静音计时，
   // 连续静音则交给下面的看门狗去重连（重新绑当前的默认输出设备）。
-  if (out.some((v) => v > 0)) {
+  if (loudest > 0) {
     silenceStart = 0;
     silenceRestarts = 0;
   } else if (!silenceStart) {
     silenceStart = Date.now();
   }
   api.vizBands(out);
+  return loudest;
+}
+
+// 采样节拍：不固定频率，看上一帧响不响决定下一次多久之后读（见 IDLE_READ_MS）。
+// 用 setTimeout 串起来而不是 setInterval：间隔本身要变，而且这样不会在"读一帧"里叠第二次。
+function loopTick() {
+  readTimer = 0;
+  const peak = pump();
+  if (peak < 0) return;                    // 分析链已经拆了（stopAll）：别再排下一拍
+  const now = Date.now();
+  if (peak > 0) idleSince = 0;
+  else if (!idleSince) idleSince = now;
+  const idle = peak === 0 && idleSince && now - idleSince > SILENT_IDLE_MS;
+  readTimer = setTimeout(loopTick, idle ? IDLE_READ_MS : READ_MS);
 }
 
 function stopAll(backToAsk) {
-  if (readTimer) { clearInterval(readTimer); readTimer = 0; }
+  // readTimer 现在是 setTimeout 的 id（节拍自己往下排）；clearInterval/clearTimeout
+  // 在浏览器里操作的是同一个 id 池，两者都能清，这里按语义写 clearTimeout。
+  if (readTimer) { clearTimeout(readTimer); readTimer = 0; }
+  idleSince = 0;
   if (resumeTimer) { clearInterval(resumeTimer); resumeTimer = 0; }
   if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
   if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }

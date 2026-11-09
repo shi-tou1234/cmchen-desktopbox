@@ -320,6 +320,21 @@
     }
   }
   .plate img { width: 44px; height: 44px; object-fit: contain; }
+  /* 文件夹用 Kimicon 插画（assets/folders，见 popup.js 的 skinOf）：插画自己就是一个文件夹，
+     再垫一块彩色釉面底反而像套了两层壳——底板只留尺寸占位，格子高度、选中环位置跟文件格一致。
+     图给到 56px 宽（比文件图标大一圈），果冻的褶、掌机的小屏幕这些细节才看得出来。 */
+  .plate.plain {
+    background: none;
+    box-shadow: none;
+  }
+  .plate.plain img {
+    width: 62px;
+    height: auto;
+    filter: drop-shadow(0 3px 5px rgba(14, 24, 46, 0.26));
+  }
+  @media (prefers-color-scheme: dark) {
+    .plate.plain img { filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.5)); }
+  }
   .popup-grid .cell .name { margin-top: 0; }
 
   /* ---------------------------------------------------------------- 脚栏
@@ -478,6 +493,7 @@
     .cell.just-dropped,
     .popup-grid .cell { animation: none; transition: none; }
   }
+.pin-badge { position:absolute; top:3px; right:6px; color:#edbb4a; font-size:13px; pointer-events:none; }
 </style>
 </head>
 <body class="collapsed" data-kind="basket">

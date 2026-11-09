@@ -56,15 +56,48 @@ function classifyName(name) {
 //   groups: [{ id, name, count, items: [entry], action: 'create'|'reuse', basketId? }]
 //           （count >= MIN_GROUP 的才出现；other 同理）
 //   skipped: [{ path, name, reason }]——预览窗要给「为什么没动我的文件」一个交代
-function planOrganization(entries, existingBaskets = []) {
+function normalizeRules(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 80).filter(r => r && typeof r === 'object').map((r, i) => ({
+    id: 'rule-' + i,
+    extensions: String(r.extensions || '').toLowerCase().split(/[,，;；\s]+/).map(s => s.replace(/^\*?\.?/, '')).filter(s => /^[a-z0-9-]{1,20}$/.test(s)),
+    keyword: String(r.keyword || '').trim().toLowerCase().slice(0, 80),
+    target: baskets.normalizeName(r.target, '').trim(),
+    enabled: r.enabled !== false
+  })).filter(r => r.target && (r.extensions.length || r.keyword));
+}
+
+function matchesRule(entry, rule) {
+  const name = String(entry.name || '').toLowerCase();
+  return rule.enabled && (!rule.extensions.length || rule.extensions.some(ext => name.endsWith('.' + ext))) &&
+    (!rule.keyword || name.includes(rule.keyword));
+}
+
+function excludedName(name, patterns) {
+  return (patterns || []).some(pattern => {
+    const escaped = String(pattern).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+    return escaped && new RegExp('^' + escaped + '$', 'i').test(name);
+  });
+}
+
+function planOrganization(entries, existingBaskets = [], options = {}) {
   const grouped = new Map(CATEGORIES.map((c) => [c.id, []]));
   grouped.set(OTHER_ID, []);
   const skipped = [];
+  const rules = normalizeRules(options.rules);
+  const custom = new Map();
   for (const entry of entries || []) {
     if (entry.isDir) { skipped.push({ ...entry, reason: 'dir' }); continue; }
     if (entry.missing) { skipped.push({ ...entry, reason: 'missing' }); continue; }
     if (entry.registered) { skipped.push({ ...entry, reason: 'registered' }); continue; }
     if (entry.hidden) { skipped.push({ ...entry, reason: 'hidden' }); continue; }
+    if (excludedName(entry.name, options.exclude)) { skipped.push({ ...entry, reason: 'excluded' }); continue; }
+    const rule = rules.find(r => matchesRule(entry, r));
+    if (rule) {
+      if (!custom.has(rule.target)) custom.set(rule.target, { category: { id: rule.id, name: rule.target }, items: [] });
+      custom.get(rule.target).items.push(entry);
+      continue;
+    }
     grouped.get(classifyName(entry.name)).push(entry);
   }
 
@@ -83,7 +116,7 @@ function planOrganization(entries, existingBaskets = []) {
 
   const taken = new Set((existingBaskets || []).map((b) => b.name));
   const byName = new Map((existingBaskets || []).map((b) => [b.name, b]));
-  const groups = [];
+  const groups = [...custom.values()].map(g => makeGroup(g.category, g.items, byName, taken));
 
   for (const { category, items } of own) {
     groups.push(makeGroup(category, items, byName, taken));
@@ -128,5 +161,6 @@ module.exports = {
   classifyName,
   planOrganization,
   undoPlan,
+  normalizeRules, matchesRule, excludedName,
   assignColorForTests: baskets.assignColor
 };

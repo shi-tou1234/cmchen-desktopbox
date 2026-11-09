@@ -82,6 +82,18 @@ test('配置：reduce_motion 默认关，非布尔值回退默认', () => {
   assert.strictEqual(store.mergedSettings({ reduce_motion: 'yes' }).reduce_motion, false);
 });
 
+// ---------------------------------------------------------------- 空闲释放（内存优化）
+
+test('配置：idle_release 默认开，只有显式 false 才关', () => {
+  assert.strictEqual(store.DEFAULTS.idle_release, true);
+  assert.strictEqual(store.mergedSettings({}).idle_release, true);
+  assert.strictEqual(store.mergedSettings({ idle_release: false }).idle_release, false);
+  assert.strictEqual(store.mergedSettings({ idle_release: true }).idle_release, true);
+  // 写坏了（字符串/数字/空）一律回默认开——这条的目的是省内存，不能被脏值悄悄关掉
+  assert.strictEqual(store.mergedSettings({ idle_release: 'off' }).idle_release, true);
+  assert.strictEqual(store.mergedSettings({ idle_release: 0 }).idle_release, true);
+});
+
 test('滑出回弹缓动：两端精确，中段有克制的一次过冲', () => {
   assert.strictEqual(dockmodel.easeOutBack(0), 0);
   assert.strictEqual(dockmodel.easeOutBack(1), 1);

@@ -43,7 +43,7 @@ const CHUNK = 76;           // 每行 base64 的宽度，防宿主对长行折�
 const ICON_PX = 128;        // 抽出图标后缩到的边长（够 Dock 悬停放大用）
 const BATCH_SIZE = 64;      // 一个 PowerShell 进程最多处理多少条（一次覆盖整个 Dock，省一次编译开销）
 const PS_CONCURRENCY = 3;   // 批与批之间最多几个 PowerShell 并行（批间无共享状态，见 runBatch）
-const MEMORY_CACHE_MAX = 500;   // 内存图标缓存条数上限，超出按 LRU 淘汰最老的
+const MEMORY_CACHE_MAX = 128;   // 内存图标缓存条数上限，超出按 LRU 淘汰最老的
 const DISK_SWEEP_EVERY = 50;    // 每写这么多次磁盘缓存，后台扫一次（清超龄死条目）
 const DISK_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;  // 磁盘缓存文件超过 30 天即删
 const DEBOUNCE_MS = 30;     // 攒一小会儿再起进程，把同一批请求合成一次调用
@@ -566,7 +566,10 @@ let sweepTimer = null;      // 清扫定时器：同一时刻只挂一个，防�
 function memorySet(key, value) {
   memory.delete(key);
   memory.set(key, value);
-  while (memory.size > MEMORY_CACHE_MAX) {
+  let bytes = 0;
+  for (const url of memory.values()) bytes += url.length * 2;
+  while (memory.size > MEMORY_CACHE_MAX || bytes > 8 * 1024 * 1024) {
+    bytes -= memory.get(memory.keys().next().value).length * 2;
     memory.delete(memory.keys().next().value);
   }
 }
@@ -847,6 +850,7 @@ function __expireFailuresForTests() {
 }
 
 module.exports = {
+  clearMemory: () => { memory.clear(); linkAumidCache.clear(); },
   ICON_PX,
   MARKER,
   __expireFailuresForTests,

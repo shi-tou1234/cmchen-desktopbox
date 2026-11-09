@@ -18,9 +18,26 @@ const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
 // 应用图标（assets/icon.ico，见 scripts/make_ico.py）：挂到每个窗口上。打包后窗口图标
 // 会落到 exe（electron-builder 认 build.win.icon），这里主要管开发态的任务栏/Alt-Tab，
 // 以及 Dock 窗口在任务栏里的那一格。
-const APP_ICON = path.join(__dirname, '..', 'assets', 'icon.ico');
+const APP_ICON = path.join(__dirname, '..', '..', 'assets', 'icon.ico');
 
 const GLASS_MATERIAL = 'acrylic';
+
+// 所有窗口共用的渲染进程参数。**spellcheck 特意关掉**：界面全中文，输入框只有城市、
+// 目录、文件名这几处，拼写检查一次也用不上；而 Chromium 默认会为每个渲染进程挂一套
+// 拼写检查服务、并把字典读进内存——本程序常驻五六个窗口、开机跑一整天，这部分纯粹白付。
+// 其余几项是必须显式写死的安全姿态：渲染层只通过 preload 暴露的 API 操作文件，页面本身不碰 Node。
+const RENDERER_PREFS = {
+  preload: path.join(__dirname, 'preload.js'),
+  contextIsolation: true,
+  nodeIntegration: false,
+  sandbox: false,
+  spellcheck: false
+};
+
+// 在共用参数上叠每个窗口自己的（backgroundThrottling / partition 之类）
+function rendererPrefs(extra = {}) {
+  return { ...RENDERER_PREFS, ...extra };
+}
 
 // 磨砂模式由设置决定：off 走完全透明（token 的透明模式），其余走系统材质（token 的磨砂模式）
 function glassEnabled(settings) {
@@ -81,13 +98,7 @@ function baseOptions(options = {}) {
     alwaysOnTop,
     title,
     icon: APP_ICON,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      // 渲染层只通过 preload 暴露的 API 操作文件，页面本身不碰 Node
-      sandbox: false
-    },
+    webPreferences: rendererPrefs(),
     ...glassOptions(glass)
   };
 }
@@ -153,12 +164,7 @@ function createWeatherCardWindow(options = {}) {
     alwaysOnTop: true,
     title,
     icon: APP_ICON,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    },
+    webPreferences: rendererPrefs(),
     ...glassOptions(false)
   });
   win.setAlwaysOnTop(true, 'popup');
@@ -219,12 +225,7 @@ function createPopupWindow(options = {}) {
     alwaysOnTop: true,
     title,
     icon: APP_ICON,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    },
+    webPreferences: rendererPrefs(),
     ...glassOptions(glass)
   });
   win.setAlwaysOnTop(true, 'floating');
@@ -263,15 +264,11 @@ function createVizWindow(options = {}) {
     skipTaskbar: true,
     title,
     icon: APP_ICON,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
+    webPreferences: rendererPrefs({
       // 窗口被应用盖住 = 被当成后台页：默认会节流定时器、停掉绘制。频谱要一直"活着"，
       // 不然露出来时是几秒前（甚至启动那一刻）的旧画面。
       backgroundThrottling: false
-    },
+    }),
     ...glassOptions(false)
   });
   win.setMenuBarVisibility?.(false);
@@ -312,14 +309,10 @@ function createVizCaptureWindow(options = {}) {
     icon: APP_ICON,
     backgroundColor: '#00000000',
     transparent: true,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
+    webPreferences: rendererPrefs({
       backgroundThrottling: false,
       partition: 'persist:deskbasket-vizcap'
-    }
+    })
   });
   win.setMenuBarVisibility?.(false);
   win.removeMenu?.();
@@ -348,12 +341,7 @@ function createRenameWindow(options = {}) {
     alwaysOnTop: true,
     title,
     icon: APP_ICON,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    },
+    webPreferences: rendererPrefs(),
     ...glassOptions(glass)
   });
   win.setAlwaysOnTop(true, 'floating');
@@ -385,12 +373,7 @@ function createMenuWindow(options = {}) {
     alwaysOnTop: true,
     title,
     icon: APP_ICON,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    },
+    webPreferences: rendererPrefs(),
     ...glassOptions(false)
   });
   win.setAlwaysOnTop(true, 'popup');

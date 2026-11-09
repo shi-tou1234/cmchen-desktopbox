@@ -6,7 +6,7 @@
 // 这是对早期「只登记路径、绝不移动文件」的一次明确改变，所以边界写清楚，别含糊：
 //   · 会移动：加入筐时把文件（或整个文件夹）搬进筐目录；
 //   · 只复制、不移动：同一个文件还被 Dock 或别的筐引用着（搬走会把那边弄坏）；
-//   · 移动的实现：同盘用 rename（原子操作）；跨盘先复制、**校验通过**再删源文件；
+//   · 移动的实现：同盘文件用排他硬链接再移除源名称；跨盘先复制、**校验通过**再删源文件；
 //   · 校验不过 → 保留原文件、删掉我们自己刚复制出来的半成品，如实报错。源文件被占用
 //     （比如正在运行的程序）也一样：副本已经在筐里，原文件留着并说明。
 //   · 全程不删用户的文件：唯一一次 unlink/rm 出现在"移动的第二步"，且必然在移动路径上；
@@ -14,6 +14,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const platform = require('./platform');
 
 // 各平台的默认筐目录（Windows: E:\文件筐；mac/Linux 见 platform.js）
@@ -97,8 +98,8 @@ function snapshotTree(root, io = fs) {
     try {
       const listed = io.readdirSync(current);
       names = Array.isArray(listed) ? listed : [];
-    } catch (_) {
-      return;
+    } catch (error) {
+      throw new Error('无法读取目录 ' + current + '：' + errorText(error));
     }
     for (const name of names) {
       const full = path.join(current, name);
@@ -107,9 +108,10 @@ function snapshotTree(root, io = fs) {
       try {
         // lstat：不跟随符号链接/联接点——目录环会无限递归；两端按链接本身记录、校验依然对称
         stat = io.lstatSync ? io.lstatSync(full) : io.statSync(full);
-      } catch (_) {
-        continue;
+      } catch (error) {
+        throw new Error('无法读取文件属性 ' + full + '：' + errorText(error));
       }
+      if (stat.isSymbolicLink && stat.isSymbolicLink()) throw new Error('跨盘校验不支持符号链接/联接点：' + full);
       if (stat.isDirectory()) {
         table[rel] = -1;
         walk(full, rel);
@@ -118,7 +120,8 @@ function snapshotTree(root, io = fs) {
       }
     }
   };
-  const stat = io.statSync(root);
+  const stat = io.lstatSync ? io.lstatSync(root) : io.statSync(root);
+  if (stat.isSymbolicLink && stat.isSymbolicLink()) throw new Error('跨盘校验不支持符号链接/联接点：' + root);
   if (stat.isDirectory()) {
     table[''] = -1;
     walk(root, '');
@@ -178,52 +181,99 @@ function sanitizeFileName(raw) {
 
 // 筐目录里给这个文件名找一个空位（磁盘上已经有的名字都算占用）
 function targetInDir(dir, baseName) {
-  let taken = [];
-  try {
-    taken = fs.readdirSync(dir);
-  } catch (_) {
-    taken = [];
-  }
+  const taken = fs.readdirSync(dir);
   return path.join(dir, uniqueName(baseName || '文件', taken));
 }
 
-// 把 src 落到 destDir 里去。mode='move'：同盘 rename（原子），跨盘先复制、
+async function digest(file) {
+  const hash = createHash('sha256');
+  for await (const chunk of fs.createReadStream(file, { highWaterMark: 65536 })) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+// 串行流式校验：大文件不整份读入内存，大小相同而内容不同也不会放行。
+async function verifyCopy(src, dest, before) {
+  const after = snapshotTree(src);
+  let problem = compareTrees(before, after) || compareTrees(before, snapshotTree(dest));
+  if (problem) return problem;
+  for (const [rel, size] of Object.entries(before)) {
+    if (size === -1) continue;
+    const a = rel ? path.join(src, rel) : src;
+    const b = rel ? path.join(dest, rel) : dest;
+    const first = await digest(a);
+    if (first !== await digest(b) || first !== await digest(a)) return '文件内容变化或不一致：' + (rel || path.basename(src));
+  }
+  return compareTrees(before, snapshotTree(src));
+}
+
+// 把 src 落到 destDir 里去。mode='move'：同盘文件排他硬链接，跨盘先复制、
 // 逐层校验名字与大小、通过才删源；mode='copy'：只复制，源文件一个字节不动。
 // 失败时只清理"这次刚建出来的半成品"，源文件永远保留，原因写进 error。
 // 返回 { ok, action:'move'|'copy', dest, note } 或 { ok:false, error }。
-async function placeInto(destDir, src, { mode = 'move' } = {}) {
+let placementQueue = Promise.resolve();
+function placeInto(destDir, src, options = {}) {
+  const job = placementQueue.then(() => placeIntoNow(destDir, src, options));
+  placementQueue = job.catch(() => {});
+  return job;
+}
+async function placeIntoNow(destDir, src, { mode = 'move', exactName, onPrepared } = {}) {
   if (!src || !fs.existsSync(src)) return { ok: false, error: '源文件不存在' };
-  const dest = targetInDir(destDir, path.basename(src));
+  let dest;
+  try {
+    if (exactName && (path.basename(exactName) !== exactName || exactName === '.' || exactName === '..')) throw new Error('目标文件名无效');
+    dest = exactName ? path.join(destDir, exactName) : targetInDir(destDir, path.basename(src));
+    if (fs.existsSync(dest)) return { ok: false, error: '目标已存在，未覆盖' };
+    if (isInside(src, dest)) return { ok: false, error: '不能移入自身或子目录' };
+  } catch (error) { return { ok: false, error: errorText(error) }; }
 
-  // 同盘先试 rename：原子、不涉及删除，也就没有"复制一半"的中间态
+  // 文件同盘用排他硬链接 + unlink，目标被并发占用也绝不覆盖。目录走校验复制。
   if (mode === 'move' && sameVolume(src, destDir)) {
     try {
-      await fs.promises.rename(src, dest);
-      return { ok: true, action: 'move', dest };
-    } catch (error) {
-      if (error && error.code !== 'EXDEV') {
-        return { ok: false, error: errorText(error) };
+      const stat = await fs.promises.lstat(src);
+      if (stat.isFile()) {
+        await fs.promises.link(src, dest);
+        const linked = await fs.promises.lstat(dest);
+        const current = await fs.promises.lstat(src);
+        if (linked.ino !== current.ino || linked.dev !== current.dev || linked.ino !== stat.ino) return { ok: true, action: 'copy', dest, note: '源文件已被替换，保留源位置供核对' };
+        if (onPrepared) {
+          try { await onPrepared({ from: src, to: dest }); }
+          catch (error) { return { ok: true, action: 'copy', dest, note: '恢复记录保存失败，源文件保留：' + errorText(error) }; }
+        }
+        try { await fs.promises.unlink(src); }
+        catch (error) { return { ok: true, action: 'copy', dest, note: '原文件保留：' + errorText(error) }; }
+        return { ok: true, action: 'move', dest };
       }
-      /* EXDEV：跨盘，落到下面的复制路径 */
+    } catch (error) {
+      if (!['EXDEV', 'EPERM', 'ENOTSUP', 'EACCES'].includes(error.code)) return { ok: false, error: errorText(error) };
     }
   }
 
+  let before;
+  try {
+    before = snapshotTree(src);
+  } catch (error) { return { ok: false, error: errorText(error) }; }
+  let owned = false;
   try {
     const stat = await fs.promises.stat(src);
     if (stat.isDirectory()) {
-      await fs.promises.cp(src, dest, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true });
+      await fs.promises.mkdir(dest);
+      owned = true;
+      for (const name of await fs.promises.readdir(src)) {
+        await fs.promises.cp(path.join(src, name), path.join(dest, name), { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true });
+      }
     } else {
       await fs.promises.copyFile(src, dest, fs.constants.COPYFILE_EXCL);
+      owned = true;
     }
   } catch (error) {
     // EEXIST = 目标位被并发操作抢先占了：那不是我们的半成品，绝不能删
-    if (!error || error.code !== 'EEXIST') dropQuietly(dest);
+    if (owned) dropQuietly(dest);
     return { ok: false, error: errorText(error) };
   }
 
   let problem = '';
   try {
-    problem = compareTrees(snapshotTree(src), snapshotTree(dest));
+    problem = await verifyCopy(src, dest, before);
   } catch (error) {
     problem = errorText(error);
   }
@@ -233,6 +283,11 @@ async function placeInto(destDir, src, { mode = 'move' } = {}) {
   }
 
   if (mode === 'copy') return { ok: true, action: 'copy', dest };
+  // 恢复日志必须在删除源文件前落盘；保存失败时保留两份。
+  if (onPrepared) {
+    try { await onPrepared({ from: src, to: dest }); }
+    catch (error) { return { ok: true, action: 'copy', dest, note: '恢复记录保存失败，源文件保留：' + errorText(error) }; }
+  }
 
   try {
     await fs.promises.rm(src, { recursive: true, force: false });
@@ -277,5 +332,6 @@ module.exports = {
   sanitizeFolderName,
   snapshotTree,
   targetInDir,
+  verifyCopy,
   uniqueName
 };

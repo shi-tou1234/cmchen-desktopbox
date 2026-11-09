@@ -11,6 +11,11 @@ const THEME_LABELS = {
   dark: '深色（浅色字，适合深色壁纸/磨砂）',
   light: '浅色（深色字，适合浅色壁纸）'
 };
+// 文件夹弹窗里的文件夹图标：Kimicon 图标包 / 系统原图标
+const FOLDER_SKIN_LABELS = {
+  kimi: 'Kimicon 图标包（每个文件夹一款）',
+  system: 'Windows 系统图标'
+};
 // 音乐律动的三个可调项：造型 / 配色 / 宽度
 const VIZ_STYLE_LABELS = {
   bars: '柱状（一排音乐柱，带倒影）',
@@ -194,13 +199,13 @@ function render() {
   }
   el('accent').value = settings.accent_mode;
   el('iconSize').value = settings.icon_size;
+  fillSelect('folderSkin', FOLDER_SKIN_LABELS, settings.folder_skin || 'kimi');
   el('dockEnabled').checked = settings.dock_enabled;
   el('dockAlways').checked = !settings.dock_auto_hide;
   el('dockIconSize').value = settings.dock_icon_size;
   el('dockMagnify').value = settings.dock_magnify;
   el('dockBottomGap').value = settings.dock_bottom_gap;
   setUnfocused('dockHotkey', settings.dock_hotkey || '');
-  setUnfocused('dockPeekHotkey', settings.dock_peek_hotkey || '');
   setUnfocused('sourceDir', settings.shortcuts_dir || '');
   setUnfocused('basketDir', settings.basket_dir || '');
   el('dockCount').textContent =
@@ -213,6 +218,11 @@ function render() {
   renderSpecials();
   renderWeather();
   el('reduceMotion').checked = Boolean(settings.reduce_motion);
+  el('focusManual').checked = settings.focus_manual === true;
+  el('focusFullscreen').checked = settings.focus_fullscreen !== false;
+  el('lowMemory').checked = settings.low_memory !== false;
+  el('idleRelease').disabled = settings.low_memory !== false;
+  el('idleRelease').checked = settings.idle_release !== false;
   el('musicViz').checked = Boolean(settings.music_viz);
   fillSelect('vizStyle', VIZ_STYLE_LABELS, settings.viz_style);
   fillSelect('vizTheme', VIZ_THEME_LABELS, settings.viz_theme);
@@ -371,9 +381,11 @@ async function renderShortcuts() {
 
 async function push(patch, message) {
   if (loading) return;
-  settings = await api.updateSettings(patch);
-  render();
-  if (message) flash(message);
+  try {
+    settings = await api.updateSettings(patch);
+    render();
+    if (message) flash(message);
+  } catch (error) { render(); flash(String(error.message || error)); }
 }
 
 el('accent').addEventListener('change', (event) => {
@@ -384,6 +396,12 @@ el('themeMode').addEventListener('change', (event) => {
 });
 el('reduceMotion').addEventListener('change', (event) => {
   push({ reduce_motion: event.target.checked }, event.target.checked ? '已减弱动画' : '动画已恢复');
+});
+el('idleRelease').addEventListener('change', (event) => {
+  push(
+    { idle_release: event.target.checked },
+    event.target.checked ? '已开启空闲释放（闲置的弹窗会被关掉，省内存）' : '已关闭空闲释放（弹窗一直留在内存里，重开更快）'
+  );
 });
 el('musicViz').addEventListener('change', (event) => {
   push(
@@ -417,6 +435,12 @@ el('dockDisplay').addEventListener('change', (event) => {
 el('iconSize').addEventListener('change', (event) => {
   push({ icon_size: Number(event.target.value) }, '文件夹弹窗图标大小已更新');
 });
+el('folderSkin').addEventListener('change', (event) => {
+  push(
+    { folder_skin: event.target.value },
+    event.target.value === 'kimi' ? '文件夹图标已换成 Kimicon（下次打开文件夹生效）' : '文件夹图标已换回系统图标'
+  );
+});
 el('dockEnabled').addEventListener('change', (event) => {
   push({ dock_enabled: event.target.checked }, event.target.checked ? 'Dock 已显示' : 'Dock 已隐藏');
 });
@@ -436,29 +460,12 @@ el('dockBottomGap').addEventListener('change', (event) => {
   push({ dock_bottom_gap: Number(event.target.value) }, 'Dock 离底边的距离已更新');
 });
 
-// 两个热键框：回车/失焦时提交，主进程立刻重挂（不用重启）。主进程会把认不出来的组合键
-// 退回默认值，所以这里提交完都把输入框同步成 settings 里回来的那份真值——
-// 用例就是"打错了一个键名"：用户填 F13x，看见的仍是它最后稳定下来的样子。
-async function applyHotkey(id, key) {
-  const raw = String(el(id).value || '').trim();
-  await push({ [key]: raw });
-  const settled = key === 'dock_hotkey'
-    ? (settings.dock_hotkey || '')
-    : (settings.dock_peek_hotkey || '');
-  el(id).value = settled;
-  if (!settled) flash(key === 'dock_hotkey' ? '唤出热键已关闭' : '按住即抬已关闭');
-  else if (settled !== raw) flash('认不出来的组合键，已用：' + settled);
-  else {
-    flash(
-      key === 'dock_hotkey'
-        ? '唤出热键已改成 ' + settled
-        : '按住即抬已改成 ' + settled + '（按住试试）'
-    );
-  }
-}
-
-el('dockHotkey').addEventListener('change', () => applyHotkey('dockHotkey', 'dock_hotkey'));
-el('dockPeekHotkey').addEventListener('change', () => applyHotkey('dockPeekHotkey', 'dock_peek_hotkey'));
+// 唤出热键：失焦或回车后提交，空值关闭。
+el('dockHotkey').addEventListener('change', async () => {
+  await push({ dock_hotkey: String(el('dockHotkey').value || '').trim() });
+  setUnfocused('dockHotkey', settings.dock_hotkey || '');
+  flash(settings.dock_hotkey ? '唤出热键已改成 ' + settings.dock_hotkey : '唤出热键已关闭');
+});
 
 // 系统图标（此电脑 / 回收站 / 天气）：整份列表交回主进程（顺序固定，天气总在回收站旁边）
 for (const [, boxId] of SPECIAL_ORDER) {
@@ -644,7 +651,34 @@ api.onWeatherChanged((state) => {
   renderWeather();
 });
 
+// 性能面板：内存读数。打开设置时取一次，之后每 5 秒跟一次（能看到"用完弹窗再关掉"之后
+// 空闲释放把数字降下来），也可以点按钮立即刷新。窗口关掉页面就没了，定时器随之回收。
+async function refreshMemory() {
+  if (!api.perfMetrics) return;
+  try {
+    const info = await api.perfMetrics();
+    el('memInfo').textContent =
+      '工作集 ' + info.totalMB + ' MB / 私有内存 ' + info.privateMB + ' MB · ' + info.processes + ' 个进程（其中 ' +
+      info.renderers + ' 个渲染进程）';
+  } catch (_) {
+    el('memInfo').textContent = '读取失败';
+  }
+}
+el('btnMem').addEventListener('click', refreshMemory);
+setInterval(refreshMemory, 5000);
+
 (async () => {
   // 初始化只需取一次状态：render() 里已并入 refreshAutostart()（C-3），不再重复调
   await refresh();
+  refreshMemory();
 })();
+
+for (const [id, key] of [['focusManual', 'focus_manual'], ['focusFullscreen', 'focus_fullscreen'], ['lowMemory', 'low_memory']]) {
+  el(id).addEventListener('change', event => push({ [key]: event.target.checked }));
+}
+function renderRuntime(state) {
+  el('focusStatus').textContent = state.focus?.active ? '专注模式已启用；退出全屏或关闭手动专注后恢复。' : '专注模式待命';
+  el('hotkeyStatus').textContent = state.hotkey?.registered ? ' 已注册：' + state.hotkey.key : (settings?.dock_hotkey ? ' 注册失败或冲突，请更换组合键。' : ' 已关闭。');
+}
+api.onStateChanged(renderRuntime);
+api.getState().then(renderRuntime);

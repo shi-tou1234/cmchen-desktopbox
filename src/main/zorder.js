@@ -25,6 +25,7 @@
 
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
+const path = require('node:path');
 
 // 固定字面量：不按 PATH 挑可执行文件（与 keyHold / mouseState / windowLayer 一致）
 const POWERSHELL_EXE = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
@@ -177,9 +178,12 @@ function ensureRunning() {
   if (process.platform !== 'win32' || !fs.existsSync(POWERSHELL_EXE)) return false;
   let proc;
   try {
+    const packagedHelper = path.join(process.resourcesPath || '', 'native', 'DeskBasketState.exe');
+    const helper = fs.existsSync(packagedHelper) ? packagedHelper : path.resolve(__dirname, '../../native/DeskBasketState.exe');
+    const native = fs.existsSync(helper);
     proc = spawn(
-      POWERSHELL_EXE,
-      [
+      native ? helper : POWERSHELL_EXE,
+      native ? ['zorder'] : [
         '-NoProfile',
         '-NonInteractive',
         '-ExecutionPolicy',
@@ -190,7 +194,7 @@ function ensureRunning() {
       {
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'ignore'],
-        env: process.env
+        env: { ...process.env, DESKBASKET_PARENT_PID: String(process.pid) }
       }
     );
   } catch (_) {
@@ -216,6 +220,7 @@ function ensureRunning() {
     onChildExit(proc);
   });
   proc.on('close', () => onChildExit(proc));
+  proc.stdin.on('error', () => { onChildExit(proc); try { proc.kill(); } catch (_) {} });
   return true;
 }
 
@@ -228,7 +233,8 @@ function apply(hwnd, on) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       const at = pending.findIndex((entry) => entry.resolve === resolve);
-      if (at >= 0) pending.splice(at, 1);
+      // 超时后回音无法再与后续命令配对，重启助手而非错配下一条回音。
+      if (at >= 0) stop();
       resolve({ ok: false, top: null, err: -1 });
     }, CMD_TIMEOUT_MS);
     pending.push({ resolve, timer });

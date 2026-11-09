@@ -1,0 +1,68 @@
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+const { app, BrowserWindow, screen } = require('electron');
+const root = process.env.DESKBASKET_TEST_ROOT || path.resolve(__dirname, '../..');
+const outputDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'deskbasket-integration-'));
+fs.writeFileSync(path.join(require('node:os').tmpdir(),'deskbasket-integration-latest.txt'),outputDir);
+const fixture = path.join(outputDir, 'integration-data-' + Date.now());
+fs.mkdirSync(fixture, {recursive:true});
+const log=path.join(outputDir,'integration-events.log');fs.writeFileSync(log,'');
+console.log=console.error=(...args)=>fs.appendFileSync(log,args.map(String).join(' ')+'\n');
+app.setName('DeskBasket-Reliability-Integration');app.setPath('userData',path.join(fixture,'electron'));app.on('window-all-closed',()=>{});
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));const output=[];
+function pass(name,evidence={}){output.push({name,evidence,ok:true});console.log('PASS',name,JSON.stringify(evidence));}
+async function until(fn,label,ms=12000){for(let n=0;n<ms/100;n++){const out=await fn();if(out)return out;await sleep(100);}throw Error('timeout: '+label);}
+async function ready(win){await until(()=>win.webContents.executeJavaScript('Boolean(window.deskbasket)').catch(()=>false),'preload');await sleep(400);}
+app.whenReady().then(async()=>{
+ const desktop=path.join(fixture,'desktop'),bdir=path.join(fixture,'baskets'),dir=path.join(bdir,'资料');
+ for(const d of [desktop,dir])fs.mkdirSync(d,{recursive:true});app.setPath('desktop',desktop);
+ for(let i=0;i<32;i++)fs.writeFileSync(path.join(desktop,'课件'+String(i).padStart(2,'0')+'.pdf'),'fixture-'+i);
+ fs.writeFileSync(path.join(dir,'课件00.pdf'),'existing-item');
+ fs.writeFileSync(path.join(desktop,'ignore.tmp'),'skip');
+ fs.writeFileSync(path.join(desktop,'single.png'),'image');
+ const store=require(path.join(root,'src/main/store'));store.__setRootForTests(path.join(fixture,'config'));
+ store.saveSettings({dock_auto_hide:false,dock_hotkey:'',music_viz:false,focus_fullscreen:false,low_memory:true,autostart:false,shortcuts_dir:desktop,basket_dir:bdir,dock_specials:[],baskets:[{id:'test',name:'资料',dir,items:[path.join(dir,'课件00.pdf')]}]});
+ require(path.join(root,'src/main/main'));
+ const dock=await until(()=>BrowserWindow.getAllWindows().find(w=>w.getTitle()==='DeskBasket Dock'),'dock');await ready(dock);
+ const call=(code)=>dock.webContents.executeJavaScript(code);
+ const errors=[]; const hook=w=>w.webContents.on('console-message',(_,details)=>{if(details.level==='error')errors.push(details.message);});BrowserWindow.getAllWindows().forEach(hook);app.on('browser-window-created',(_,w)=>hook(w));
+ await call('window.deskbasket.openOrganizer()');let org=await until(()=>BrowserWindow.getAllWindows().find(w=>w.getTitle().includes('一键整理')),'organizer');await ready(org);
+ let plan=await org.webContents.executeJavaScript('window.deskbasket.organizeRules([{extensions:"pdf",target:"资料"},{extensions:"png",keyword:"single",target:"图片"}],["*.tmp"])');
+ assert.equal(plan.groups.find(g=>g.name==='资料').items.length,32);assert.equal(plan.skipped.find(i=>i.name==='ignore.tmp').reason,'excluded');pass('规则、排除与超过24项的完整预览',{count:32});
+ await org.webContents.executeJavaScript('location.reload()');await ready(org);await sleep(300);
+ assert.equal(await org.webContents.executeJavaScript('document.querySelectorAll(".rule-row").length'),2);await org.webContents.executeJavaScript('document.getElementById("rulesPanel").open=true');assert.equal(await org.webContents.executeJavaScript('document.documentElement.scrollWidth>innerWidth'),false);
+ assert.ok(await org.webContents.executeJavaScript('document.querySelectorAll(".chip").length')>=33);
+ await org.webContents.capturePage().then(image=>fs.writeFileSync(path.join(outputDir,'organizer.png'),image.toPNG()));pass('整理规则界面实际加载与完整条目展示');
+ const chosen=plan.groups;
+ const out=await org.webContents.executeJavaScript('window.deskbasket.organizeExecute('+JSON.stringify(chosen)+')');assert.equal(out.results.reduce((n,r)=>n+r.moved,0),33);
+ let saved=store.loadSettings();assert.equal(saved.organize_undo.moves.length,33);const collision=saved.organize_undo.moves.find(m=>path.basename(m.from)==='课件00.pdf');assert.equal(path.basename(collision.to),'课件00 (2).pdf');assert.equal(fs.readFileSync(path.join(dir,'课件00.pdf'),'utf8'),'existing-item');pass('实际整理33项、重名不覆盖、精确逐项撤销记录',{moved:33});
+ fs.writeFileSync(path.join(desktop,'课件01.pdf'),'occupied');
+ let undo=await org.webContents.executeJavaScript('window.deskbasket.organizeUndo()');assert.equal(undo.done,32);assert.equal(undo.remaining,1);assert.equal(store.loadSettings().organize_undo.moves.length,1);assert.equal(fs.readFileSync(path.join(desktop,'课件01.pdf'),'utf8'),'occupied');pass('部分撤销不覆盖占位文件，失败记录保留',{done:32,remaining:1});
+ fs.unlinkSync(path.join(desktop,'课件01.pdf'));undo=await org.webContents.executeJavaScript('window.deskbasket.organizeUndo()');assert.equal(undo.done,1);assert.equal(undo.remaining,0);assert.equal(fs.readFileSync(path.join(desktop,'课件00.pdf'),'utf8'),'fixture-0');pass('重试撤销成功，重名文件恢复原始名称');
+ const late=path.join(desktop,'late.pdf');plan=await org.webContents.executeJavaScript('window.deskbasket.organizePlan()');fs.writeFileSync(late,'late');await org.webContents.executeJavaScript('window.deskbasket.organizeExecute('+JSON.stringify(plan.groups)+')');assert.equal(fs.existsSync(late),true);pass('执行不搬走预览后才出现的新文件');await org.webContents.executeJavaScript('window.deskbasket.organizeUndo()');
+ org.close();
+ const pinA=path.join(dir,'课件00.pdf'),pinB=path.join(dir,'常用.txt');fs.writeFileSync(pinB,'pin');await call('window.deskbasket.addPathsToBasket("test",'+JSON.stringify([pinB])+')');
+ let v=await call('window.deskbasket.pinItems("test",'+JSON.stringify([pinB])+',true)');assert.equal(v.entries[0].path,pinB);assert.equal(store.loadSettings().baskets.find(b=>b.id==='test').pinned[0],pinB);pass('常用固定排序与磁盘持久化');
+ await call('window.deskbasket.toggleFolder({kind:"basket",id:"test"},60)');let popup=await until(()=>BrowserWindow.getAllWindows().find(w=>w.getTitle()==='DeskBasket · 资料'),'popup');await ready(popup);await sleep(600);assert.equal(await popup.webContents.executeJavaScript('document.querySelectorAll(".pin-badge").length'),1);await popup.webContents.capturePage().then(image=>fs.writeFileSync(path.join(outputDir,'pinned.png'),image.toPNG()));pass('生产弹窗显示固定星标');
+ let renamed=await popup.webContents.executeJavaScript('window.deskbasket.renameItem("test",'+JSON.stringify(pinB)+',"常用改名.txt")');assert.equal(renamed.ok,true);assert.equal(store.loadSettings().baskets.find(b=>b.id==='test').pinned[0],renamed.path);pass('固定文件重命名后标记跟随');
+ v=await popup.webContents.executeJavaScript('window.deskbasket.pinItems("test",'+JSON.stringify([renamed.path])+',false)');assert.equal(v.entries[0].path,pinA);pass('取消固定恢复原手动顺序');
+ await popup.webContents.executeJavaScript('reloadHome()');await popup.webContents.executeJavaScript('document.dispatchEvent(new KeyboardEvent("keydown",{key:"a",ctrlKey:true,bubbles:true}));if(selectedEntries().length<2)throw Error("全选失败");selectRange(0,1);if(selectedEntries().length!==2)throw Error("Shift选择失败");');pass('真实渲染层Ctrl+A和Shift多选仍按路径工作');
+ await popup.webContents.executeJavaScript('selection=new Set(['+JSON.stringify(renamed.path)+']);moveOutSelection()');assert.equal(fs.existsSync(renamed.path),false);const movedBack=path.join(desktop,'常用改名.txt');assert.equal(fs.readFileSync(movedBack,'utf8'),'pin');pass('真实渲染层右键移出按字符串路径执行');await call('window.deskbasket.addPathsToBasket("test",'+JSON.stringify([movedBack])+')');
+
+ const safe=await popup.webContents.executeJavaScript('window.deskbasket.dragOutItem("test",'+JSON.stringify(renamed.path)+')');await sleep(800);assert.equal(safe.originalRetained,true);assert.equal(fs.existsSync(renamed.path),true);pass('拖出状态通知不回收或删除源文件');
+ await popup.webContents.executeJavaScript('window.deskbasket.popupClose()');await sleep(6000);assert.equal(popup.isDestroyed(),true);pass('低内存模式关闭5秒后释放弹窗');
+ await call('window.deskbasket.toggleFolder({kind:"basket",id:"test"},60)');popup=await until(()=>BrowserWindow.getAllWindows().find(w=>w.getTitle()==='DeskBasket · 资料'),'cold reopen');await ready(popup);assert.ok(await popup.webContents.executeJavaScript('document.querySelectorAll(".cell").length')>=2);pass('释放后冷开正常');await popup.webContents.executeJavaScript('window.deskbasket.popupClose()');
+ await call('window.deskbasket.openSettings()');const settings=await until(()=>BrowserWindow.getAllWindows().find(w=>w.getTitle().includes('设置')),'settings');await ready(settings);assert.equal(await settings.webContents.executeJavaScript('Boolean(document.getElementById("focusManual")&&document.getElementById("lowMemory"))'),true);
+ await settings.webContents.executeJavaScript('window.deskbasket.updateSettings({focus_manual:true})');await sleep(300);assert.equal(dock.isVisible(),false);assert.equal((await call('window.deskbasket.getState()')).focus.active,true);pass('手动专注隐藏Dock且状态可见');
+ await settings.webContents.executeJavaScript('window.deskbasket.updateSettings({focus_manual:false})');await sleep(300);assert.equal(dock.isVisible(),true);pass('退出专注恢复Dock');
+ settings.close();await call('window.deskbasket.updateSettings({focus_fullscreen:true})');
+ const mouse=require(path.join(root,'src/main/mouseState'));const originalPoll=mouse.poll;mouse.poll=()=>({known:true,fullscreen:true,held:false,overDesktop:false});
+ await until(async()=> (await call('window.deskbasket.getState()')).focus.active,'controlled fullscreen focus');assert.equal(dock.isVisible(),false);pass('受控全屏报告进入专注（锁屏环境，非真人前台全屏验证）');
+ mouse.poll=()=>({known:true,fullscreen:false,held:false,overDesktop:false});await until(async()=> !(await call('window.deskbasket.getState()')).focus.active,'controlled fullscreen exit');assert.equal(dock.isVisible(),true);pass('受控退出全屏报告恢复Dock');await call('window.deskbasket.updateSettings({focus_fullscreen:false})');mouse.poll=originalPoll;
+ await call('window.deskbasket.updateSettings({focus_fullscreen:false,music_viz:true})');const cap=await until(()=>BrowserWindow.getAllWindows().find(w=>w.getTitle().includes('律动授权')),'capture');await ready(cap);await cap.webContents.executeJavaScript('if(typeof stopAll==="function")stopAll(false);window.deskbasket.vizBands(Array(64).fill(90))');const draw=await until(()=>BrowserWindow.getAllWindows().find(w=>w.getTitle()==='DeskBasket 律动'),'sound draw');await ready(draw);pass('律动收到非零频段后按需创建绘制窗口');await cap.webContents.executeJavaScript('window.deskbasket.vizBands(Array(64).fill(0))');await sleep(5800);assert.equal(draw.isDestroyed(),true);pass('静音5秒回收律动绘制窗口');await cap.webContents.executeJavaScript('window.deskbasket.vizBands(Array(64).fill(90))');await until(()=>BrowserWindow.getAllWindows().find(w=>w.getTitle()==='DeskBasket 律动'),'sound resumes');pass('再次收到声音数据可重建律动窗口');await call('window.deskbasket.updateSettings({music_viz:false})');
+ pass('专注设置页无渲染错误',{errors});assert.deepEqual(errors,[]);
+ await sleep(6500);const metrics=app.getAppMetrics();pass('空闲进程与内存快照',{processes:metrics.map(m=>({pid:m.pid,type:m.type,memory:m.memory})),windows:BrowserWindow.getAllWindows().map(w=>w.getTitle())});
+ fs.writeFileSync(path.join(outputDir,'integration-results.json'),JSON.stringify(output,null,2));require(path.join(root,'src/main/mouseState')).stop();require(path.join(root,'src/main/zorder')).stop();app.exit(0);
+}).catch(error=>{console.log('FAIL',error.stack);fs.writeFileSync(path.join(outputDir,'integration-results.json'),JSON.stringify({output,error:error.stack},null,2));app.exit(1);});

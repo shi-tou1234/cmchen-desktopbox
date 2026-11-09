@@ -76,6 +76,13 @@
           <label for="iconSize">文件夹弹窗内图标大小</label>
           <input type="number" id="iconSize" min="24" max="128" step="8">
         </div>
+        <div class="row">
+          <label for="folderSkin">弹窗里的文件夹图标</label>
+          <select id="folderSkin"></select>
+        </div>
+        <div class="row" style="display:block">
+          <span class="hint">Kimicon 是内置的 12 款文件夹插画（6 个造型 × 宽/方两版）：每个文件夹分到一款并记住，同一个弹窗里不会出现两个同款，方便一眼认出哪个是哪个。改完下次打开文件夹生效。</span>
+        </div>
       </div>
 
       <div class="group">
@@ -114,7 +121,13 @@
       </div>
 
       <div class="group">
-        <h3>底部 Dock</h3>
+        <h3>专注与资源占用</h3>
+        <div class="row"><label for="focusManual">手动专注（隐藏 Dock、悬停卡片和律动）</label><input type="checkbox" id="focusManual"></div>
+        <div class="row"><label for="focusFullscreen">其他应用全屏时自动专注</label><input type="checkbox" id="focusFullscreen"></div>
+        <div class="row"><label for="lowMemory">低内存模式（推荐）</label><input type="checkbox" id="lowMemory"></div>
+        <p class="hint" id="focusStatus"></p>
+        <p class="hint">低内存模式：弹窗关闭 5 秒、天气卡关闭 3 秒后释放；图标按需加载，静音时释放律动绘制窗口。再次打开可能稍慢。</p>
+      </div><div class="group"><h3>底部 Dock</h3>
         <div class="row">
           <label for="dockEnabled">显示 Dock（固定于桌面底部）</label>
           <input type="checkbox" id="dockEnabled">
@@ -127,12 +140,8 @@
           <label for="dockHotkey">唤出/收起热键</label>
           <input type="text" id="dockHotkey" maxlength="40" placeholder="F9" spellcheck="false">
         </div>
-        <div class="row">
-          <label for="dockPeekHotkey">按住即抬热键（按住＝抬到最上面、可以直接点，松手＝落回原位）</label>
-          <input type="text" id="dockPeekHotkey" maxlength="40" placeholder="Ctrl+Win+Z" spellcheck="false">
-        </div>
         <div class="row" style="display:block">
-          <span class="hint">两个热键不能填同一个（同一个组合键只能挂一个功能）。「按住即抬」默认 Ctrl+Win+Z：三个键都在左手，右手全程不用离开鼠标；系统自己占用的是 Win+E / Win+D / Win+R 这类**不带 Ctrl** 的组合（外加 Win+Ctrl+Q 等少数几个），输入法的中英切换是 Ctrl+Space / Shift+Space，都不是它——也刻意避开 Ctrl+Q、Ctrl+W 这类"退出/关窗"的常用键。Win 键写成 Win / Super / Meta 都认。键盘带 F13～F24 那排键的话填 F13 更冷门（Windows 与所有应用最多只绑到 F12）。两个框都填「」＝关闭。</span>
+          <span class="hint">默认 F9，留空可关闭；常驻模式下切换显隐。专注期间不响应。<span id="hotkeyStatus"></span></span>
         </div>
         <div class="row">
           <label for="dockDisplay">Dock 放在哪块屏</label>
@@ -240,6 +249,21 @@
           <span class="hint" id="basketCandidateHint">来源目录里的条目：勾选即加进这个筐（一次能勾一堆）。加进来的文件会移动进上面的筐目录；不在来源目录里的文件用「添加文件…」（对话框里按住 Ctrl / Shift 可多选）。</span>
         </div>
         <div class="shortcut-list" id="basketCandidateList"></div>
+      </div>
+
+      <div class="group">
+        <h3>性能</h3>
+        <div class="row">
+          <label for="idleRelease">空闲时释放窗口（筐弹窗和天气卡收起后闲置一会儿就关掉，省下几十 MB 内存；关掉则一直留着，重新打开更快）</label>
+          <input type="checkbox" id="idleRelease">
+        </div>
+        <div class="row" style="justify-content:flex-start;gap:8px">
+          <button class="btn" id="btnMem">刷新内存</button>
+          <span class="hint" id="memInfo">—</span>
+        </div>
+        <div class="row" style="display:block">
+          <span class="hint">内存是整程序所有进程的合计（Electron 本体就要占一份固定底子）。音乐律动开着时会多出抓取系统声音与绘制频谱的两扇窗；静音时它们会自动降频停帧，只留很低的底噪。</span>
+        </div>
       </div>
 
       <div class="group">

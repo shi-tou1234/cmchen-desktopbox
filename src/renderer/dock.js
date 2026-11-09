@@ -188,14 +188,10 @@ function makeNode(entry) {
   // 天气：鼠标靠近就在图标上方浮出未来几天的预报卡片。
   // （卡片由主进程单独开一个小窗——Dock 只有一条窄带，装不下预报。
   //   图标放大是以底边中心为原点的，中心横坐标不变，所以不用跟着重算锚点。）
+  // 触发点在下面的 trackPointer 里统一做：Dock 窗口平时是鼠标穿透的，穿透状态下
+  // Chromium 不一定会派 pointerenter，只有 mousemove 是稳定有的。
   // 这里**不**监听 pointerleave 立刻收卡：鼠标从图标挪到卡片上必然先离开图标，
   // 立刻收就永远看不成卡片；收卡由主进程的轮询接管（鼠标离开 Dock 与卡片 500ms 才收）。
-  if (entry.type === 'weather') {
-    item.addEventListener('pointerenter', () => {
-      const rect = item.getBoundingClientRect();
-      api.showWeatherCard(rect.left + rect.width / 2);
-    });
-  }
 
   // 按下压一下、松手弹回来（弹簧在 tick 里积分），点开时再向上跳一下
   item.addEventListener('pointerdown', (event) => {
@@ -563,16 +559,100 @@ let boostScale = 0.5;      // 中心最大放大比例，由设置 dock_magnify 
 
 let pointer = null;        // { x, y } 相对 dock 容器；null = 鼠标不在内
 
+// ------------------------------------------------ 鼠标穿透（空白处不挡桌面）
+//
+// Dock 窗口比看得见的图标大得多：顶上那条"悬停放大余量"按当前档位就有 100+px，整块矩形
+// 又都压在桌面上。透明不等于穿透——窗口矩形里的桌面图标既点不到、也框不进选择框。
+// 所以主进程让窗口默认整窗穿透，只有指针真的压在条目上才把鼠标接回来；判定在这里做
+// （只有页面知道图标此刻被放大到多大），结果一变就报过去。
+// 穿透状态下页面收不到 click/mousedown，但 mousemove 还在（主进程开了 forward），
+// "指针挪到图标上"这一下能测到，接回鼠标之后点击就正常了。
+let pointerOverItem = null;   // 最近一次报给主进程的判定（null = 还没报过，主进程默认就是穿透）
+let hoveredItem = null;       // 上一次指针停在哪一格：用来认"刚移进来"这一下（天气卡片）
+let lastMoveAt = 0;
+let pointerAllowed = false;   // 主进程确认 Dock 在此光标位置确实露出后才接收悬停
+// 页面自己的拖拽（Dock 条目换位）期间窗口必须保持"活"的：中途切成穿透，dragend/drop 就收不到了
+let dragInProgress = false;
+
+function reportPointerOverItem(next) {
+  if (next === pointerOverItem) return;
+  pointerOverItem = next;
+  api.setDockInteractive(next);
+}
+
+// 指针底下是不是某个条目。图标/名字/叠放预览都是 pointer-events:none，命中的一定是
+// .dock-item 本身；空白处命中的是 #dock 容器，closest 找不到条目 → null。
+function itemUnderPoint(x, y) {
+  const el = document.elementFromPoint(x, y);
+  if (!el || typeof el.closest !== 'function') return null;
+  return el.closest('.dock-item');
+}
+
+function trackPointer(clientX, clientY, moved = true) {
+  if (!pointerAllowed) { reportPointerOverItem(false); return; }
+  const item = clientX === null ? null : itemUnderPoint(clientX, clientY);
+  if (clientX !== null && moved) lastMoveAt = performance.now();
+  reportPointerOverItem(dragInProgress ? true : Boolean(item));
+  if (item && item !== hoveredItem) {
+    const node = nodes.find((candidate) => candidate.el === item);
+    if (node && node.entry.type === 'weather') {
+      const rect = item.getBoundingClientRect();
+      api.showWeatherCard(rect.left + rect.width / 2).then((shown) => {
+        // 请求跨过了新的一拍遮挡/坐标判定：下次有效探测仍可重试，不必先移出图标。
+        if (!shown && hoveredItem === item) hoveredItem = null;
+      }).catch(() => { if (hoveredItem === item) hoveredItem = null; });
+    }
+  }
+  hoveredItem = item;
+}
+
 dockEl.addEventListener('mousemove', (event) => {
+  if (!pointerAllowed) return;
   const base = dockEl.getBoundingClientRect();
   pointer = { x: event.clientX - base.left, y: event.clientY - base.top };
+  trackPointer(event.clientX, event.clientY);
   ensureTick();
 });
 dockEl.addEventListener('mouseleave', () => {
   pointer = null;
+  trackPointer(null, null);
 });
 window.addEventListener('resize', () => {
   measureNodes();
+});
+
+document.addEventListener('dragstart', () => {
+  dragInProgress = true;
+});
+document.addEventListener('dragend', () => {
+  dragInProgress = false;
+});
+document.addEventListener('drop', () => {
+  dragInProgress = false;
+});
+
+// 主进程每 ~80ms 推一次光标位置（窗口内坐标）：光标静止时不会有 mousemove，窗口滑到
+// 它底下 / 条目重排之后，页面得靠这一拍重新认一次指针在谁头上。
+api.onDockPointerProbe((point) => {
+  // null = 指针已经离开窗口：命中判定和放大联动一起复位（forward 不通时收不到 mouseleave，
+  // 只能靠这一条，否则图标会一直停在放大状态、窗口也一直以为自己该接鼠标）
+  if (!point) {
+    pointerAllowed = false;
+    pointer = null;
+    lastMoveAt = 0;
+    hoveredItem = null;
+    reportPointerOverItem(false);
+    return;
+  }
+  pointerAllowed = true;
+  // 刚有过 mousemove 就不采信：那一拍的位置最多比它旧一拍（80ms），指针正在动的时候
+  // 拿旧位置覆盖会把判定闪一下
+  if (performance.now() - lastMoveAt < 120) return;
+  trackPointer(point.x, point.y, false);
+  // 顺带补上放大联动的位置：forward 万一不通，这一拍就是放大动画的唯一来源
+  const base = dockEl.getBoundingClientRect();
+  pointer = { x: point.x - base.left, y: point.y - base.top };
+  ensureTick();
 });
 
 function cosineFalloff(distance, range) {
@@ -712,8 +792,50 @@ function flashCaption(node, text) {
   }, 1200);
 }
 
+// 图标行：所有条目矩形的并集（含图标之间的缝隙；多行时覆盖每一行）。
+// 拖拽落点只认这一条带——窗口顶上那条"悬停放大余量"的空白带不算 Dock：把文件拖到那儿
+// 松手，不该被加进 Dock（主进程那边同一条带拖拽期间也是穿透的，文件会落到底下的桌面）。
+function itemRowRect() {
+  const width = dockEl.clientWidth;
+  const height = dockEl.clientHeight;
+  if (!nodes.length) {
+    // 空 Dock：条目区就是底下那条提示带。高度按一个图标 + 名字行 + 行距 + 内边距估，
+    // 与 dock.html / dockmodel 的口径对齐（iconSize 是当前设置的图标尺寸）
+    const top = height - (iconSize + 15 + 16 + 8);
+    return { left: 0, right: width, top: Math.max(0, top), bottom: height };
+  }
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const node of nodes) {
+    const rect = node.el.getBoundingClientRect();
+    if (!rect.width && !rect.height) continue;
+    left = Math.min(left, rect.left);
+    top = Math.min(top, rect.top);
+    right = Math.max(right, rect.right);
+    bottom = Math.max(bottom, rect.bottom);
+  }
+  if (left === Infinity) return null;
+  return { left, top, right, bottom };
+}
+
+const DROP_ROW_PAD = 12;   // 行上沿放宽一点，和主进程的 DOCK_DROP_PAD 对齐
+
+function inDropRow(x, y) {
+  const row = itemRowRect();
+  if (!row) return false;
+  return x >= row.left && x <= row.right && y >= row.top - DROP_ROW_PAD && y <= row.bottom;
+}
+
 document.addEventListener('dragover', (event) => {
   if (event.dataTransfer.types.includes('text/deskbasket-index')) return;
+  // 不在图标行里就不接：不 preventDefault 等于告诉系统"这里不是投放区"，
+  // 文件会继续往下走（落到桌面），而不是被 Dock 当成"要加进来"
+  if (!inDropRow(event.clientX, event.clientY)) {
+    markDropTarget(null);
+    return;
+  }
   event.preventDefault();
   markDropTarget(basketUnderPointer(event.target));
 });
@@ -723,6 +845,11 @@ document.addEventListener('dragleave', (event) => {
 });
 document.addEventListener('drop', async (event) => {
   if (event.dataTransfer.types.includes('text/deskbasket-index')) return;
+  // 兜底：窗口万一还活着（拖拽起点就在 Dock 上），图标行外的落点也不处理
+  if (!inDropRow(event.clientX, event.clientY)) {
+    markDropTarget(null);
+    return;
+  }
   event.preventDefault();
   const basket = basketUnderPointer(event.target);
   markDropTarget(null);
