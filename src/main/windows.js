@@ -5,7 +5,7 @@
 // 材质配置是实测定的（1920x1080 / 100% 缩放，背景亮度 225 作基准）：
 //   transparent:false + backgroundMaterial:'acrylic'  → 透光比 0.86、糊化比 0.09（真磨砂玻璃）
 //   transparent:true（不挂材质）                       → 透光比 0.98、糊化比 0.26（几乎全透不磨砂）
-// 注意两种配置都**不是**不透明底，之前 Qt 版那种"变黑块"的问题在 Electron 里不存在。
+// 透明网页与原生窗口的合成是两层；Dock 另做首帧门禁，避免启动时先露出空表面。
 // 与 token 监测的写法一致：Win 上用系统材质，mac 上用 vibrancy。
 
 const { BrowserWindow, screen } = require('electron');
@@ -78,7 +78,8 @@ function baseOptions(options = {}) {
     skipTaskbar = true,
     movable = true,
     alwaysOnTop = false,
-    title = 'DeskBasket'
+    title = 'DeskBasket',
+    thickFrame = true
   } = options;
 
   return {
@@ -87,6 +88,7 @@ function baseOptions(options = {}) {
     ...(Number.isInteger(x) ? { x } : {}),
     ...(Number.isInteger(y) ? { y } : {}),
     frame: false,
+    thickFrame,
     show: false,
     hasShadow: false,
     resizable,

@@ -144,9 +144,12 @@ function normalizePath(raw) {
 function pathKey(value) {
   if (typeof value !== 'string') return '';
   const normalized = path.normalize(value);
-  // 路径键在所有平台都折叠大小写：配置里大小写打错的同一文件要能对上
-  // （去重、别名、移出都靠这个键；大小写敏感文件系统上同目录大小写变体极少见，可接受）
-  return normalized.toLowerCase();
+  // 大小写口径与 basketfiles.keyOf 共用同一处（foldPathCase）：Windows 折成小写，让配置里
+  // 大小写打错的同一文件能对上；Linux / 大小写敏感的 macOS 卷保留大小写，按真实文件系统
+  // 语义比较。去重、别名、移出都靠这个键；这是显式的平台化设计（审查 F18）。
+  // 注意：这个键只用于运行时比较，不写进 settings.json —— 存档里存的是 normalizePath 的原始路径，
+  // 所以 Windows 行为完全不变、已有存档不受影响。
+  return basketfiles.foldPathCase(normalized);
 }
 
 // 去重 + 绝对化，保持原顺序

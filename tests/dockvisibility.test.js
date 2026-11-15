@@ -23,12 +23,15 @@ function functionSource(name) {
 
 function interactionContext() {
   const context = vm.createContext({
+    // vm 只跑函数体，模块级常量要照生产源码的值注入（写死一份会在改配置后悄悄失同步）
+    DOCK_POINTER_MAX_AGE_MS: Number(main.match(/const DOCK_POINTER_MAX_AGE_MS = (\d+);/)[1]),
+    DOCK_POINTER_MAX_DRIFT: Number(main.match(/const DOCK_POINTER_MAX_DRIFT = (\d+);/)[1]),
     focusActive: false, dockManuallyHidden: false,
     process: { platform: 'win32' },
     settings: { dock_enabled: true, dock_auto_hide: false },
     dockRevealed: true,
     dockWindow: { isDestroyed: () => false, isVisible: () => true, isMinimized: () => false },
-    mouseState: { poll: () => ({ known: true, dockExposed: true, pointer: { x: 200, y: 400 } }) },
+    mouseState: { poll: () => ({ known: true, dockExposed: true, at: Date.now(), pointer: { x: 200, y: 400 } }) },
     screen: { screenToDipPoint: p => ({ x: p.x / 2, y: p.y / 2 }), getCursorScreenPoint: () => ({ x: 100, y: 200 }) }
   });
   vm.runInContext(functionSource('dockCanInteract'), context);
@@ -68,11 +71,36 @@ test('被遮挡、已隐藏、最小化、收起和已禁用的 Dock 全部拒�
   }
 });
 
-test('侦察预热、报数丢失或指针已移动时，不使用旧的无遮挡结果', () => {
+test('侦察预热、报数丢失或光标瞬移到别处时，不使用旧的无遮挡结果', () => {
   const c = interactionContext();
   c.mouseState.poll = () => ({ known: false, held: true, grace: true });
   assert.equal(c.dockCanInteract(), false);
-  c.mouseState.poll = () => ({ known: true, dockExposed: true, pointer: { x: 1000, y: 1000 } });
+  c.mouseState.poll = () => ({ known: true, dockExposed: true, at: Date.now(), pointer: { x: 1000, y: 1000 } });
+  assert.equal(c.dockCanInteract(), false);
+});
+
+// 真机反馈：鼠标划过 Dock 时图标一会儿变大一会儿变小。根因是这里曾用 12px 的坐标差
+// 当报数新鲜度：侦察 125ms 一报、主进程 80ms 一问，正常速度划过就周期性判成"不可交互"，
+// 主进程于是反复 sendDockPointer(null)，渲染层把悬停联动清零 → 放大/缩小来回抽。
+test('光标正常划过 Dock：报数滞后一拍仍允许悬停，放大动画不被反复掐断', () => {
+  const c = interactionContext();
+  // 报数里的光标比当前右移 60px（DIP），相当于 125ms 内 480px/s 的正常移动
+  c.mouseState.poll = () => ({
+    known: true, dockExposed: true, at: Date.now(), pointer: { x: 320, y: 400 }
+  });
+  assert.equal(c.dockCanInteract(), true);
+  // 再快一点（125px）也还在预算内
+  c.mouseState.poll = () => ({
+    known: true, dockExposed: true, at: Date.now(), pointer: { x: 450, y: 400 }
+  });
+  assert.equal(c.dockCanInteract(), true);
+});
+
+test('报数超过一个新鲜窗口就失效，别拿过期结论把鼠标接回来', () => {
+  const c = interactionContext();
+  c.mouseState.poll = () => ({
+    known: true, dockExposed: true, at: Date.now() - 900, pointer: { x: 200, y: 400 }
+  });
   assert.equal(c.dockCanInteract(), false);
 });
 

@@ -35,6 +35,7 @@ function addBasketPaths(basketId, paths) {
 }
 
 contextBridge.exposeInMainWorld('deskbasket', {
+  dockPaintReady: () => ipcRenderer.send('dock:paint-ready'),
   // 状态
   getState: () => ipcRenderer.invoke('state:get'),
   onStateChanged: (handler) => {
@@ -120,6 +121,10 @@ contextBridge.exposeInMainWorld('deskbasket', {
   popupDragState: (dragging) =>
     ipcRenderer.send('popup:drag-state', { dragging: Boolean(dragging) }),
   popupNavigate: (target) => ipcRenderer.invoke('popup:navigate', { path: target }),
+  // 弹窗里新建文件夹（筐视图建在筐目录里并登记成条目，dir 视图建在当前目录里）
+  popupCreateFolder: (payload) => ipcRenderer.invoke('popup:create-folder', payload || {}),
+  // 把拖进弹窗的文件放进指定文件夹（子文件夹格子上松手 / dir 视图空白处松手）
+  popupDropInto: (payload) => ipcRenderer.invoke('popup:drop-into', payload || {}),
   // 拖右下角改弹窗大小：主进程负责夹范围并落到该屏工作区内，尺寸随后被记住（#3）
   resizePopup: (width, height) => ipcRenderer.invoke('popup:resize', { width, height }),
   // 主进程要收窗口时先通知渲染层播"收回"动画

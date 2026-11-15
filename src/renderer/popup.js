@@ -230,11 +230,11 @@ function makeCell(entry, index) {
 
   // 拖出去 = 把真文件作为系统拖拽源（落点收到一份复制，筐里保留——真要移出用右键
   // 「移出到桌面」）；拖进来 = 移动进筐。3.9.0 起还有第三种手势：拖在弹窗**内部**挪
-  // 摆放位置（见「弹窗内拖动换位」）。格子**不挂** HTML5 draggable：原生拖拽手势会把
-  // 后续指针事件整个吞掉（真机实测），换位和"探出弹窗才发起 OS 拖拽"都靠指针事件做。
-  if (view.kind === 'basket') {
-    cell.addEventListener('pointerdown', (event) => armReorderDrag(event, entry, cell));
-  }
+  // 摆放位置（见「弹窗内拖动换位」）；4.0.1 起同一手势的另一半是"拖到文件夹格上 =
+  // 放进那一层"（筐视图、目录视图都有——目录里没有摆放顺序，只有"放进去"）。
+  // 格子**不挂** HTML5 draggable：原生拖拽手势会把后续指针事件整个吞掉（真机实测），
+  // 换位和"探出弹窗才发起 OS 拖拽"都靠指针事件做。
+  cell.addEventListener('pointerdown', (event) => armReorderDrag(event, entry, cell));
 
   cell.addEventListener('click', (event) => {
     if (suppressClick) {   // 刚拖着放完手的那一下不是点击
@@ -256,9 +256,13 @@ function makeCell(entry, index) {
     // 右键没在选区里的格子：先把它变成当前选中（Windows 的习惯），操作作用于整个选区
     if (!selection.has(entry.path)) selectSingle(entry, index);
     const items = [
-      { key: 'open', label: isDirEntry(entry) ? '打开文件夹' : '打开' },
-      { key: 'reveal', label: '在系统资源管理器中显示' }
+      { key: 'open', label: isDirEntry(entry) ? '打开文件夹' : '打开' }
     ];
+    // 文件夹格上顺手就能"在里面建一个"：不用先进去再右键空白处
+    if (isDirEntry(entry) && entry.exists !== false) {
+      items.push({ key: 'newsub', label: '在里面新建文件夹' });
+    }
+    items.push({ key: 'reveal', label: '在系统资源管理器中显示' });
     if (view.kind === 'basket') {
       items.push(
         { separator: true },
@@ -274,6 +278,9 @@ function makeCell(entry, index) {
       if (picked === 'open') {
         if (isDirEntry(entry)) navigate(entry.path, 'forward');
         else api.openPath(entry.path);
+      } else if (picked === 'newsub') {
+        await api.popupPresent();   // 菜单关掉后主进程会补挂"失焦就收"：先续住弹窗再动手
+        await createFolder(entry.path);
       } else if (picked === 'reveal') {
         api.revealPath(entry.path);
       } else if (picked === 'pin') {
@@ -537,7 +544,11 @@ function render(navDirection) {
   el('btnHome').textContent = hasHome ? '⌂ ' + homeView.name : '';
   el('btnUp').disabled = !(view.kind === 'dir' && view.parent);
   el('btnUp').style.display = view.kind === 'dir' ? '' : 'none';
-  el('btnAdd').style.display = view.kind === 'basket' ? '' : 'none';
+  // 「＋」两个视图都给：筐视图是加东西的菜单，dir 视图里就是"在这里新建文件夹/刷新"
+  el('btnAdd').style.display = '';
+  el('btnAdd').title = view.kind === 'basket'
+    ? '添加文件 / 添加文件夹 / 新建文件夹（也可以直接把文件拖进窗口，或拖到 Dock 的文件夹图标上）'
+    : '在这里新建文件夹（也可以把文件直接拖进这个窗口）';
 
   if (view.error) {
     setStatus(view.error, true);
@@ -547,8 +558,8 @@ function render(navDirection) {
   el('emptyTip').style.display = entries.length ? 'none' : '';
   el('emptyTip').textContent =
     view.kind === 'basket'
-      ? '这个筐还是空的：点上面的「＋」添加文件，或者把文件直接拖进来 / 拖到 Dock 的文件夹图标上（文件会移动进筐的文件夹，原来那处不再保留）'
-      : '这个文件夹是空的';
+      ? '这个筐还是空的：点上面的「＋」添加文件 / 新建文件夹，或者把文件直接拖进来 / 拖到 Dock 的文件夹图标上（文件会移动进筐的文件夹，原来那处不再保留）'
+      : '这个文件夹是空的：把文件直接拖进来，或用上面的「＋」在这一层新建文件夹';
   // 条目数是标题旁的灰字（启动器风格）；脚栏只报消息（复制/删除/出错…），不占常驻文案
   el('count').textContent = entries.length ? entries.length + ' 项' : '';
   setStatus('');
@@ -578,6 +589,21 @@ async function reloadHome() {
   render();
 }
 
+// 原地刷新当前这一层（不播翻页动画）：dir 视图没有"筐清单"可问，得重新列一次目录。
+// 新建文件夹 / 往里面放完文件之后都走这里。
+async function refreshView() {
+  if (!view) return;
+  if (view.kind === 'basket') {
+    await reloadHome();
+    return;
+  }
+  const target = view.path;
+  const next = await api.popupNavigate(target);
+  if (!view) return;          // 等待期间弹窗被收起了
+  if (next) view = next;
+  render();
+}
+
 el('btnUp').addEventListener('click', () => {
   if (view.kind === 'dir' && view.parent) navigate(view.parent, 'back');   // 回上一级：从左边推
 });
@@ -588,10 +614,16 @@ el('btnHome').addEventListener('click', () => {
     render(leaving ? 'back' : undefined);
   }
 });
-// 「＋」：往这个筐里添加文件（可多选）。文件夹可以从设置面板加，或者直接拖进来
-el('btnAdd').addEventListener('click', async () => {
+// 「＋」：往这个筐里添加文件 / 添加文件夹 / 新建文件夹（4.0 起是一个小菜单）。
+// 以前只有"添加文件"一个入口，想有子文件夹就只能先去桌面建好再拖进来——那一步多余。
+function anchorOf(node) {
+  const rect = node.getBoundingClientRect();
+  return { clientX: Math.round(rect.right - 2), clientY: Math.round(rect.bottom + 2) };
+}
+
+async function addPickedBasket(mode) {
   if (!view || view.kind !== 'basket') return;
-  const result = await api.pickBasketFiles(view.basketId, 'files');
+  const result = await api.pickBasketFiles(view.basketId, mode);
   if (!result) return;
   // 文件对话框里点了「取消」（主进程返回 canceled:true，形状其余不变）：没东西要刷，提一句就行（C-2）。
   // 主进程还没带上 canceled 时这个分支自然不触发，落到下面的「没有新增」，属正常降级。
@@ -605,6 +637,52 @@ el('btnAdd').addEventListener('click', async () => {
   }
   await reloadHome();
   setStatus(addStatus(result));
+}
+
+// 新建文件夹：筐视图 → 建在筐目录里并登记成筐的条目；dir 视图 → 建在当前目录里；
+// 传了 into（右键某个文件夹格「在里面新建文件夹」）就建在那个文件夹里。
+// 建完就刷视图，然后**在状态行报一句**（render 会把状态清空，所以顺序不能反）。
+async function createFolder(into) {
+  if (!view) return null;
+  const target = typeof into === 'string' ? into : '';
+  const payload = target
+    ? { kind: 'dir', path: target }
+    : view.kind === 'basket'
+      ? { kind: 'basket', basketId: view.basketId }
+      : { kind: 'dir', path: view.path };
+  const result = await api.popupCreateFolder(payload);
+  if (!result || !result.ok) {
+    setStatus('新建文件夹失败：' + ((result && result.error) || '未知原因'), true);
+    return null;
+  }
+  await refreshView();
+  setStatus('已新建文件夹「' + result.name + '」');
+  return result;
+}
+
+el('btnAdd').addEventListener('click', async (event) => {
+  if (!view) return;
+  // 筐视图：加文件 / 加文件夹 / 新建；dir 视图：只在当前这一层建新的（加文件在这里没有落点概念）
+  const items = view.kind === 'basket'
+    ? [
+        { key: 'files', label: '添加文件…' },
+        { key: 'dirs', label: '添加文件夹…' },
+        { separator: true },
+        { key: 'newfolder', label: '新建文件夹' }
+      ]
+    : [
+        { key: 'newfolder', label: '在这里新建文件夹' },
+        { key: 'refresh', label: '刷新' }
+      ];
+  const picked = await window.showContextMenu(items, anchorOf(event.currentTarget));
+  if (!picked) return;
+  // 菜单是另一个小窗，关掉之后主进程会补挂"失焦就收"——对话框/新建都要几百毫秒，
+  // 先把弹窗续住，别让它在事情做完之前被收走
+  await api.popupPresent();
+  if (picked === 'files') await addPickedBasket('files');
+  else if (picked === 'dirs') await addPickedBasket('dirs');
+  else if (picked === 'newfolder') await createFolder();
+  else if (picked === 'refresh') await refreshView();
 });
 el('btnClose').addEventListener('click', () => api.popupClose());
 document.addEventListener('keydown', (event) => {
@@ -741,15 +819,18 @@ function flipCells(grid, mutate) {
   }
 }
 
-// 抓起（挪过阈值那一刻）：原格隐身让位、虚线空位落在原位、「拎起来」的影子从原格弹起
+// 抓起（挪过阈值那一刻）：原格隐身让位、虚线空位落在原位、「拎起来」的影子从原格弹起。
+// 目录视图没有换位这回事，所以不插空位——原格只淡淡"拎走"，影子照样跟着手。
 function liftCell(drag, event) {
   const grid = el('grid');
-  const placeholder = document.createElement('div');
-  placeholder.className = 'drag-placeholder';
-  placeholder.style.height = `${drag.cell.offsetHeight}px`;
-  drag.placeholder = placeholder;
-  drag.at = [...grid.children].indexOf(drag.cell);          // 空位先落在原位（其余格子的下标）
-  grid.insertBefore(placeholder, drag.cell);
+  if (drag.canReorder) {
+    const placeholder = document.createElement('div');
+    placeholder.className = 'drag-placeholder';
+    placeholder.style.height = `${drag.cell.offsetHeight}px`;
+    drag.placeholder = placeholder;
+    drag.at = [...grid.children].indexOf(drag.cell);          // 空位先落在原位（其余格子的下标）
+    grid.insertBefore(placeholder, drag.cell);
+  }
   drag.cell.classList.add('dragging-source');               // 与上一步同一次布局：格子数不增不减
 
   const cellRect = drag.cell.getBoundingClientRect();
@@ -839,6 +920,7 @@ function clearReorderDrag() {
     } catch (_) {
       /* 指针早释放了/格子已重建 */
     }
+    setDragInto(drag, null);   // 悬着的文件夹格摘掉高亮
   }
   reorderDrag = null;
   if (drag && drag.placeholder && drag.placeholder.isConnected) {
@@ -853,10 +935,12 @@ function clearReorderDrag() {
 }
 
 // 按下（左键、不带 Ctrl/Shift）：登记一场可能的换位手势，指针捕获到这格上，
-// 之后就算指针滑出格子/窗口，move/up 也照样送到这里
+// 之后就算指针滑出格子/窗口，move/up 也照样送到这里。
+// 两个视图都挂：筐视图能换位也能放进子文件夹；目录视图只能放进子文件夹（目录里
+// 没有"摆放顺序"这回事，重排的是筐的清单）。
 function armReorderDrag(event, entry, cell) {
   if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey) return;
-  if (!view || view.kind !== 'basket') return;
+  if (!view || view.error) return;
   clearReorderDrag();
   reorderDrag = {
     entry,
@@ -864,12 +948,15 @@ function armReorderDrag(event, entry, cell) {
     pointerId: event.pointerId,
     startX: event.clientX,
     startY: event.clientY,
+    canReorder: view.kind === 'basket',   // 目录视图：拎起来只为了"放进某个文件夹"
     active: false,     // 过了位移阈值、真在拖
     handedOff: false,  // 已交给 OS 拖拽（拖出弹窗）
     placeholder: null,
     at: -1,            // 空位此刻在「其余格子」里的下标
     slot: -1,          // 折算回「含被拖项的全清单」的落点（发 basket:reorder 用）
     from: -1,          // 被拖项在清单里的原位
+    into: null,        // 指针正悬着的文件夹格（松手就放进它）
+    intoNode: null,
     ghostDX: 0,
     ghostDY: 0,
     ghostW: 0,
@@ -881,6 +968,51 @@ function armReorderDrag(event, entry, cell) {
   } catch (_) {
     /* 拿不到捕获就只在格子上拖，出了格子松手算取消 */
   }
+}
+
+// 指针下面那一格是不是文件夹（能当"放进去"的落点）。
+// 不能用 event.target：指针被捕获到按下的那格之后，move 的 target 永远是它；指针实际
+// 飘到谁头上得问 elementFromPoint（影子和虚线空位都是 pointer-events:none，不挡路）。
+function folderUnderPointer(event, drag) {
+  const hit = document.elementFromPoint(event.clientX, event.clientY);
+  const node = hit && hit.closest ? hit.closest('.cell') : null;
+  if (!node || node === drag.cell || !node.dataset || !node.dataset.path) return null;
+  const entry = currentEntries().find((item) => item.path === node.dataset.path);
+  if (!entry || !isDirEntry(entry) || entry.exists === false) return null;
+  // 目标是它自己、或它自己里面的目录 = 原地打转：连高亮都不给（主进程也会拒）
+  if (isUnder(entry.path, drag.entry.path)) return null;
+  return { node, entry };
+}
+
+// child 是不是 parent 本身或它的后代（Windows 路径，大小写不敏感，尾分隔符先抹掉）
+function isUnder(child, parent) {
+  const a = String(child || '').replace(/[\\/]+$/, '').toLowerCase();
+  const b = String(parent || '').replace(/[\\/]+$/, '').toLowerCase();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.startsWith(b + (b.includes('\\') ? '\\' : '/'));
+}
+
+// 悬停目标换人：旧格摘高亮、新格戴上；同时把"换位"的两个视觉（虚线空位、影子）压暗，
+// 让人一眼看出"这一下不是挪位置，是往里放"
+function setDragInto(drag, folder) {
+  const node = folder ? folder.node : null;
+  if (drag && node === drag.intoNode) return;
+  if (drag && drag.intoNode) drag.intoNode.classList.remove('drop-into');
+  if (node) node.classList.add('drop-into');
+  if (drag) {
+    drag.intoNode = node;
+    drag.into = folder || null;
+    if (drag.placeholder) drag.placeholder.classList.toggle('muted', Boolean(node));
+  }
+  if (dragGhost) dragGhost.classList.toggle('into-folder', Boolean(node));
+}
+
+// 拖到网格上下边缘附近自动滚（条目多到出了滚动条才用得上）；move 帧率触发，步子给小
+function autoScrollGrid(grid, rect, event) {
+  const edge = 28;
+  if (event.clientY < rect.top + edge) grid.scrollTop -= 9;
+  else if (event.clientY > rect.bottom - edge) grid.scrollTop += 9;
 }
 
 function reorderDragMove(event) {
@@ -904,17 +1036,28 @@ function reorderDragMove(event) {
     clearReorderDrag();          // 占位框归位、影子退场（OS 拖拽自己的影子马上顶上）
     api.startItemDrag(drag.entry.path);
     // 没有原生成功回执，不删除源文件；取消或失败同样安全。
-    api.dragOutItem(view.basketId, drag.entry.path);
+    // （目录视图的载荷没有 basketId，传 null：主进程那边只当"这个筐没登记过"处理。）
+    api.dragOutItem(view.basketId || null, drag.entry.path);
     setStatus('拖出按复制处理，原件保留。需要移动请用右键「移出到桌面」。');
     statusHoldUntil = Date.now() + 6000;
     return;
   }
+  const grid = el('grid');
+  const rect = grid.getBoundingClientRect();
+  // 悬在文件夹格上：这一手势改成"放进这一层"——整格高亮、空位淡掉，不再算插入位。
+  // （放在出窗判断之后：指针已经出了窗口时 elementFromPoint 也取不到格子，自然走拖出。）
+  const folder = folderUnderPointer(event, drag);
+  setDragInto(drag, folder);
+  if (folder) {
+    drag.slot = -1;   // 上一次悬停算出的落点作废，别在松手时被当成换位
+    autoScrollGrid(grid, rect, event);
+    return;
+  }
+  if (!drag.canReorder) return;   // 目录视图：没悬在文件夹格上就什么都不动，松手即取消
   // 插入位 = 指针在「其余格子」行主序里的位置 at：逐格问「这格是不是已经被指针越过了」
   // ——整格在指针上方、或同行但越过了它的中线；全部越过（网格底部留白）就是追加到末尾。
   // 同行必须看左右半边：只看竖直中线的话，同一行里中线以上的横向拖动永远算出 0。
   // 发给主进程的落点折算回「含被拖项的全清单」：at 在原位之前照传，之后 +1 补回自己那格。
-  const grid = el('grid');
-  const rect = grid.getBoundingClientRect();
   const inside =
     event.clientX >= rect.left && event.clientX <= rect.right &&
     event.clientY >= rect.top && event.clientY <= rect.bottom;
@@ -940,24 +1083,22 @@ function reorderDragMove(event) {
     });
   }
   drag.slot = at < drag.from ? at : at + 1;
-  // 拖到网格上下边缘附近自动滚（条目多到出了滚动条才用得上）；move 帧率触发，步子给小
-  const edge = 28;
-  if (event.clientY < rect.top + edge) grid.scrollTop -= 9;
-  else if (event.clientY > rect.bottom - edge) grid.scrollTop += 9;
+  autoScrollGrid(grid, rect, event);
 }
 
 async function reorderDragEnd(event) {
   const drag = reorderDrag;
   if (!drag) return;
-  const { cell, entry, active, handedOff, slot } = drag;
+  const { cell, entry, active, handedOff, slot, into } = drag;
   try {
     cell.releasePointerCapture(drag.pointerId);
   } catch (_) {
     /* 指针早释放了 */
   }
   reorderDrag = null;   // 先摘手势状态：await 期间轮询/重画别再当成"拖拽中"
-  if (!active || handedOff || !cell.isConnected) {
-    // 没真拖起来（按下就松）/已交给 OS 拖拽：占位框滑回原位、影子退场
+  setDragInto(drag, null);   // 文件夹格的高亮先摘掉（松手了就不再"要放进去"）
+  // 把"拎着"的视觉收干净：虚线空位滑回原位、原格现身；目录视图没有空位，只让原格现身
+  const settle = () => {
     if (drag.placeholder && drag.placeholder.isConnected) {
       flipCells(el('grid'), () => {
         drag.placeholder.remove();
@@ -966,18 +1107,27 @@ async function reorderDragEnd(event) {
     } else {
       cell.classList.remove('dragging-source');
     }
+  };
+  if (!active || handedOff || !cell.isConnected) {
+    // 没真拖起来（按下就松）/已交给 OS 拖拽：收拾干净就算完
+    settle();
     retireGhost();
     return;
   }
   suppressClick = true;   // 拖过的手势，松手那一下别把落点格子选中
+  // 松手在文件夹格上 = 放进那一层（放进会重画，先把手势视觉收干净）
+  if (into) {
+    settle();
+    retireGhost();
+    await dropIntoFolder(into.entry, entry);
+    return;
+  }
   const from = currentEntries().findIndex((item) => item.path === entry.path);
-  // 落回原位（空位停在原格处或它紧后面）就不动：占位框滑回去、影子飞回原格
-  if (!view || view.kind !== 'basket' || !Number.isInteger(slot) || slot < 0 ||
+  // 落回原位（空位停在原格处或它紧后面）就不动：占位框滑回去、影子飞回原格。
+  // 目录视图没有"换位"这回事，拖到哪儿没放下都算取消。
+  if (!drag.canReorder || !view || view.kind !== 'basket' || !Number.isInteger(slot) || slot < 0 ||
       from < 0 || slot === from || slot === from + 1) {
-    flipCells(el('grid'), () => {
-      if (drag.placeholder && drag.placeholder.isConnected) drag.placeholder.remove();
-      cell.classList.remove('dragging-source');
-    });
+    settle();
     retireGhost(cell.isConnected ? cell.getBoundingClientRect() : null);
     return;
   }
@@ -1004,6 +1154,43 @@ async function reorderDragEnd(event) {
   }
 }
 
+// 把条目放进某个文件夹格（弹窗内部的拖动，4.0.1）。
+// 被拖的那项在选区里、且选区不止一个时整个选区一起放（资源管理器的习惯）；目标自己、
+// 以及目标的上级先剔掉——把文件夹放进自己里面是个环，主进程也会拒，本地先挡更利索。
+// 放入走的是「外部拖入」同一条主进程通道：被 Dock/别的筐引用着的只复制，本筐条目才真移动，
+// 旧登记由下次读筐视图的"文件不在了"清掉。
+async function dropIntoFolder(target, sourceEntry) {
+  if (!target || !target.path || !view) return;
+  const targetPath = target.path;
+  const picked = selection.has(sourceEntry.path) && selection.size > 1
+    ? currentEntries().filter((item) => selection.has(item.path)).map((item) => item.path)
+    : [sourceEntry.path];
+  const paths = picked.filter((item) => !isUnder(targetPath, item));
+  if (!paths.length) {
+    setStatus('不能放进它自己里面', true);
+    return;
+  }
+  const basketId = view.basketId || null;
+  const result = await api.popupDropInto({ basketId, dir: targetPath, paths });
+  await refreshView();
+  const report = placeIntoStatus(result, target.name.replace(/\.(lnk|url)$/i, ''));
+  if (report) setStatus(report.text, report.bad);
+}
+
+// 放进文件夹之后的那句话：外部拖入和弹窗内部拖动共用一份，省得两边说法走偏
+function placeIntoStatus(result, targetName) {
+  if (!result) return null;
+  if (!result.ok) return { text: '没能放进去：' + (result.error || '未知原因'), bad: true };
+  const done = (result.moved || 0) + (result.copied || 0);
+  const failed = (result.failed || []).length;
+  if (!done) {
+    const why = (result.failed && result.failed[0] && result.failed[0].reason) || '未知原因';
+    return { text: '没有放进去：' + why, bad: true };
+  }
+  const how = result.copied ? `（${result.copied} 项是复制，原件还留着）` : '';
+  return { text: `已放入「${targetName}」 ${done} 项${how}` + (failed ? `；${failed} 项失败` : ''), bad: Boolean(failed) };
+}
+
 // move/up 挂 document 捕获阶段：指针落到哪格、甚至滑出窗口（捕获在手时）都收得到，
 // 不赌"事件一定路由回按下的那格"。state 判重入：一次手势只有一份。
 document.addEventListener('pointermove', (event) => {
@@ -1016,11 +1203,16 @@ document.addEventListener('pointercancel', () => {
   if (reorderDrag) clearReorderDrag();
 }, true);
 
-// 把文件直接拖进弹窗 = 加到这个筐里（拖动时给一圈高亮）。
-// 拖动期间要告诉主进程"别收窗"：主进程的"鼠标离开就关"挡不住拖拽——用户得先离开弹窗去
-// 桌面/资源管理器抓文件，那一段光标确实不在弹窗附近，弹窗会被收掉，文件到了没有落点。
-// dragover 在拖动期间以帧率连续触发，所以只在状态真的变了时上报（一次拖拽就两条 IPC）。
+// 把文件直接拖进弹窗（4.0 起两个视图都接）：
+//   · 筐视图：丢在空白/文件格上 = 加进这个筐（搬进筐目录并登记）；丢在**文件夹格**上 = 放进那个子文件夹；
+//   · dir 视图：丢在文件夹格上 = 放进那一层，丢在空白处 = 放进当前正在看的目录。
+// 以前只有筐视图接拖放、而且一律丢进筐根目录——于是"拖进子文件夹"要么落到上一层、
+// 要么（打开子文件夹之后）干脆被系统拒收、文件弹回原处。
+// 拖动期间还要告诉主进程"别收窗"：用户得先离开弹窗去桌面抓文件，那一段光标确实不在弹窗
+// 附近，弹窗会被收掉，文件到了没有落点。dragover 在拖动期间以帧率连续触发，所以只在状态
+// 真的变了时上报（一次拖拽就两条 IPC）。
 let draggingFiles = false;
+let dropFolderCell = null;   // 当前拖拽悬停的文件夹格（松手就放进它）
 
 function setDragState(next) {
   if (next === draggingFiles) return;
@@ -1028,29 +1220,99 @@ function setDragState(next) {
   api.popupDragState(next);
 }
 
+function clearDropFolder() {
+  if (dropFolderCell) dropFolderCell.classList.remove('drop-into');
+  dropFolderCell = null;
+}
+
+// 指针下面那一格是不是文件夹（且真的存在）：只有它能当"放进去"的落点
+function folderUnder(event) {
+  const node = event.target && event.target.closest ? event.target.closest('.cell') : null;
+  if (!node || !node.dataset || !node.dataset.path) return null;
+  const entry = currentEntries().find((item) => item.path === node.dataset.path);
+  if (!entry || !isDirEntry(entry) || entry.exists === false) return null;
+  return { node, entry };
+}
+
 document.addEventListener('dragover', (event) => {
-  if (!view || view.kind !== 'basket') return;
+  if (!view || view.error) return;
+  // Dock 内部换位用的自定义类型：那不是文件，别接
+  if (event.dataTransfer && event.dataTransfer.types.includes('text/deskbasket-index')) return;
   event.preventDefault();
   document.body.classList.add('dragover');
   setDragState(true);
+  const folder = folderUnder(event);
+  const node = folder ? folder.node : null;
+  if (node !== dropFolderCell) {
+    clearDropFolder();
+    if (node) {
+      dropFolderCell = node;
+      node.classList.add('drop-into');
+    }
+  }
+  // 刻意**不设** dropEffect='move'：真移动是我们自己做的（basketfiles.placeInto），
+  // 而系统拖拽源（资源管理器）看到 MOVE 回执会自己去删源文件——那是"删两遍、删错"的坑。
 });
 document.addEventListener('dragleave', (event) => {
   // 拖到窗口外才取消高亮（子元素之间移动也会触发 dragleave）
   if (event.relatedTarget === null) {
     document.body.classList.remove('dragover');
+    clearDropFolder();
     setDragState(false);
   }
 });
 document.addEventListener('drop', async (event) => {
   setDragState(false);
-  if (!view || view.kind !== 'basket') return;
+  if (!view || view.error) return;
   event.preventDefault();
   document.body.classList.remove('dragover');
+  const folder = folderUnder(event);
+  clearDropFolder();
   const paths = api.pathsFromFiles();
   if (!paths.length) return;
-  const result = await api.addPaths(view.basketId, paths);
-  await reloadHome();
-  if (result) setStatus(addStatus(result));
+  const kind = view.kind;
+  const basketId = view.basketId || null;
+  const here = view.path || '';
+  let result = null;
+  if (folder) {
+    // 子文件夹格上松手：放进那一层（筐视图/dir 视图同一条路）
+    result = await api.popupDropInto({ basketId, dir: folder.entry.path, paths });
+    await refreshView();
+    const report = placeIntoStatus(result, folder.entry.name.replace(/\.(lnk|url)$/i, ''));
+    if (report) setStatus(report.text, report.bad);
+    return;
+  }
+  if (kind === 'basket') {
+    result = await api.addPaths(basketId, paths);
+    await reloadHome();
+    if (result) setStatus(addStatus(result));
+    return;
+  }
+  // dir 视图空白处：放进当前目录
+  result = await api.popupDropInto({ basketId, dir: here, paths });
+  await refreshView();
+  if (result && result.ok) {
+    const done = (result.moved || 0) + (result.copied || 0);
+    setStatus(done ? `已放入这一层 ${done} 项` : '没有放进去：' + ((result.failed && result.failed[0] && result.failed[0].reason) || '未知原因'), !done);
+  } else if (result) {
+    setStatus('没能放进去：' + (result.error || '未知原因'), true);
+  }
+});
+
+// 空白处右键 = 当前这一层的新建文件夹（文件夹格的右键菜单在 makeCell 里，已经有了）
+el('grid').addEventListener('contextmenu', (event) => {
+  if (!view) return;
+  if (event.target && event.target.closest && event.target.closest('.cell')) return;
+  event.preventDefault();
+  window.showContextMenu([
+    { key: 'newfolder', label: '新建文件夹' },
+    { key: 'refresh', label: '刷新' }
+  ], event).then(async (picked) => {
+    if (!picked) return;
+    await api.popupPresent();   // 同上：菜单关掉后别让弹窗被"失焦就收"抢在前面
+    if (picked === 'newfolder') await createFolder();
+    else if (picked === 'refresh') await refreshView();
+  });
 });
 
 // 点击弹窗本身保持主进程的聚焦状态（失焦自动关的定时器会被取消）

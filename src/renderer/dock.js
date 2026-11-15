@@ -571,6 +571,12 @@ let pointerOverItem = null;   // 最近一次报给主进程的判定（null = �
 let hoveredItem = null;       // 上一次指针停在哪一格：用来认"刚移进来"这一下（天气卡片）
 let lastMoveAt = 0;
 let pointerAllowed = false;   // 主进程确认 Dock 在此光标位置确实露出后才接收悬停
+// 悬停联动的复位宽限。主进程每 80ms 推一次光标，偶尔会因为一拍报数滞后判成"此刻不可交互"
+// 而发 null；单次 null 不等于鼠标走了，立刻把 pointer 清掉会让正在放大的图标缩回去、
+// 下一拍又放大，划过时就是一抽一抽（真机反馈）。只有连续 POINTER_GRACE_MS 没有任何鼠标
+// 信号（mousemove 或有效 probe）才真的收掉联动。
+const POINTER_GRACE_MS = 220;
+let lastPointerAt = 0;       // 最后一次收到真实鼠标信号的时刻
 // 页面自己的拖拽（Dock 条目换位）期间窗口必须保持"活"的：中途切成穿透，dragend/drop 就收不到了
 let dragInProgress = false;
 
@@ -607,14 +613,17 @@ function trackPointer(clientX, clientY, moved = true) {
 }
 
 dockEl.addEventListener('mousemove', (event) => {
-  if (!pointerAllowed) return;
+  // 放大联动只跟真实鼠标走，不受"这会儿允不允许交互"影响：穿透状态下 forward 仍会把
+  // mousemove 送进来，主进程偶发一拍 null 不该把动画掐断（trackPointer 里另管命中上报）。
   const base = dockEl.getBoundingClientRect();
   pointer = { x: event.clientX - base.left, y: event.clientY - base.top };
+  lastPointerAt = performance.now();
   trackPointer(event.clientX, event.clientY);
   ensureTick();
 });
 dockEl.addEventListener('mouseleave', () => {
-  pointer = null;
+  // 也不立刻清 pointer：setIgnoreMouseEvents 在穿透/接回之间切换时 Chromium 会派发伪
+  // mouseleave。真离开窗口后不再有鼠标信号，tick 里的宽限超时会把联动收掉。
   trackPointer(null, null);
 });
 window.addEventListener('resize', () => {
@@ -634,17 +643,17 @@ document.addEventListener('drop', () => {
 // 主进程每 ~80ms 推一次光标位置（窗口内坐标）：光标静止时不会有 mousemove，窗口滑到
 // 它底下 / 条目重排之后，页面得靠这一拍重新认一次指针在谁头上。
 api.onDockPointerProbe((point) => {
-  // null = 指针已经离开窗口：命中判定和放大联动一起复位（forward 不通时收不到 mouseleave，
-  // 只能靠这一条，否则图标会一直停在放大状态、窗口也一直以为自己该接鼠标）
+  // null = 主进程这一拍认定 Dock 不可交互（被遮挡、报数滞后一拍、或指针出了窗口）。
+  // 只撤销命中授权，不掐断放大联动：偶发一拍不该让图标抽一下。真的离开后不会再有
+  // mousemove / 有效 probe，tick 里的 hoverExpired 会在宽限超时后收掉联动与命中状态。
+  // 也别清 lastMoveAt：清零会让下一拍有效 probe 拿 80ms 前的旧坐标盖掉刚更新的位置。
   if (!point) {
     pointerAllowed = false;
-    pointer = null;
-    lastMoveAt = 0;
-    hoveredItem = null;
     reportPointerOverItem(false);
     return;
   }
   pointerAllowed = true;
+  lastPointerAt = performance.now();
   // 刚有过 mousemove 就不采信：那一拍的位置最多比它旧一拍（80ms），指针正在动的时候
   // 拿旧位置覆盖会把判定闪一下
   if (performance.now() - lastMoveAt < 120) return;
@@ -672,8 +681,18 @@ const FRAME_REF_MS = 1000 / 60;   // 归一化基准：60Hz 的一帧
 let lastFrameAt = 0;              // 上一帧时间戳（停转时清 0，下次唤醒从基准帧起步）
 let ticking = false;        // 动画循环是否在跑（静止时会停掉，见 tick 末尾）
 
+// 这一帧要不要把悬停联动的 pointer 收掉。抽成纯函数便于单测：只有"还在联动中 +
+// 主进程没授权 + 超过宽限没收到任何鼠标信号"三条同时成立才算真离开。
+function hoverExpired(now, allowed, lastSignalAt, currentPointer) {
+  return Boolean(currentPointer) && !allowed && now - lastSignalAt > POINTER_GRACE_MS;
+}
+
 function tick() {
   const now = performance.now();
+  if (hoverExpired(now, pointerAllowed, lastPointerAt, pointer)) {
+    pointer = null;
+    hoveredItem = null;
+  }
   // 帧间隔归一化：所有逐帧系数都是"60Hz 一帧"的值，这里按实际 dt 折算——
   // 120Hz 只走半步（不会速度翻倍）、掉帧多走几步（不会被拖慢）。
   // dt 夹在 [1, 50]ms：后台标签页被挂起再醒来会攒出一个巨大的间隔，不掐断会把动画一口气跳完。
@@ -890,4 +909,11 @@ api.onSpecialIconChanged((payload) => {
   }
 });
 
-refresh();
+// 内容布局完成后跨过两次绘制回调，再通知主进程显示透明窗口。
+// 不等待天气联网或全部图标解码，也不增加常驻计时器。
+refresh().catch((error) => {
+  console.error('Dock 首帧初始化失败', error);
+  render(); // 初始化异常时也画出空态，避免整窗永久不可见。
+}).then(() => {
+  requestAnimationFrame(() => requestAnimationFrame(() => api.dockPaintReady()));
+});

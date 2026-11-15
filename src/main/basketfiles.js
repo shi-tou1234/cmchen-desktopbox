@@ -25,11 +25,26 @@ const ILLEGAL = /[<>:"/\\|?*\u0000-\u001f]/g;
 const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const NAME_MAX = 48;   // 筐名本身限长 24，这里留足 " (10)" 这类后缀的富余
 
-// 路径比较用的键：绝对化 + 去掉末尾斜杠 + 小写（Windows 不区分大小写）
+// 路径键的大小写口径（basketfiles.keyOf 与 store.pathKey 共用这一处，保证两处一致）：
+//   · Windows 文件系统大小写不敏感 —— 折成小写，大小写变体算同一路径（沿用原行为与原注释语义）；
+//   · Linux / 大小写敏感的 macOS 卷 —— 保留原样，按真实文件系统语义区分大小写。
+// 这是显式的平台化设计（审查 F18）。__setPlatformForTests 仅供测试注入平台，生产默认取
+// process.platform；keyOf 保持单参数签名，避免影响 .map(keyOf) 这类把下标当第二参数的调用。
+let platformOverride = null;
+function __setPlatformForTests(value) {
+  platformOverride = value || null;
+  return platformOverride;
+}
+function foldPathCase(value) {
+  const platform = platformOverride || process.platform;
+  return platform === 'win32' ? value.toLowerCase() : value;
+}
+
+// 路径比较用的键：绝对化 + 去掉末尾斜杠 + 按平台折大小写
 function keyOf(target) {
   const value = String(target === undefined || target === null ? '' : target).trim();
   if (!value) return '';
-  return path.resolve(value).replace(/[\\/]+$/, '').toLowerCase();
+  return foldPathCase(path.resolve(value).replace(/[\\/]+$/, ''));
 }
 
 function samePath(a, b) {
@@ -316,10 +331,12 @@ async function moveInto(dir, src, { protect } = {}) {
 }
 
 module.exports = {
+  __setPlatformForTests,
   DEFAULT_DIR,
   NAME_MAX,
   compareTrees,
   errorText,
+  foldPathCase,
   placeInto,
   sanitizeFileName,
   ensureDir,

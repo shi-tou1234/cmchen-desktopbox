@@ -10,6 +10,7 @@ const organize = require('../src/main/organize');
 const store = require('../src/main/store');
 const baskets = require('../src/main/baskets');
 const mouse = require('../src/main/mouseState');
+const { showDockWhenReady } = require('../src/main/dockStartup');
 const main = fs.readFileSync(path.join(__dirname, '../src/main/main.js'), 'utf8');
 function source(name) {
  const start = main.indexOf('function '+name+'('); assert.ok(start>=0,name);
@@ -71,7 +72,7 @@ test('新旧鼠标协议兼容，完整全屏状态解析',()=>{
  assert.equal(mouse.parseReport('0:1:0:-1920:20:123:1').fullscreen,true);assert.equal(mouse.parseReport('0:1:0:20:20:123:0').fullscreen,false);assert.equal(mouse.parseReport('0:1:0:20:20:123:2'),null);assert.equal(mouse.parseReport('0:1').overDesktop,true);
 });
 test('常驻 F9 可隐藏与恢复，专注期间不唤出',()=>{
- let hidden=0,shown=0;const c=vm.createContext({settings:{dock_enabled:true,dock_auto_hide:false},focusActive:false,dockManuallyHidden:false,dockWindow:{isDestroyed:()=>false,hide:()=>hidden++,showInactive:()=>shown++},closeFolderPopup(){},hideWeatherCard(){},setDockTopmost(){}});vm.runInContext(source('toggleDockByHotkey'),c);c.toggleDockByHotkey();assert.equal(hidden,1);c.toggleDockByHotkey();assert.equal(shown,1);c.focusActive=true;c.toggleDockByHotkey();assert.equal(hidden,1);
+ let hidden=0,shown=0;const c=vm.createContext({settings:{dock_enabled:true,dock_auto_hide:false},focusActive:false,dockManuallyHidden:false,showDockWhenReady,dockWindow:{__dockPaintReady:true,isDestroyed:()=>false,hide:()=>hidden++,showInactive:()=>shown++},closeFolderPopup(){},hideWeatherCard(){},setDockTopmost(){}});vm.runInContext(source('toggleDockByHotkey'),c);c.toggleDockByHotkey();assert.equal(hidden,1);c.toggleDockByHotkey();assert.equal(shown,1);c.focusActive=true;c.toggleDockByHotkey();assert.equal(hidden,1);
 });
 test('专注/手动隐藏阻止 Dock 命中，遮挡回归仍有独立测试',()=>{
  const c=vm.createContext({focusActive:true,dockManuallyHidden:false});vm.runInContext(source('dockCanInteract'),c);assert.equal(c.dockCanInteract(),false);c.focusActive=false;c.dockManuallyHidden=true;assert.equal(c.dockCanInteract(),false);
@@ -102,7 +103,7 @@ test('删除、移出与剪贴板传输保持字符串路径协议',async()=>{
  }
 });
 test('自动专注遵循已知全屏报告，未知状态不错误唤出',()=>{
- let report={known:true,fullscreen:true},hides=0,shows=0;const c=vm.createContext({settings:{focus_manual:false,focus_fullscreen:true},mouseState:{ensureRunning(){},poll:()=>report},dockWindow:{isDestroyed:()=>false,hide:()=>hides++,showInactive:()=>shows++},windowLayer:{handleOf:()=>1},focusActive:false,dockManuallyHidden:false,dockSlideTimer:null,dockLayerRevision:0,popupExternalDrag:false,organizeBusy:false,closeMenuIfOpen(){},hideWeatherCard(){},closeFolderPopup(){},syncDock(){},applyDockLayerMode(){},viz:{applySetting(){}},broadcastState(){}});
+ let report={known:true,fullscreen:true},hides=0,shows=0;const c=vm.createContext({settings:{focus_manual:false,focus_fullscreen:true},mouseState:{ensureRunning(){},poll:()=>report},showDockWhenReady,dockWindow:{__dockPaintReady:true,isDestroyed:()=>false,hide:()=>hides++,showInactive:()=>shows++},windowLayer:{handleOf:()=>1},focusActive:false,dockManuallyHidden:false,dockSlideTimer:null,dockLayerRevision:0,popupExternalDrag:false,organizeBusy:false,closeMenuIfOpen(){},hideWeatherCard(){},closeFolderPopup(){},syncDock(){},applyDockLayerMode(){},viz:{applySetting(){}},broadcastState(){}});
  vm.runInContext(source('updateFocusMode'),c);c.updateFocusMode();assert.equal(c.focusActive,true);assert.equal(hides,1);report={known:false};c.updateFocusMode();assert.equal(c.focusActive,true);report={known:true,fullscreen:false};c.updateFocusMode();assert.equal(c.focusActive,false);assert.equal(shows,1);
 });
 

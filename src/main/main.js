@@ -42,6 +42,7 @@ const specials = require('./specials');
 const windowLayer = require('./windowLayer');
 const zorder = require('./zorder');
 const winFactory = require('./windows');
+const { prepareDockStartup, showDockWhenReady } = require('./dockStartup');
 const organize = require('./organize');
 const autostart = require('./autostart');
 const theme = require('./theme');
@@ -85,7 +86,9 @@ const POPUP_HOVER_CHECK_MS = 250;
 const POPUP_AWAY_CLOSE_MS = 900;
 // 光标停在桌面上时给的长预算：这时候用户多半是走去桌面抓一个文件回来拖进弹窗，
 // 路上不该把弹窗收掉（真正"拖起来了"的判据是鼠标键按着，见 mouseState）。
-const POPUP_AWAY_CLOSE_DESKTOP_MS = 6000;
+// 10 秒：6 秒对"翻两页桌面、找到那个文件再拎起来"仍然偏紧——窗口在用户还没抓到文件时
+// 就收了，回到原位置只剩桌面（表现就是"文件拖不进去、弹回去了"）。
+const POPUP_AWAY_CLOSE_DESKTOP_MS = 10000;
 // 空闲释放（内存）：弹窗和天气卡收起时只是 hide()——窗口藏起来了，但它的**渲染进程还整份
 // 活着**，页面、解码过的图标位图、JS 堆全在原地。实测一个用过的筐弹窗就是 80MB 上下，
 // 一个桌面工具挂在后台一整天，这部分等于白占。收起后闲置这么久就真的把窗口销毁，
@@ -223,7 +226,7 @@ function trustedSender(event) {
 // fallback 是拒绝时回给渲染层的形状（与正常返回同型，调用方不用改）。
 // 传函数则在拒绝那一刻求值——注册时 settings 可能还是 null（registerIpc 先于 bootstrap）。
 let fileMutationBusy = false;
-const BASKET_MUTATIONS = new Set(['basket:move-out', 'basket:trash', 'basket:rename-item', 'basket:delete', 'basket:update', 'basket:remove', 'basket:reorder', 'basket:pin', 'basket:prune', 'basket:create', 'basket:add', 'basket:pick-add', 'basket:paste-clipboard']);
+const BASKET_MUTATIONS = new Set(['basket:move-out', 'basket:trash', 'basket:rename-item', 'basket:delete', 'basket:update', 'basket:remove', 'basket:reorder', 'basket:pin', 'basket:prune', 'basket:create', 'basket:add', 'basket:pick-add', 'basket:paste-clipboard', 'popup:create-folder', 'popup:drop-into']);
 function guardHandle(channel, handler, fallback = null) {
   ipcMain.handle(channel, (event, ...args) => {
     if (!trustedSender(event)) {
@@ -1779,6 +1782,14 @@ function sendDockPointer(point) {
   }
 }
 
+// 报数新鲜度：侦察进程每 125ms 报一次，主进程每 80ms 问一次，所以"报数比当前光标旧一拍"
+// 是常态，不是异常。以前拿 12px 的坐标差当新鲜度代理（≈ 96px/s 就判失败），光标只要正常
+// 划过 Dock，每 125ms 就有一两拍被判成"不可交互" → sendDockPointer(null) → 页面把悬停联动
+// 清零 → 图标缩回去，下一拍又放大，真机上就是一抽一抽。现在新鲜度只看报数时间戳，坐标差
+// 只用来排掉"光标已经瞬移到别处、这份无遮挡结论明显失效"的情况（正常划过远不到 160px）。
+const DOCK_POINTER_MAX_AGE_MS = 400;
+const DOCK_POINTER_MAX_DRIFT = 160;
+
 // 坐标落在窗口矩形里不代表 Dock 可见；穿透转发会越过遮挡窗口发送 mousemove。
 function dockCanInteract() {
   if (focusActive || dockManuallyHidden) return false;
@@ -1787,9 +1798,11 @@ function dockCanInteract() {
   if (process.platform !== 'win32') return true;
   const mouse = mouseState.poll();
   if (!mouse.known || !mouse.dockExposed || !mouse.pointer) return false;
+  if (!Number.isFinite(mouse.at) || Date.now() - mouse.at > DOCK_POINTER_MAX_AGE_MS) return false;
   const observed = screen.screenToDipPoint(mouse.pointer);
   const current = screen.getCursorScreenPoint();
-  return Math.abs(observed.x - current.x) <= 12 && Math.abs(observed.y - current.y) <= 12;
+  return Math.abs(observed.x - current.x) <= DOCK_POINTER_MAX_DRIFT &&
+         Math.abs(observed.y - current.y) <= DOCK_POINTER_MAX_DRIFT;
 }
 
 function tickDockClickThrough() {
@@ -1952,20 +1965,24 @@ function createDockWindow() {
     skipTaskbar: true,
     focusable: false,   // 不抢焦点：点图标不打断当前应用的输入
     glass: false,       // Dock 永远完全透明，不跟随磨砂模式
+    thickFrame: false,  // 固定透明 Dock 不需要 Windows 的原生边框/启动动画
     title: `${APP_NAME} Dock`
   });
   zorderSent = { on: null, at: 0 };
   dockLayerRevision += 1;
   attachDiagnostics(win, 'dock');
-  winFactory.loadPage(win, 'dock.html');
-  win.once('ready-to-show', () => {
-    if (!focusActive && !dockManuallyHidden) win.show();
+  // 明确清除系统材质，并在首次显示前重申透明背景；不靠改设置/等天气触发后续重绘。
+  if (process.platform === 'win32') win.setBackgroundMaterial('none');
+  win.setBackgroundColor('#00000000');
+  prepareDockStartup(win, ipcMain, () => {
     // 默认整窗穿透：Dock 的空白处（尤其是顶上那条放大余量）不该吃掉桌面上的点击。
     // 指针压到条目上时页面会把鼠标要回来，见「Dock 鼠标穿透」那节。
     if (dockWindow === win) setDockClickThrough(true);
+    if (!focusActive && !dockManuallyHidden) showDockWhenReady(win);
     // 常驻模式的「桌面层下沉」已停用（见 applyDockLayerMode 里的说明：
     // 外部 SetWindowPos 走链会让 Electron 的置顶/窗口树账本失同步，peek 两个 bug 的总根源）
   });
+  winFactory.loadPage(win, 'dock.html');
   win.on('closed', () => {
     if (dockWindow === win) dockWindow = null;
   });
@@ -2141,7 +2158,7 @@ function toggleDockByHotkey() {
     dockManuallyHidden = !dockManuallyHidden;
     if (dockWindow && !dockWindow.isDestroyed()) {
       if (dockManuallyHidden) { dockWindow.hide(); closeFolderPopup('热键收起'); hideWeatherCard(); }
-      else { dockWindow.showInactive(); setDockTopmost(false); }
+      else { showDockWhenReady(dockWindow); setDockTopmost(false); }
     }
     return;
   }
@@ -2213,7 +2230,7 @@ function updateFocusMode() {
     if (dockWindow && !dockWindow.isDestroyed()) dockWindow.hide();
   } else {
     syncDock();
-    if (!dockManuallyHidden && dockWindow && !dockWindow.isDestroyed()) dockWindow.showInactive();
+    if (!dockManuallyHidden) showDockWhenReady(dockWindow);
     applyDockLayerMode();
   }
   viz.applySetting();
@@ -2611,6 +2628,38 @@ function canEnterPopupDir(target) {
   const parent = popupSessionDir ? filebrowse.parentOf(popupSessionDir) : '';
   if (parent && basketfiles.keyOf(parent) === key) return true;
   return false;
+}
+
+// ---------------------------------------------------------------- 弹窗内的写操作
+//
+// 弹窗里「新建文件夹」和「把文件拖进子文件夹」都要真动磁盘，所以门槛跟 SEC-2 同一条线：
+// 目标目录必须真实存在、确实是目录，而且只在**筐目录之下**或**本次弹窗真浏览过的地方**才放行。
+// 不能因为渲染层传了个路径就往外写——那就成了任意目录写入的后门。
+function dirWritableInPopup(target) {
+  const value = store.normalizePath(target);
+  if (!value) return '';
+  try {
+    if (!fs.statSync(value).isDirectory()) return '';
+  } catch (_) {
+    return '';
+  }
+  if (popupBrowseDirs.has(basketfiles.keyOf(value))) return value;
+  // 走过目录的直接子项：弹窗里画出来的文件夹格就是这些，用户看得见的东西得能当落点。
+  // 只放行一层，父目录必须是本次会话真的走过/本来就归属的地方，不是任意路径。
+  if (popupBrowseDirs.has(basketfiles.keyOf(path.dirname(String(value))))) return value;
+  for (const basket of settings.baskets || []) {
+    if (basket.dir && basketfiles.isInside(basket.dir, value)) return value;
+  }
+  return '';
+}
+
+// 在 parent 里建一个真文件夹，重名顺延成「新建文件夹 (2)」。
+// 不用 recursive：父目录必须已经在那儿（上面刚校验过），别顺手把路径上缺的层也建出来。
+function createFolderIn(parent) {
+  const taken = fs.readdirSync(parent);
+  const full = path.join(parent, basketfiles.uniqueName('新建文件夹', taken));
+  fs.mkdirSync(full);
+  return full;
 }
 
 // dock:activate 的目标白名单（SEC-2）：必须在 Dock 清单里，或对上某个系统项的
@@ -3934,6 +3983,93 @@ async function basketPreviewFor(basket) {
     return result;
   });
 
+  // 弹窗里「新建文件夹」（4.0）：筐视图建在筐目录里，并当场登记成筐的顶层条目——
+  // 筐的清单只认登记过的路径，光在磁盘上建个目录是看不见的（这就是用户说的
+  // "得先在桌面上建好再拖进来"）。dir 视图建在当前目录里，目录是实时列出来的，刷一下就在。
+  guardHandle('popup:create-folder', (event, { kind, basketId, path: parentPath } = {}) => {
+    const basket = basketId ? findBasket(basketId) : null;
+    let parent = store.normalizePath(parentPath) || '';
+    let registerInto = '';
+
+    if (kind === 'basket' || (parentPath === undefined && basket)) {
+      if (!basket) return { ok: false, error: '这个筐已经不在了' };
+      // 筐目录可能还没定过、或者被用户删掉了：与"加文件"同一条路，按筐名重新定一个
+      const taken = new Set(settings.baskets.filter((item) => item.dir).map((item) => path.basename(item.dir)));
+      parent = resolveBasketDir(basket, taken);
+      try {
+        basketfiles.ensureDir(parent);
+      } catch (error) {
+        return { ok: false, error: '筐的文件夹建不起来：' + basketfiles.errorText(error) };
+      }
+      if (!basket.dir) replaceBasket({ ...basket, dir: parent });
+      registerInto = basket.id;
+    } else {
+      parent = dirWritableInPopup(parent);
+      if (!parent) {
+        console.log(`[popup] 拒绝在归属外目录新建文件夹：${parentPath}`);
+        return { ok: false, error: '这个位置不允许新建文件夹' };
+      }
+    }
+
+    let created = '';
+    try {
+      created = createFolderIn(parent);
+    } catch (error) {
+      return { ok: false, error: '新建文件夹失败：' + basketfiles.errorText(error) };
+    }
+
+    if (registerInto) {
+      const current = findBasket(registerInto);
+      if (current) {
+        replaceBasket(basketModel.addItem(current, created).basket);
+        syncDock();
+      }
+    }
+    console.log(`[popup] 新建文件夹：${created}（来源 ${pageTag(event)}）`);
+    return { ok: true, path: created, name: path.basename(created) };
+  });
+
+  // 把拖进弹窗的文件放进指定文件夹（4.0）：在子文件夹格子上松手 = 放进那一格，
+  // dir 视图里松手 = 放进当前这个目录。落在筐根目录仍走 addPathsToBasket（那里要登记成
+  // 筐的条目）；落进子文件夹就不登记——它是那一层文件夹里的东西，不属于筐的顶层清单。
+  guardHandle('popup:drop-into', async (event, { basketId, dir, paths } = {}) => {
+    const list = (Array.isArray(paths) ? paths : []).map(store.normalizePath).filter(Boolean);
+    if (!list.length) return { ok: false, error: '没有可放入的文件' };
+    const target = dirWritableInPopup(dir);
+    if (!target) {
+      console.log(`[popup] 拒绝把文件放进归属外目录：${dir}`);
+      return { ok: false, error: '这个位置不允许放入文件' };
+    }
+    const basket = basketId ? findBasket(basketId) : null;
+    if (basket && basket.dir && basketfiles.samePath(basket.dir, target)) {
+      popupPinned = true;   // 放完别自动收：用户还要接着收拾
+      const result = await addPathsToBasket(basket, list, `拖进筐（来源 ${pageTag(event)}）`);
+      return { ok: true, ...result, target, registered: true };
+    }
+    popupPinned = true;
+    // 被 Dock / 别的筐引用着的只复制不移动；本筐自己的条目允许真移（筐根 → 子文件夹，
+    // 跟资源管理器里同一块盘内拖动的语义一致），旧登记会在下次读筐视图时按"文件不在了"清掉
+    const protect = protectedKeysFor(basket ? basket.id : undefined);
+    const failed = [];
+    let moved = 0;
+    let copied = 0;
+    let skipped = 0;
+    for (const item of list) {
+      if (basketfiles.isInside(target, item)) { skipped += 1; continue; }   // 已经在里面了
+      if (!fs.existsSync(item)) { failed.push({ name: path.basename(item), reason: '源文件不存在' }); continue; }
+      const mode = protect.has(basketfiles.keyOf(item)) ? 'copy' : 'move';
+      const result = await basketfiles.placeInto(target, item, { mode });
+      if (!result.ok) { failed.push({ name: path.basename(item), reason: result.error }); continue; }
+      if (result.action === 'move') moved += 1; else copied += 1;
+    }
+    if (basket) basketScanCache.delete(basket.id);
+    console.log(
+      `[popup] 拖入 ${target}：移动 ${moved}、复制 ${copied}、跳过 ${skipped}、失败 ${failed.length}` +
+        `（来源 ${pageTag(event)}）`
+    );
+    return { ok: true, moved, copied, skipped, failed, target, registered: false };
+  });
+
   // 拖右下角把手改弹窗尺寸（#3）：夹到合法范围与所在屏工作区内，再 setBounds，
   // 触发的 resized 会被防抖落盘。返回 false 表示这个窗口已经不算数了（被顶掉/销毁）。
   ipcMain.handle('popup:resize', (event, { width, height } = {}) => {
@@ -4279,7 +4415,7 @@ if (!singleInstance) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (!focusActive && dockWindow && !dockWindow.isDestroyed()) dockWindow.show();
+    if (!focusActive && !dockManuallyHidden) showDockWhenReady(dockWindow);
   });
 
   app.whenReady().then(() => {

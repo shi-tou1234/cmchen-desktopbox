@@ -15,6 +15,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const MAIN_DIR = path.join(__dirname, '..', 'src', 'main');
 const MAIN_SOURCE = fs.readFileSync(path.join(MAIN_DIR, 'main.js'), 'utf8');
@@ -150,13 +151,45 @@ test('渲染层命中测试：认的是 .dock-item，状态不变不重复上报
 test('渲染层：指针离开窗口 / 主进程报 null 时都要复位成穿透', () => {
   assert.match(
     DOCK_RENDERER,
-    /mouseleave[\s\S]{0,200}trackPointer\(null, null\)/,
+    /mouseleave[\s\S]{0,300}trackPointer\(null, null\)/,
     'mouseleave 要复位命中判定'
   );
   const at = DOCK_RENDERER.indexOf('api.onDockPointerProbe');
   assert.ok(at > 0, '没订阅 dock:pointer');
-  const body = DOCK_RENDERER.slice(at, at + 900);
+  const body = DOCK_RENDERER.slice(at, at + 1200);
   assert.match(body, /if \(!point\)[\s\S]*reportPointerOverItem\(false\)/, '收到 null 要复位');
   // 刚有过 mousemove 就别采信：主进程那一拍送的是上一刻的位置，拿它盖会闪
   assert.ok(body.includes('lastMoveAt'), '要用 lastMoveAt 挡住过期位置');
+});
+
+// 真机反馈：鼠标划过 Dock 时图标一抽一抽。主进程每 80ms 一拍的 null 只代表"这一拍
+// 判定不可交互"，不代表鼠标走了；收到就清 pointer 会让放大→缩小→放大反复横跳。
+test('渲染层：单拍 null 不掐断悬停联动，恢复授权要刷新信号时间', () => {
+  const at = DOCK_RENDERER.indexOf('api.onDockPointerProbe');
+  const body = DOCK_RENDERER.slice(at, at + 1200);
+  const nullBranch = body.slice(body.indexOf('if (!point)'), body.indexOf('pointerAllowed = true'));
+  assert.doesNotMatch(nullBranch, /pointer\s*=\s*null/, '单拍 null 不能清掉悬停位置');
+  assert.doesNotMatch(nullBranch, /lastMoveAt\s*=\s*0/, '别清 lastMoveAt：下一拍旧坐标会盖掉新位置');
+  assert.match(nullBranch, /pointerAllowed = false/, '要撤销命中授权');
+  assert.match(body, /pointerAllowed = true;\s*lastPointerAt = performance\.now\(\)/, '有效 probe 要续上信号');
+  assert.doesNotMatch(
+    DOCK_RENDERER,
+    /addEventListener\('mousemove'[\s\S]{0,120}if \(!pointerAllowed\) return/,
+    '放大联动要始终跟随真实 mousemove'
+  );
+});
+
+test('渲染层：只有连续静默超过宽限才收掉联动（纯函数行为）', () => {
+  const body = functionBody(DOCK_RENDERER, 'hoverExpired');
+  assert.ok(body, '没找到 hoverExpired');
+  const grace = Number(DOCK_RENDERER.match(/const POINTER_GRACE_MS = (\d+);/)[1]);
+  assert.ok(grace >= 160, '宽限要盖得住至少两拍 80ms 轮询');
+  const c = vm.createContext({ POINTER_GRACE_MS: grace, Boolean });
+  vm.runInContext(body, c);
+  const pointer = { x: 10, y: 10 };
+  assert.equal(c.hoverExpired(1000, true, 900, pointer), false, '主进程授权中');
+  assert.equal(c.hoverExpired(1000, false, 900, pointer), false, '刚静默 100ms：不能收');
+  assert.equal(c.hoverExpired(900 + grace + 1, false, 900, pointer), true, '静默超过宽限：该收了');
+  assert.equal(c.hoverExpired(5000, true, 0, pointer), false, '一直授权就别收');
+  assert.equal(c.hoverExpired(5000, false, 0, null), false, '本来就没在联动');
 });

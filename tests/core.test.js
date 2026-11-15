@@ -416,10 +416,17 @@ test('换收录来源目录：黑名单按文件名迁到新目录，冲突条�
   const items = [newDir[0], newDir[1], P(`${SCUT}/示例乙.lnk`)];
   assert.deepStrictEqual(dockmodel.removeItems(items, migrated), [items[1], items[2]]);
   assert.deepStrictEqual(dockmodel.removeItems([], migrated), []);
-  // 路径键在所有平台都不区分大小写（配置里大小写打错的同一文件要能对上）
-  // 大小写变体也要对上（含盘符/目录名的大小写）：基址同样按平台取
+  // 路径键的大小写口径按平台区分（审查 F18）：Windows 不区分大小写，配置里大小写打错的
+  // 同一文件要对上；大小写敏感卷（Linux / 部分 macOS）按真实文件系统语义，大小写变体不再对上。
   const SCUT_UPPER = process.platform === 'win32' ? 'E:/SHORTCUTS' : '/SHORTCUTS';
-  assert.deepStrictEqual(dockmodel.removeItems([`${SCUT_UPPER}/某工具.lnk`], migrated), []);
+  if (process.platform === 'win32') {
+    assert.deepStrictEqual(dockmodel.removeItems([`${SCUT_UPPER}/某工具.lnk`], migrated), []);
+  } else {
+    assert.deepStrictEqual(
+      dockmodel.removeItems([`${SCUT_UPPER}/某工具.lnk`], migrated),
+      [`${SCUT_UPPER}/某工具.lnk`]
+    );
+  }
 });
 
 test('排序：越界与同位置都是原样返回', () => {

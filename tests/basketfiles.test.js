@@ -37,7 +37,7 @@ test('重名顺延：保留扩展名，加 (2)/(3)', () => {
   assert.strictEqual(basketfiles.uniqueName('资料', null), '资料');
 });
 
-test('路径判据：同盘、在内、大小写与末尾斜杠都不影响', () => {
+test('路径判据：同盘、在内、末尾斜杠不影响；大小写按平台语义（审查 F18）', () => {
   const dir = path.join('E:', '文件筐', '资料');
   assert.strictEqual(basketfiles.isInside(dir, path.join('E:', '文件筐', '资料', 'a.txt')), true);
   assert.strictEqual(basketfiles.isInside(dir, dir), true);
@@ -49,7 +49,9 @@ test('路径判据：同盘、在内、大小写与末尾斜杠都不影响', ()
     assert.strictEqual(basketfiles.sameVolume('C:\\x\\a.txt', 'E:\\文件筐'), false);
   } else {
     // POSIX 没有盘符概念：sameVolume 一律为真（跨挂载点的 rename 会抛 EXDEV，由 placeInto 兜）
-    assert.strictEqual(basketfiles.samePath('/A/b.txt', '/a/B.txt'), true);
+    // 大小写敏感卷按真实文件系统语义比较（审查 F18）：大小写变体不再算同一路径
+    assert.strictEqual(basketfiles.samePath('/A/b.txt', '/a/B.txt'), false);
+    assert.strictEqual(basketfiles.samePath('/A/b.txt', '/A/b.txt'), true);
     assert.strictEqual(basketfiles.sameVolume('/x/a.txt', '/mnt/文件筐'), true);
   }
 });
