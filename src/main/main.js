@@ -131,6 +131,19 @@ let popupHoverTimer = null;    // 鼠标离开自动关的轮询
 let popupExternalDrag = false; // 渲染层报上来的"有东西正拖在弹窗上"（见 popup:drag-state）
 let popupExternalDragAt = 0;   // 上面这条是何时报的（过期作废，见 POPUP_DRAG_STALE_MS）
 let menuOpen = false;          // 自绘右键菜单开着：期间弹窗不许"失焦即关"
+// 行内改名输入框开着：弹窗绝不自动收起。右键菜单关掉后主进程会补挂一个只有 220ms 的
+// "失焦就收"定时器（POP-2），改名输入框常常还没挂上/刚打两个字就被收掉，名字于是原样画回
+// 去——用户看到的就是"改名又变回去了"。见 popup:rename-state。
+let popupEditorActive = false;
+// 菜单点「重命名」到渲染层真正挂上输入框之间有一段 IPC 往返，而失焦收窗只有 220ms——
+// 实测这段保护来晚一步，弹窗先被收掉了。所以主进程在**菜单点选那一刻**先给它一段
+// 宽限（渲染层 popup:rename-state(true) 会接管，结束时清掉；没接管也会自动过期）。
+let popupEditorPendingUntil = 0;
+const POPUP_EDITOR_PENDING_MS = 4000;
+const MENU_EDITOR_KEYS = new Set(['rename']);   // 会打开行内输入框的菜单项
+function popupEditorProtected() {
+  return popupEditorActive || Date.now() < popupEditorPendingUntil;
+}
 
 // 天气：快照常驻内存（页面随时可取），由定时器刷新；悬浮卡片是另一个小窗口
 let weatherSnapshot = null;    // { ok, city, place, current, days, updatedAt, error, installed }
@@ -2688,12 +2701,14 @@ let popupPinned = false;   // 拖入/拖出发生后置 true：弹窗不再自�
 function closeFolderPopup(reason = '?') {
   // 拖入/拖出之后用户要求弹窗保持开着——四条自动收起的路（失焦/离开/Dock 收起/热键）
   // 全部让路；显式的关闭（✕/Esc/再点一次/打开别的筐）照旧
-  if (popupPinned && ['blur', 'away', 'Dock 收起', '热键收起'].includes(reason)) {
+  if ((popupPinned || popupEditorProtected()) && ['blur', 'away', 'Dock 收起', '热键收起', '专注模式'].includes(reason)) {
     console.log(`[popup] 已钉住，忽略自动收起（${reason}）`);
     return;
   }
-  popupPinned = false;
   console.log(`[popup] 收起（${reason}）`);
+  popupPinned = false;
+  popupEditorActive = false;          // 显式关闭（✕/Esc/换内容）：输入框没了，状态别留着
+  popupEditorPendingUntil = 0;
   clearTimeout(popupBlurTimer);
   popupBlurTimer = null;
   stopPopupAwayWatch();
@@ -2744,7 +2759,7 @@ function schedulePopupIdleRelease() {
     popupIdleTimer = null;
     const win = popupWindow;
     if (!win || win.isDestroyed()) return;
-    if (win.isVisible() || popupPinned || popupExternalDrag || menuOpen) return;
+    if (win.isVisible() || popupPinned || popupEditorProtected() || popupExternalDrag || menuOpen) return;
     console.log('[popup] 空闲释放：销毁隐藏的弹窗窗口（回收内存）');
     // 先把账本清干净再 destroy：closed 处理里的 if (popupWindow === win) 这时已经对不上，
     // 不能再指望它来重置状态
@@ -2791,6 +2806,7 @@ function popupPointerNear() {
 //   · 光标停在桌面上：多半正走去抓一个文件（这一条只用于 Dock 收起的连带关闭，
 //     弹窗自己的离开判定给它的是"长预算"而不是"豁免"，见 startPopupAwayWatch）。
 function popupAutoCloseBlocked(includeDesktop = true) {
+  if (popupEditorProtected()) return true;   // 行内改名中：鼠标/焦点怎么动都不收窗
   if (popupPointerNear()) return true;
   const mouse = mouseState.poll();
   if (mouse.held || popupDragActive()) return true;
@@ -2840,6 +2856,8 @@ function schedulePopupBlurClose(blurredAt = Date.now(), rechecks = 0) {
   popupBlurTimer = setTimeout(() => {
     popupBlurTimer = null;
     if (!popupWindow || popupWindow.isDestroyed()) return;
+    if (menuOpen) return;                 // 菜单正开着：弹窗的失焦不该收窗
+    if (popupEditorProtected()) return;   // 改名输入框（含即将挂上）不许被这个 220ms 定时器收窗
     // QuickLook 预览窗（1.4.0）开着时弹窗钉住：预览盖在网格上，关预览回到弹窗
     if (preview.isOpen()) return;
     // 注意不含"光标在桌面上"：点桌面关掉弹窗是用户明确的意思，这里不该豁免
@@ -2992,8 +3010,8 @@ async function openFolderPopup(kind, payload, anchorXInDock) {
   });
   win.on('blur', () => {
     if (popupWindow !== win) return;
-    // 原生命令菜单弹着的这一小段时间不算"失焦"
-    if (menuOpen) return;
+    // 自绘菜单弹着的这一小段时间、以及改名输入框（含刚点完菜单还没挂上的空档）不算"失焦"
+    if (menuOpen || popupEditorProtected()) return;
     schedulePopupBlurClose();
   });
   win.on('focus', () => {
@@ -3059,6 +3077,7 @@ function menuPosition(ownerBounds, clickX, clickY, size) {
 // 弹窗还聚焦着就不用补——它压根没失焦。
 function resumePopupBlurAfterMenu() {
   if (!popupWindow || popupWindow.isDestroyed()) return;
+  if (popupEditorProtected()) return;   // 菜单点的是「重命名」：别给刚要挂的输入框埋定时炸弹
   if (popupWindow.isFocused()) return;
   schedulePopupBlurClose();
 }
@@ -3094,6 +3113,10 @@ function openMenuWindow(event, payload = {}) {
   if (!items.some((item) => !item.separator)) return Promise.resolve(null);
 
   closeMenuWindow(null);            // 连点两次右键：先收掉上一个（顺带把上一个等的人放掉）
+  // 上面这次 closeMenuWindow 会补挂一个 220ms 的「失焦就收」；菜单马上要重新打开，
+  // 那颗定时炸弹得就地拆掉——否则用户看菜单超过 220ms，弹窗就在菜单还开着的时候被收走
+  // （点「重命名」自然也就没了落点，名字又画回原名）。
+  cancelPopupBlurClose();
   const owner = BrowserWindow.fromWebContents(event.sender);
   const ownerBounds = owner && !owner.isDestroyed() ? owner.getContentBounds() : null;
   const size = dockmodel.menuLayout(items);
@@ -3498,15 +3521,38 @@ function registerIpc() {
     return { done, failed, total: saved.items.length };
   });
 
-  // F2 / 右键「重命名」：改的是筐目录里的真实文件名（同盘 rename，原子）
+  // 改名之后把应用里所有指向旧路径的引用一起换掉：筐清单、常用固定、Dock 快捷方式。
+  // 以前只改当前筐，别的引用还指着旧路径，下一拍「清掉已不存在的登记」就会把格子弄没
+  // 或者看起来名字又回去了。缓存也一起作废，免得下一帧还画旧名字。
+  function renamePathReferences(oldPath, dest) {
+    const swap = (item) => basketfiles.samePath(item, oldPath) ? dest : item;
+    settings.baskets = (settings.baskets || []).map((item) => ({
+      ...item,
+      items: (item.items || []).map(swap),
+      pinned: (item.pinned || []).map(swap)
+    }));
+    settings.dock_items = (settings.dock_items || []).map(swap);
+    basketScanCache.clear();
+    persist();
+    syncDock();
+    prewarmBasketIcons();
+    // 会话白名单里记过的旧目录也换掉：改完名接着往里拖文件不该被判"归属外"
+    const oldKey = basketfiles.keyOf(oldPath);
+    if (popupBrowseDirs.delete(oldKey)) rememberPopupDir(dest);
+    if (basketfiles.samePath(popupSessionDir, oldPath)) popupSessionDir = dest;
+  }
+
+  // F2 / 右键「重命名」：改的是磁盘上的真实名字（同盘 rename，原子）。
+  // 4.0.2 起不再只认筐清单：点进子文件夹后看到的条目没有登记在清单里，但它们是应用
+  // 本来拥有的目录里的东西，也该能改名。归属仍卡在同一条白名单（dirWritableInPopup），
+  // 归属外的路径一律拒绝。
   guardHandle('basket:rename-item', (_event, { basketId, oldPath, newName } = {}) => {
-    const basket = findBasket(basketId);
-    if (!basket) return { ok: false, error: '筐不存在' };
-    // 归属校验（SEC-3）：oldPath 必须在该筐清单里，否则拒绝（newName 的清洗已安全，不动）
-    const inBasket = (basket.items || []).some(
+    const basket = basketId ? findBasket(basketId) : null;
+    const inBasket = Boolean(basket && (basket.items || []).some(
       (item) => basketfiles.keyOf(item) === basketfiles.keyOf(oldPath)
-    );
-    if (!inBasket) return { ok: false, error: '这个文件不在这个筐里' };
+    ));
+    const parent = oldPath ? path.dirname(String(oldPath)) : '';
+    if (!inBasket && !dirWritableInPopup(parent)) return { ok: false, error: '这个文件不在筐里' };
     if (organizeBusy) return { ok: false, error: '整理或撤销期间请稍候' };
     const clean = basketfiles.sanitizeFileName(newName);
     if (!clean) return { ok: false, error: '这个名字用不了' };
@@ -3519,12 +3565,7 @@ function registerIpc() {
     } catch (error) {
       return { ok: false, error: String((error && error.message) || error) };
     }
-    replaceBasket({
-      ...basketModel.updateItems(basket, (basket.items || []).map(it => basketfiles.samePath(it, oldPath) ? dest : it)),
-      pinned: (basket.pinned || []).map(it => basketfiles.samePath(it, oldPath) ? dest : it)
-    });
-    syncDock();
-    prewarmBasketIcons();
+    renamePathReferences(oldPath, dest);
     console.log(`[basket] 重命名：${path.basename(oldPath)} → ${clean}`);
     return { ok: true, path: dest };
   });
@@ -3831,7 +3872,14 @@ async function basketPreviewFor(basket) {
   ipcMain.handle('menu:items', () => menuItems);
 
   ipcMain.handle('menu:pick', (_event, { key } = {}) => {
-    closeMenuWindow(key === undefined ? null : String(key));
+    const picked = key === undefined ? null : String(key);
+    // 「重命名」会打开行内输入框：这一刻就把弹窗护住。等渲染层上报再护就来不及了——
+    // 菜单关掉后补挂的失焦收窗只有 220ms，IPC 往返经常比它慢（实测弹窗先收、名字白改）。
+    if (picked && MENU_EDITOR_KEYS.has(picked)) {
+      popupEditorPendingUntil = Date.now() + POPUP_EDITOR_PENDING_MS;
+      cancelPopupBlurClose();
+    }
+    closeMenuWindow(picked);
     return true;
   });
 
@@ -3899,6 +3947,25 @@ async function basketPreviewFor(basket) {
     if (win.isMinimized()) win.restore();
     win.show();
     win.focus();
+    return true;
+  });
+
+  // 行内改名期间把弹窗钉住：右键菜单关掉后主进程补挂的 220ms「失焦就收」、鼠标离开轮询、
+  // Dock 收起/热键，全都不许把输入框收掉（否则打了一半的名字被当成取消，格子画回原名）。
+  // 只认当前弹窗窗口自己发的状态，别的窗口改不了这个标志。
+  ipcMain.handle('popup:rename-state', (event, { active } = {}) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed() || win !== popupWindow) return false;
+    popupEditorActive = Boolean(active);
+    if (popupEditorActive) {
+      popupEditorPendingUntil = 0;   // 正式接管，宽限期不再需要
+      cancelPopupBlurClose();
+      clearPopupIdleRelease();
+    } else {
+      popupEditorPendingUntil = 0;
+      // 不主动补挂「失焦就收」：刚改完名让用户看清状态行的回执，鼠标移开交给
+      // away 轮询自然收起；真失焦了 blur 事件自己会补挂。
+    }
     return true;
   });
 

@@ -269,17 +269,19 @@ function makeCell(entry, index) {
         { key: 'pin', label: entry.pinned ? '取消常用固定' : '固定为常用（排在前面）' },
         { key: 'copy', label: '复制' },
         { key: 'trash', label: '删除（进回收站）' },
-        { key: 'rename', label: '重命名' },
         { key: 'moveout', label: '移出到桌面' }
       );
     }
+    // 筐视图和目录视图都能改名：前者改的是筐清单条目，后者改的是当前目录里的真文件。
+    // 以前只在筐视图给这一项，点进文件夹后里面新建的子文件夹就完全没法改名字。
+    items.push({ separator: true }, { key: 'rename', label: '重命名' });
     window.showContextMenu(items, event).then(async (picked) => {
       if (!picked) return;
       if (picked === 'open') {
         if (isDirEntry(entry)) navigate(entry.path, 'forward');
         else api.openPath(entry.path);
       } else if (picked === 'newsub') {
-        await api.popupPresent();   // 菜单关掉后主进程会补挂"失焦就收"：先续住弹窗再动手
+        await keepPopupOpen();   // 菜单关掉后主进程会补挂"失焦就收"：先续住弹窗再动手
         await createFolder(entry.path);
       } else if (picked === 'reveal') {
         api.revealPath(entry.path);
@@ -309,6 +311,18 @@ async function openEntry(entry) {
     const result = await api.openPath(entry.path);
     if (result && result.ok === false) setStatus('打不开：' + entry.name, true);
   }
+}
+
+// 让弹窗重新露面，并作废页面里"收起动画播完就清空内容"的那次倒计时。
+// popup:present 只 showInactive、不推新载荷；如果此刻正处在收起动画里，页面 320ms 后
+// 会把格子整片清掉（view=null），窗口明明亮着却没内容、输入框也会跟着消失。
+async function keepPopupOpen() {
+  const ok = await api.popupPresent().catch(() => false);
+  if (ok) {
+    closeStamp += 1;
+    document.body.classList.remove('collapsed');
+  }
+  return ok;
 }
 
 let statusHoldUntil = 0;   // 某些提示（如拖出=复制）不想被 2 秒轮询重绘立刻冲掉
@@ -394,19 +408,29 @@ async function moveOutSelection() {
   setStatus('已移出到桌面 ' + ok.length + ' 项' + (bad.length ? '；' + bad.length + ' 项失败' : '') + '，筐里共 ' + result.total + ' 项');
 }
 
-// 行内改名：把格子上的名字换成输入框，Enter 提交、Esc 取消（改的是筐目录里的真文件名）
-function startRename(entry, cell) {
-  // 右键菜单开着的那几秒里视图可能自动重画过：挂到脱节格子上的输入框用户看不见
-  if (!cell.isConnected) {
-    reloadHome();
+// 行内改名：把格子上的名字换成输入框，Enter 提交、Esc 取消（改的是磁盘上的真名字）。
+// 4.0.2：右键菜单关掉后主进程会补挂一个 220ms 的「失焦就收」，弹窗常在打字途中被收掉，
+// 输入框随之被判"放弃"，格子又画回「新建文件夹」——所以动手前先把弹窗钉住、露面、聚焦。
+async function startRename(entry, cell) {
+  if (api.popupRenameState) await api.popupRenameState(true).catch(() => false);
+  if (api.popupPresent) await keepPopupOpen();
+  // **先把弹窗拿到前台，再挂输入框**：右键菜单是另一个小窗口，菜单关掉后焦点还在它身上；
+  // 顺序反过来（先挂输入框再去抢焦点）时，"窗口刚拿到焦点"这一下会让刚挂上的输入框瞬间失焦。
+  if (api.popupFocus) await api.popupFocus().catch(() => false);
+  // 菜单开着的那几秒、加上上面这几个 await，视图可能已经重画过：原格子早就脱节了，
+  // 把输入框挂上去用户根本看不见。按路径重新找一次，找不到就刷一遍再找。
+  const findCell = () =>
+    [...el('grid').children].find((node) => node.dataset && node.dataset.path === entry.path) || null;
+  let target = findCell() || (cell && cell.isConnected ? cell : null);
+  if (!target) {
+    await refreshView();
+    target = findCell();
+  }
+  if (!target || !target.isConnected || target.querySelector('input')) {
+    if (api.popupRenameState) api.popupRenameState(false);
     return;
   }
-  if (cell.querySelector('input')) return;
-  // **先把弹窗拿到前台，再挂输入框**：右键菜单是另一个小窗口，菜单关掉后焦点还在它身上；
-  // 顺序反过来（先挂输入框再去抢焦点）时，"窗口刚拿到焦点"这一下会让刚挂上的输入框瞬间失焦，
-  // 而失焦被当成"用户放弃"——改名就这么无声无息地没了。这就是"重命名失效"的真凶。
-  const focused = api.popupFocus ? api.popupFocus().catch(() => false) : Promise.resolve(false);
-  focused.then(() => attachRenameEditor(entry, cell));
+  attachRenameEditor(entry, target);
 }
 
 const RENAME_GRACE_MS = 500;   // 刚打开这几百毫秒里的失焦不算"放弃"（窗口正在做前后台切换）
@@ -421,21 +445,30 @@ function attachRenameEditor(entry, cell) {
   nameEl.replaceWith(editor);
   const openedAt = Date.now();
   let settled = false;
+  const release = () => { if (api.popupRenameState) api.popupRenameState(false); };
   const finish = async (commit) => {
     if (settled) return;
     settled = true;
     const value = editor.value.trim();
-    if (commit && value && value !== entry.name) {
-      const result = await api.renameItem(view.basketId, entry.path, value);
-      await reloadHome();   // 成败都先把格子刷新；render 会用"N 项"盖掉状态行，提示要放在重画之后
-      if (result && result.ok) {
-        setStatus('已改名为 ' + baseName(result.path));
+    try {
+      if (commit && value && value !== entry.name) {
+        const result = await api.renameItem(view.basketId, entry.path, value);
+        // 成败都刷新当前这一层：目录视图没有筐清单，reloadHome() 不会重列目录，
+        // 以前在文件夹里改完名，磁盘改了但画面还画着旧名字（"又变回新建文件夹"）。
+        await refreshView();
+        if (result && result.ok) {
+          setStatus('已改名为 ' + baseName(result.path));
+          return;
+        }
+        // 失败原因要在状态行留久一点（比如"已经有同名的了"），别被 2 秒轮询立刻冲掉
+        setStatus('改名失败：' + ((result && result.error) || '未知原因'), true);
+        statusHoldUntil = Date.now() + 6000;
         return;
       }
-      setStatus('改名失败：' + ((result && result.error) || '未知原因'), true);
-      return;
+      await refreshView();   // 取消：把格子画回去
+    } finally {
+      release();
     }
-    await reloadHome();   // 取消：把格子画回去
   };
   editor.addEventListener('keydown', (event) => {
     // 输入框里的事件不再往下传（全局快捷键不该在改名时触发）
@@ -446,13 +479,17 @@ function attachRenameEditor(entry, cell) {
     else if (event.key === 'Escape') finish(false);
   });
   editor.addEventListener('blur', () => {
-    const elapsed = Date.now() - openedAt;
+    if (settled) return;
     // 刚打开这一下：窗口正在前后台切换，不是用户放弃——把焦点抢回来，别把改名判死
-    if (!settled && elapsed < RENAME_GRACE_MS) {
+    if (Date.now() - openedAt < RENAME_GRACE_MS) {
       editor.focus();
       return;
     }
-    finish(false);
+    const value = editor.value.trim();
+    // 打了新名字点了别处：按资源管理器习惯算"确认"，不再当成放弃把名字画回去。
+    // 名字没动就**不做任何判定**：输入框留着，用户回来还能接着打；只有 Enter / Esc
+    // 才结束。以前这里一律 finish(false)，窗口焦点一飘就把刚打开的输入框拆了。
+    if (value && value !== entry.name) finish(true);
   });
   editor.focus();
   editor.select();
@@ -678,7 +715,7 @@ el('btnAdd').addEventListener('click', async (event) => {
   if (!picked) return;
   // 菜单是另一个小窗，关掉之后主进程会补挂"失焦就收"——对话框/新建都要几百毫秒，
   // 先把弹窗续住，别让它在事情做完之前被收走
-  await api.popupPresent();
+  await keepPopupOpen();
   if (picked === 'files') await addPickedBasket('files');
   else if (picked === 'dirs') await addPickedBasket('dirs');
   else if (picked === 'newfolder') await createFolder();
@@ -741,6 +778,20 @@ document.addEventListener('keydown', (event) => {
     return;
   }
 
+  // F2 两个视图都给：目录视图里的条目同样能改名（与右键菜单一致）
+  if (event.key === 'F2') {
+    event.preventDefault();
+    const list = selectedEntries();
+    if (list.length !== 1) {
+      setStatus('先选中一个要改名的条目', true);
+      return;
+    }
+    const index = currentEntries().findIndex((entry) => entry.path === list[0].path);
+    const cell = el('grid').children[index];
+    if (cell) startRename(list[0], cell);
+    return;
+  }
+
   if (!view || view.kind !== 'basket') return;
   const mod = event.ctrlKey || event.metaKey;
   if (mod && (event.key === 'c' || event.key === 'C')) {
@@ -756,16 +807,6 @@ document.addEventListener('keydown', (event) => {
   } else if (event.key === 'Delete') {
     event.preventDefault();
     trashSelection();
-  } else if (event.key === 'F2') {
-    event.preventDefault();
-    const list = selectedEntries();
-    if (list.length !== 1) {
-      setStatus('先选中一个要改名的条目', true);
-      return;
-    }
-    const index = currentEntries().findIndex((entry) => entry.path === list[0].path);
-    const cell = el('grid').children[index];
-    if (cell) startRename(list[0], cell);
   }
 });
 
@@ -1309,7 +1350,7 @@ el('grid').addEventListener('contextmenu', (event) => {
     { key: 'refresh', label: '刷新' }
   ], event).then(async (picked) => {
     if (!picked) return;
-    await api.popupPresent();   // 同上：菜单关掉后别让弹窗被"失焦就收"抢在前面
+    await keepPopupOpen();   // 同上：菜单关掉后别让弹窗被"失焦就收"抢在前面
     if (picked === 'newfolder') await createFolder();
     else if (picked === 'refresh') await refreshView();
   });
@@ -1317,7 +1358,7 @@ el('grid').addEventListener('contextmenu', (event) => {
 
 // 点击弹窗本身保持主进程的聚焦状态（失焦自动关的定时器会被取消）
 document.addEventListener('mousedown', () => {
-  api.popupPresent();
+  keepPopupOpen();
 });
 
 // ---------------------------------------------------------------- 拖角调尺寸（#3）
