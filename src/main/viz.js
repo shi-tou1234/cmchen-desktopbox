@@ -22,6 +22,7 @@ const fs = require('node:fs');
 const { app, desktopCapturer, ipcMain } = require('electron');
 const dockmodel = require('./dockmodel');
 const windowLayer = require('./windowLayer');
+const windowFrame = require('./windowFrame');
 
 // 宽度档位；实际还会被屏幕宽度夹住。高度 = 柱区 + 倒影区。
 const VIZ_WIDTH_PRESETS = { narrow: 680, medium: 960, wide: 1240 };
@@ -133,6 +134,17 @@ function createVizController(deps) {
     const spot = vizGeometry();
     const win = winFactory.createVizWindow({ ...spot, title: `${appName} 律动` });
     vizWindow = win;
+    // 与 Dock 同一套透明保护（见 main.js 的 createDockWindow）：明确清掉系统材质、
+    // 重申全透明底色。Windows 11 会给透明窗补一层默认表面，不清掉的话静音时
+    // 屏幕上就是"一圈边框里什么都没有"。
+    try {
+      if (process.platform === 'win32') win.setBackgroundMaterial('none');
+      win.setBackgroundColor('#00000000');
+    } catch (_) {
+      /* 个别平台/旧版本没有这些 API：窗口本来就是 transparent，不影响功能 */
+    }
+    // 同一圈 DWM 边框：画布静音时全空，屏幕上只剩这一圈线（真机报障），趁 show 之前关掉
+    windowFrame.clearBorder(win, vizLog);
     // 鼠标穿透：压在桌面之上也不能吃掉任何点击，否则就挡住了用户操作
     win.setIgnoreMouseEvents(true);
     attachDiagnostics(win, 'viz');
@@ -174,7 +186,23 @@ function createVizController(deps) {
     if (!win || win.isDestroyed() || win.__vizPlaced) return;
     win.__vizPlaced = true;
     win.showInactive();
+    // 与 showDockWhenReady 同样的校验：调用成功不等于真的可见，落空就补一次 show()
+    if (typeof win.isVisible === 'function' && !win.isVisible()) {
+      try { win.show(); } catch (_) { /* 已销毁：忽略 */ }
+    }
     vizLog(`draw show visible=${win.isVisible()} bounds=${JSON.stringify(win.getBounds())}`);
+    // 与 Dock 同一套"表面刷新"：show 之后 DWM 可能还在用旧的合成缓存，窗口矩形里留一层
+    // 淡淡的底色（页面没画），鼠标一碰才消失。压到桌面层之后再补，免得放置过程又把它盖回去。
+    setTimeout(() => {
+      if (win.isDestroyed() || !win.isVisible()) return;
+      try { win.invalidateShadow(); } catch (_) { /* 个别平台没有：忽略 */ }
+      try { win.webContents.sendInputEvent({ type: 'mouseMove', x: 2, y: 2 }); } catch (_) { /* 正在销毁 */ }
+      try {
+        win.setOpacity(0.99);
+        setTimeout(() => { try { if (!win.isDestroyed()) win.setOpacity(1); } catch (_) { /* 已销毁 */ } }, 40);
+      } catch (_) { /* 平台不支持：忽略 */ }
+      windowFrame.clearBorder(win, vizLog);
+    }, 150);
     windowLayer
       .placeOnDesktopLayer(win)
       .then((result) => {

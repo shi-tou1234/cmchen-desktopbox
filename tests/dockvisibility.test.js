@@ -207,3 +207,18 @@ test('窗口图标的实际路径存在于应用打包资源清单', () => {
   const manifest = require('../package.json');
   assert.ok(manifest.build.files.includes(path.relative(path.join(__dirname, '..'), icon).replaceAll('\\', '/')));
 });
+
+test('透明小窗（律动绘制窗 / 抓取窗）关掉原生厚边框并清除系统材质', () => {
+  // 1.7.1 给 Dock 补了「thickFrame:false + 清材质 + 重申底色」，律动窗当时漏了：
+  // transparent 窗口保留 WS_THICKFRAME 时，静音全空画布上只剩一圈原生边框。
+  // 这条用例防的就是"下次再漏一个窗口"。
+  const source = fs.readFileSync(path.join(__dirname, '../src/main/windows.js'), 'utf8');
+  const draw = source.slice(source.indexOf('function createVizWindow('), source.indexOf('function createVizCaptureWindow('));
+  assert.match(draw, /thickFrame: false/);
+  const capture = source.slice(source.indexOf('function createVizCaptureWindow('), source.indexOf('function createRenameWindow('));
+  assert.match(capture, /thickFrame: false/);
+
+  const vizMain = fs.readFileSync(path.join(__dirname, '../src/main/viz.js'), 'utf8');
+  assert.match(vizMain, /setBackgroundMaterial\('none'\)/);
+  assert.match(vizMain, /setBackgroundColor\('#00000000'\)/);
+});

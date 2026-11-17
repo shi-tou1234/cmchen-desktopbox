@@ -41,6 +41,7 @@ const recyclebin = require('./recyclebin');
 const specials = require('./specials');
 const windowLayer = require('./windowLayer');
 const zorder = require('./zorder');
+const windowFrame = require('./windowFrame');
 const winFactory = require('./windows');
 const { prepareDockStartup, showDockWhenReady } = require('./dockStartup');
 const organize = require('./organize');
@@ -310,6 +311,23 @@ function attachDiagnostics(win, tag) {
     }
   });
   win.once('ready-to-show', () => console.log(`[${tag}] 已就绪`));
+}
+
+// Dock 的诊断日志：打包后的程序没有 stdout，「开机后 Dock 不显示」这类问题以前只能靠猜。
+// 首帧门禁走了哪条路、看门狗看到什么，全部落盘到 %APPDATA%\DeskBasket\dock.log
+// （与 viz.log 同一套路，上限 128KB，超了清空重写）。
+function dockLog(text) {
+  try {
+    const file = path.join(app.getPath('userData'), 'dock.log');
+    try {
+      if (fs.statSync(file).size > 128 * 1024) fs.writeFileSync(file, '');
+    } catch (_) {
+      /* 还没有日志文件 */
+    }
+    fs.appendFileSync(file, `${new Date().toTimeString().slice(0, 8)} ${text}\n`);
+  } catch (_) {
+    /* 写日志失败不影响功能 */
+  }
 }
 
 // 状态载荷（PE-7）：broadcastState 与 state:get 共用一份字段。
@@ -1962,6 +1980,47 @@ function placeDockOnDesktopLayer(win) {
     .catch(() => {});
 }
 
+// 首次显示后补一次「表面刷新」。
+//
+// 真机现象：Dock 出来了，但窗口矩形里留着一块淡淡的半透明底（页面自己没画任何底色），
+// 鼠标一靠近图标就消失——那一下真实鼠标消息让 Chromium 提交了新表面，DWM 才把旧的
+// 合成缓存换掉。首帧门禁保证了"内容已画好"，但没保证 DWM 真的换了表面。
+// 这里在 show 之后补齐三件事：让 DWM 重算窗口外观、走一次真实的重绘提交、重申 DWM
+// 边框属性（部分驱动在窗口 show 时会把它重置回默认值）。
+const DOCK_SURFACE_NUDGE_MS = 120;
+let dockSurfaceTimer = null;
+
+function nudgeDockSurface(win) {
+  if (!win || win.isDestroyed()) return;
+  if (dockSurfaceTimer) clearTimeout(dockSurfaceTimer);
+  dockSurfaceTimer = setTimeout(() => {
+    dockSurfaceTimer = null;
+    if (!win || win.isDestroyed() || !win.isVisible()) return;
+    // ① 让 DWM 重算窗口外观（边框/阴影层）
+    try { win.invalidateShadow(); } catch (_) { /* 个别平台没有：忽略 */ }
+    // ② 走一次真实的重绘提交：鼠标移到左上角空白处（那里没有条目，不会触发放大）
+    try { win.webContents.sendInputEvent({ type: 'mouseMove', x: 2, y: 2 }); } catch (_) { /* 正在销毁 */ }
+    // ③ 抖一下图层 alpha：透明窗口是 layered window，改一次不透明度会让系统重建 alpha 层，
+    //    残留的旧表面跟着被替换——真机上"鼠标一靠近图标就消失"走的正是同一条重建路径
+    try {
+      win.setOpacity(0.99);
+      setTimeout(() => { try { if (!win.isDestroyed()) win.setOpacity(1); } catch (_) { /* 已销毁 */ } }, 40);
+    } catch (_) { /* 平台不支持：忽略 */ }
+    // ④ show 时部分驱动会把底色和 DWM 边框属性重置回默认值，都再重申一次
+    try { win.setBackgroundColor('#00000000'); } catch (_) { /* 忽略 */ }
+    windowFrame.clearBorder(win, dockLog);
+    dockLog('surface nudge');
+  }, DOCK_SURFACE_NUDGE_MS);
+  if (typeof dockSurfaceTimer.unref === 'function') dockSurfaceTimer.unref();
+}
+
+// 所有显示入口共用：先过首帧门禁，再补表面刷新（四条路径：启动 / F9 / 退出专注 / 看门狗）
+function showDockWindow(win) {
+  if (!showDockWhenReady(win)) return false;
+  nudgeDockSurface(win);
+  return true;
+}
+
 function createDockWindow() {
   // 自动收起模式下直接建在屏幕外；如果鼠标本来就在底边附近，下一次 tick 会把它滑出来
   const autoHide = settings.dock_auto_hide;
@@ -1987,19 +2046,50 @@ function createDockWindow() {
   // 明确清除系统材质，并在首次显示前重申透明背景；不靠改设置/等天气触发后续重绘。
   if (process.platform === 'win32') win.setBackgroundMaterial('none');
   win.setBackgroundColor('#00000000');
+  // Win11 会沿窗口外沿描一圈 DWM 边框（透明窗口照样描，thickFrame:false 管不到它）。
+  // 趁窗口还没 show 先把属性关掉，真机截图里那圈"透明边框"就是它，见 windowFrame.js。
+  windowFrame.clearBorder(win, dockLog);
   prepareDockStartup(win, ipcMain, () => {
     // 默认整窗穿透：Dock 的空白处（尤其是顶上那条放大余量）不该吃掉桌面上的点击。
     // 指针压到条目上时页面会把鼠标要回来，见「Dock 鼠标穿透」那节。
     if (dockWindow === win) setDockClickThrough(true);
-    if (!focusActive && !dockManuallyHidden) showDockWhenReady(win);
+    if (!focusActive && !dockManuallyHidden) showDockWindow(win);
     // 常驻模式的「桌面层下沉」已停用（见 applyDockLayerMode 里的说明：
     // 外部 SetWindowPos 走链会让 Electron 的置顶/窗口树账本失同步，peek 两个 bug 的总根源）
-  });
+  }, { log: dockLog });
   winFactory.loadPage(win, 'dock.html');
   win.on('closed', () => {
     if (dockWindow === win) dockWindow = null;
   });
   return win;
+}
+
+// 启动看门狗（一次性，不常驻轮询）：首帧门禁已经带了超时兜底，但"放了行却没真显示"
+// 在冷启动里确实出现过——DWM 忽略 showInactive、或开机自启的壁纸/小组件窗口压在
+// 常驻 Dock（普通非置顶窗口）上面。开机后只查一次：窗口不在就重建，在但不可见就
+// 重申一次显示与 z 序，两个分支都写 dock.log，下次开机直接看日志就能定性。
+const DOCK_STARTUP_WATCH_MS = 4000;
+
+function armDockStartupWatchdog(delay = DOCK_STARTUP_WATCH_MS) {
+  const timer = setTimeout(() => {
+    if (!settings.dock_enabled || focusActive || dockManuallyHidden) {
+      dockLog('watchdog skip（关闭/专注/手动隐藏）');
+      return;
+    }
+    if (!dockWindow || dockWindow.isDestroyed()) {
+      dockLog('watchdog dock 窗口不存在 → 重建');
+      syncDock();
+      return;
+    }
+    const visible = dockWindow.isVisible();
+    dockLog(`watchdog visible=${visible} paintReady=${dockWindow.__dockPaintReady} reason=${dockWindow.__dockReadyReason || '-'}`);
+    if (visible) return;
+    showDockWindow(dockWindow);
+    try { dockWindow.moveTop(); } catch (_) { /* 个别平台没有：忽略 */ }
+    dockLog(`watchdog 重申显示后 visible=${dockWindow.isVisible()}`);
+  }, delay);
+  if (typeof timer.unref === 'function') timer.unref();
+  return timer;
 }
 
 // 把若干路径加进 Dock：重复的跳过，并从"移除过"的黑名单里解封（拖入、设置面板勾选、
@@ -2171,7 +2261,7 @@ function toggleDockByHotkey() {
     dockManuallyHidden = !dockManuallyHidden;
     if (dockWindow && !dockWindow.isDestroyed()) {
       if (dockManuallyHidden) { dockWindow.hide(); closeFolderPopup('热键收起'); hideWeatherCard(); }
-      else { showDockWhenReady(dockWindow); setDockTopmost(false); }
+      else { showDockWindow(dockWindow); setDockTopmost(false); }
     }
     return;
   }
@@ -2243,7 +2333,7 @@ function updateFocusMode() {
     if (dockWindow && !dockWindow.isDestroyed()) dockWindow.hide();
   } else {
     syncDock();
-    if (!dockManuallyHidden) showDockWhenReady(dockWindow);
+    if (!dockManuallyHidden) showDockWindow(dockWindow);
     applyDockLayerMode();
   }
   viz.applySetting();
@@ -4473,6 +4563,8 @@ function bootstrap() {
     .catch((error) => console.log(`[basket] 老条目归位失败：${basketfiles.errorText(error)}`));
   if (settings.autostart) autostart.sync(true);
   if (wantsSettingsWindow()) openSettings();
+  // 开机自启这条路最容易出"窗口建了但没真显示"，4 秒后自查一次（见 armDockStartupWatchdog）
+  armDockStartupWatchdog();
 }
 
 const singleInstance = app.requestSingleInstanceLock();
@@ -4482,7 +4574,7 @@ if (!singleInstance) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (!focusActive && !dockManuallyHidden) showDockWhenReady(dockWindow);
+    if (!focusActive && !dockManuallyHidden) showDockWindow(dockWindow);
   });
 
   app.whenReady().then(() => {

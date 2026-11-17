@@ -248,6 +248,9 @@ function createPopupWindow(options = {}) {
 //   · resizable:false / movable:false——位置大小由主进程按设置摆，页面不需要拖。
 // 用 glassOptions(false)（完全透明），不走系统材质——频谱要的是「浮在桌面壁纸上的一层光」，
 // 拿磨砂去糊背后的窗口反而脏。
+// **thickFrame:false 不能省**：transparent 窗口保留 WS_THICKFRAME 时，DWM 会沿窗口矩形
+// 描一圈原生边框——画布静音时是全空的，屏幕上就只剩那一圈"透明边框"（真机报障就是这个，
+// Dock 在 1.7.1 已经踩过并关掉了它，这里当时漏了）。
 function createVizWindow(options = {}) {
   const { width = 960, height = 130, x, y, title = 'DeskBasket 律动' } = options;
   const win = new BrowserWindow({
@@ -256,6 +259,7 @@ function createVizWindow(options = {}) {
     ...(Number.isInteger(x) ? { x } : {}),
     ...(Number.isInteger(y) ? { y } : {}),
     frame: false,
+    thickFrame: false,
     show: false,
     hasShadow: false,
     resizable: false,
@@ -298,6 +302,7 @@ function createVizCaptureWindow(options = {}) {
     ...(Number.isInteger(x) ? { x } : {}),
     ...(Number.isInteger(y) ? { y } : {}),
     frame: false,
+    thickFrame: false,   // 同上：透明小面板不要原生厚边框，否则面板四周会多一圈描边
     show: false,
     hasShadow: false,
     resizable: false,
